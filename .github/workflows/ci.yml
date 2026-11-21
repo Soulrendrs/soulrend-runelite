@@ -1,0 +1,44 @@
+name: RuneLite plugin checks
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plugin-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  isolation:
+    name: Config, source isolation and license
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check independent identity and no Anvil settings / endpoints
+        run: python3 scripts/check_isolation.py
+
+  gradle:
+    name: Java compile and unit tests
+    needs: isolation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Java 11 target compatibility
+        run: |
+          grep -q "sourceCompatibility = '11'" build.gradle
+          grep -q "targetCompatibility = '11'" build.gradle
+      - name: Compile and run test suite
+        run: ./gradlew --no-daemon --stacktrace clean test build

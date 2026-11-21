@@ -1,0 +1,96 @@
+package com.soulrend;
+
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+import org.junit.Test;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+
+/**
+ * Naming a drop's source, and reading the server's facts about it.
+ */
+public class DropSourceTest
+{
+	private static PluginConfigResponse.DropFacts facts()
+	{
+		PluginConfigResponse.DropFacts f = new PluginConfigResponse.DropFacts();
+		f.pets = new HashMap<>();
+		return f;
+	}
+
+	private static PluginConfigResponse.DropFacts.Pet pet(String kind, String... sources)
+	{
+		PluginConfigResponse.DropFacts.Pet p = new PluginConfigResponse.DropFacts.Pet();
+		p.kind = kind;
+		p.sources = Arrays.asList(sources);
+		return p;
+	}
+
+	// ---- pets -------------------------------------------------------------------------------
+
+	@Test
+	public void aPetComesFromItsOwnBossNotFromWhateverDroppedLootLast()
+	{
+		PluginConfigResponse.DropFacts f = facts();
+		f.pets.put("baby mole", pet("npc", "Giant Mole"));
+		// The client had just seen loot from something else entirely — a stray kill on the way out.
+		assertEquals("Giant Mole", DropSource.resolvePetSource(f, "Baby mole", "Hill Giant", null));
+		// And with nothing observed at all, which is the skilling-adjacent case.
+		assertEquals("Giant Mole", DropSource.resolvePetSource(f, "Baby mole", null, null));
+	}
+
+	@Test
+	public void whatTheClientSawWinsWhenItIsOneOfTheRealSources()
+	{
+		PluginConfigResponse.DropFacts f = facts();
+		f.pets.put("vet'ion jr.", pet("npc", "Calvar'ion", "Vet'ion"));
+		assertEquals("Vet'ion", DropSource.resolvePetSource(f, "Vet'ion jr.", "vet'ion", null));
+		assertEquals("Calvar'ion", DropSource.resolvePetSource(f, "Vet'ion jr.", "Calvar'ion", null));
+	}
+
+	@Test
+	public void severalSourcesAndNoSightingFallBackToWhereTheyActuallyGrind()
+	{
+		PluginConfigResponse.DropFacts f = facts();
+		f.pets.put("vet'ion jr.", pet("npc", "Calvar'ion", "Vet'ion"));
+		Map<String, Integer> kc = new HashMap<>();
+		kc.put("calvar'ion", 12);
+		kc.put("vet'ion", 940);
+		assertEquals("Vet'ion", DropSource.resolvePetSource(f, "Vet'ion jr.", null, kc));
+		// No kills recorded anywhere: the first listed source beats naming nothing.
+		assertEquals("Calvar'ion", DropSource.resolvePetSource(f, "Vet'ion jr.", null, null));
+	}
+
+	@Test
+	public void aSkillingPetHasNoMonsterAndDoesNotBorrowOne()
+	{
+		PluginConfigResponse.DropFacts f = facts();
+		f.pets.put("beaver", pet("skill"));
+		// Whatever loot the client saw, a Beaver did not come from it.
+		assertNull(DropSource.resolvePetSource(f, "Beaver", "Hill Giant", null));
+	}
+
+	@Test
+	public void anUnknownPetKeepsWhateverTheClientSaw()
+	{
+		// A pet released after the site's last dataset regen: the old guess is still the best there
+		// is, so nothing gets worse while the server catches up.
+		assertEquals("New Boss", DropSource.resolvePetSource(facts(), "Newpet", "New Boss", null));
+		assertEquals("New Boss", DropSource.resolvePetSource(null, "Newpet", "New Boss", null));
+	}
+
+	@Test
+	public void wikiVariantNamesMatchTheBareInGameName()
+	{
+		assertEquals("Armoured zombie", DropSource.inGameNpcName("Armoured zombie (Zemouregal's Fort)"));
+		assertEquals("TzKal-Zuk", DropSource.inGameNpcName("TzKal-Zuk"));
+		java.util.List<String> npcs = java.util.Collections.singletonList("Armoured zombie (Zemouregal's Fort)");
+		assertTrue(DropSource.sourceMatches(npcs, "Armoured zombie"));
+		assertFalse(DropSource.sourceMatches(npcs, "Zombie"));
+		assertFalse(DropSource.sourceMatches(npcs, null));
+	}
+}

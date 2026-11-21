@@ -1,0 +1,10848 @@
+package com.soulrend;
+
+import static com.soulrend.ChatPalette.Tone.WARN;
+import static java.util.Locale.ROOT;
+import static com.soulrend.ChatPatterns.find;
+import static com.soulrend.BingoApiClient.capped;
+import static net.runelite.api.ChatMessageType.*;
+import static java.util.Collections.*;
+import static javax.swing.SwingUtilities.invokeLater;
+import com.soulrend.SoulrendMoments.Moment;
+import com.soulrend.ChatPalette.Tone;
+import lombok.*;
+import com.soulrend.BingoApiClient.*;
+import com.soulrend.PendingSubmissionStore.PendingSubmission;
+import com.soulrend.PluginConfigResponse.*;
+import com.soulrend.SoulrendSidebarDataSource.AccountRow;
+import com.google.gson.*;
+import com.google.inject.Provides;
+import lombok.extern.slf4j.Slf4j;
+import net.runelite.api.*;
+import net.runelite.api.clan.*;
+import net.runelite.api.coords.WorldPoint;
+import net.runelite.api.events.*;
+import net.runelite.api.gameval.*;
+import net.runelite.api.gameval.ItemID;
+import net.runelite.api.gameval.InventoryID;
+import net.runelite.api.widgets.JavaScriptCallback;
+import net.runelite.api.widgets.Widget;
+import net.runelite.api.widgets.WidgetType;
+import net.runelite.client.callback.ClientThread;
+import net.runelite.client.config.ConfigManager;
+import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.events.*;
+import net.runelite.client.game.*;
+import net.runelite.client.plugins.*;
+import net.runelite.client.plugins.loottracker.LootReceived;
+import net.runelite.api.widgets.WidgetUtil;
+import net.runelite.http.api.loottracker.LootRecordType;
+import net.runelite.client.ui.*;
+import net.runelite.client.ui.overlay.OverlayManager;
+import net.runelite.client.util.*;
+
+import javax.imageio.ImageIO;
+import javax.inject.*;
+import javax.swing.SwingUtilities;
+
+import java.awt.*;
+import java.awt.image.BufferedImage;
+import java.io.*;
+import java.time.*;
+import java.util.*;
+import java.util.stream.Collectors;
+import java.util.List;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.*;
+import java.util.regex.*;
+import java.util.concurrent.locks.ReentrantLock;
+import net.runelite.api.clan.ClanMember;
+
+@Slf4j
+@PluginDescriptor(
+		name = "Soulrend Bingo",
+		description = "Soulrend Bingo companion (development build; site integration pending)",
+		tags = {"soulrend", "bingo", "overlay", "drops", "loot", "clan", "event"},
+		// Required by getPluginDirectory(), which throws without it — the directory is named after it.
+		internalName = "soulrend-bingo"
+)
+
+public class SoulrendPlugin extends Plugin {
+
+	@Inject
+	Client client;
+
+	@Inject
+	ClientThread clientThread;
+
+	@Inject
+	ChatIconManager chatIconManager;
+
+	@Inject
+	net.runelite.client.input.KeyManager keyManager;
+
+	@Inject
+	net.runelite.client.game.chatbox.ChatboxPanelManager chatboxPanelManager;
+
+	@Inject
+	SoulrendConfig config;
+
+	@Inject
+	OverlayManager overlayManager;
+
+	@Inject
+	net.runelite.client.ui.overlay.tooltip.TooltipManager tooltipManager;
+
+	/** Hover a Supporter's name in the chatbox: their tier (ChatFlairTooltip). */
+	ChatFlairTooltip chatFlairTooltip;
+
+	// Always-on progress sidebar — a toolbar PluginPanel showing per-clan tile progress. Reads
+	// through SoulrendSidebarDataSource (see provideSidebarDataSource).
+	@Inject
+	ClientToolbar clientToolbar;
+
+	@Inject
+	SoulrendSidebarPanel sidebarPanel;
+
+	NavigationButton sidebarNavButton;
+
+	@Inject
+	SoulrendOverlay overlay;
+
+	@Inject
+	BingoClogBannerOverlay clogBanner;
+	@Inject
+	TileTracker tileTracker;
+	/** The site's live channel; while it's up, the timed polls only back it up (PUSH_FALLBACK_MS). */
+	PushSocket pushSocket;
+	// Every table a config reads (tiles, teams, events, seats, submissions, completions) pushes on
+	// change, and a (re)connect sends the team's view at once — so this is only a long safety net.
+	static final long PUSH_FALLBACK_MS = 600_000L;
+	@Inject
+	StartSpotMarker startSpotMarker;
+	@Inject
+	StartProofOverlay startProofOverlay;
+
+	@Inject
+	BannerSoundService bannerSound;
+
+	// One-shot guard so the "no banner clips yet" nudge prints at most once per session.
+	boolean bannerSoundHintShown;
+
+	@Inject
+	DrawManager drawManager;
+
+	@Inject
+	ConfigManager configManager;
+
+	@Inject
+	BingoApiClient apiClient;
+
+	@Inject
+	ItemManager itemManager;
+
+	@Inject
+	WorldService worldService;
+
+	@Inject
+	PendingSubmissionStore pendingSubmissionStore;
+
+	@Inject
+	Gson gson;
+
+	// RuneLite's client-lifetime scheduler: still running after shutDown has stopped ours, so the
+	// last save of unsent pushes has somewhere to happen off the calling thread.
+	@Inject
+	ScheduledExecutorService sharedExecutor;
+
+	// ── OUTAGE RESILIENCE ─────────────────────────────────────────────────────────────────────
+	// Failed clan notifications wait in NotifyOutbox; unsent KC/XP/activity and moments are saved per
+	// character in PushStash across a logout or restart. Both live under <plugin dir>/outbox/.
+	volatile NotifyOutbox notifyOutbox;
+	volatile PushStash pushStash;
+	/** The last config poll failed to reach the site (down, slow, 5xx) — the next success is a recovery. */
+	volatile boolean siteUnreachable;
+	/** The board and team a pushed view last made us refetch the config for (applyPush). */
+	volatile String seatRefetchedFor;
+
+	@Inject
+	ProfileLookup profileLookup;
+
+	// The last thing we landed a hit on, and when.
+	volatile String lastCombatTarget;
+	volatile long lastCombatTargetAt;
+	// Who is attacking US, which is a different question from what we are attacking and the only one
+	// a death should be answered with. See DeathAttribution.
+	final DeathAttribution deathAttribution = new DeathAttribution();
+
+	ScheduledExecutorService executor;
+	// The startup retries and the 30s loop, cancelled explicitly on shutdown.
+	final List<ScheduledFuture<?>> loopTasks = new ArrayList<>();
+
+	// The in-game Clan Coffer is an absolute coin stack. The tracker converts widget reads into a
+	// baseline or signed transition; the server owns cross-client dedupe and the audited ledger.
+	final ClanCofferTracker clanCofferTracker = new ClanCofferTracker();
+	final ModeLines modeLines = new ModeLines();
+	boolean clanCofferOpen;
+	int clanCofferOpenTicks;
+
+	// Debounce config refresh — prevents spam when multiple config keys change at once
+	ScheduledFuture<?> pendingRefresh;
+	// REFRESH_DEBOUNCE_MS = 1000, inlined at its one use.
+
+	@Getter
+	volatile PluginConfigResponse pluginConfig;
+
+	// ── SAVED ANSWERS (ResponseDiskCache) ─────────────────────────────────────────────────────
+	// The last session's config, read off disk at startUp so the side panel draws at once
+	// instead of "Loading…" for a full round trip. FOR DISPLAY ONLY: `pluginConfig` above — the one
+	// tracking, submissions, overlays and every gate read — stays null until the site itself answers,
+	// so an event that ended (or a team that changed) since last time can never be tracked off this.
+	// The first live answer, of any kind, retires it.
+	volatile ResponseDiskCache responseCache;
+	volatile PluginConfigResponse savedConfig;
+	/** The site has answered a config poll this session (a body, a 304, or a definite 4xx). */
+	volatile boolean liveConfigAnswered;
+	/** Last successful config read; lets an open sidebar tighten freshness without duplicating polls. */
+
+	// STARTING SHOT (site lib/startProof). `startProofFiled` latches the moment one is accepted by
+	// the server so the button/nudge go away immediately instead of waiting on the next config poll;
+	// `startProofInFlight` keeps an impatient double-click from filing two. Both reset on logout,
+	// since the next login may be a different account with a different obligation.
+	volatile boolean startProofFiled;
+	volatile boolean startProofInFlight;
+	// When this session filed its shot, so the on-screen card can say "you're tracked" before leaving.
+	volatile long startProofFiledAt;
+	/** One nudge per login — a reminder that repeats every poll is just noise. */
+	volatile boolean startProofNudged;
+	/** One "this credit is being held" line per login — see {@link #warnStartProofBeforeCredit()}. */
+	volatile boolean startProofCreditWarned;
+	/**
+	 * When THIS game session began, for the starting shot's session window (see StartProofRules).
+	 * {@link StartProofRules#UNKNOWN_LOGIN} means we didn't see the login that started it — the
+	 * plugin was enabled mid-session, or the client reconnected — and the rule treats not knowing
+	 * exactly like a stale session: log out and back in, and then we do know.
+	 *
+	 * <p>Stamped on the login-screen → in-game transition only. A world hop keeps the older stamp,
+	 * because a hop is not the logout that flushes the hiscores.
+	 */
+	volatile long sessionLoginAtMs = StartProofRules.UNKNOWN_LOGIN;
+	/** Account progress (quest points, CAs, diaries) as the site last accepted it — see AccountProgress. */
+	final Map<String, Integer> lastSentProgress = new LinkedHashMap<>();
+	/** Finished-quest count behind the list the site last accepted — the list is re-sent when it moves. */
+	volatile Integer lastSentQuestCount;
+	/** CA points behind the task list the site last accepted — the list is re-read when it moves. */
+	volatile Integer lastSentCaPoints;
+	/** The in-game clan row the site last accepted ("name|rank|title|joined", or "" for none) — see pushGameClan. */
+	volatile String lastSentGameClan;
+	/** Consecutive checks that found no clan settings. Two in a row means no clan, not "still loading". */
+	int gameClanMissingChecks;
+	/** After a refused push, wait before asking again — an unlinked character would otherwise try every 30s. */
+	volatile long gameClanRetryAt;
+	/** Set while the client is coming back from the login screen, so a hop can't be mistaken for it. */
+	volatile boolean freshLoginPending;
+
+	// Item ID → tracked drops lookup for O(1) loot matching
+	/** The site's rule table, run locally (RuleEngine); the site matches the facts. */
+	final RuleEngine rules = new RuleEngine();
+	{
+		rules.floor = this::optimisticFloor; // event rules build on our own unconfirmed counts
+	}
+	/** moveNotifyPrefs ran (or is running) this session. */
+	volatile boolean notifyPrefsMoved;
+	/** Facts that need no screenshot, posted together a moment after the first. */
+	final JsonArray factQueue = new JsonArray();
+	/** Facts handed to a send that hasn't answered yet. Under the factQueue monitor. */
+	final JsonArray factsSending = new JsonArray();
+	CoopFingerprint factQueueCoop;
+	ScheduledFuture<?> factQueueFlush;
+	/** Facts a screenshot is being taken for, not yet credited (one dual-frame proof per burst). */
+	final JsonArray factBurst = new JsonArray();
+	CoopFingerprint factBurstCoop;
+	volatile BufferedImage factBurstFrame;
+	ScheduledFuture<?> factBurstFlush, factBurstCredit;
+	/** The burst's proof: its credits' keys, the facts still to credit; on disk once the frames are in. */
+	PendingSubmission burst;
+
+	// Item IDs whose drop ALWAYS posts to the rare-drop channel regardless of value/rarity. The server
+	// resolves pluginConfig.alwaysNotifyItems (names) to ids so matching is by ID — not a fragile name
+	// compare — the same way bingo drop tiles match. Matters most for untradeable prestige items (a ToA
+	// Cursed phalanx has no GE value to gate on). Rebuilt with the drop index; complements the name allowlist.
+	volatile Set<Integer> notableItemIds = emptySet();
+
+	// Dedup window for NpcLootReceived + LootReceived firing on the same kill — track last
+	// event per (tileId, itemId) and ignore repeats within the window. Note this is
+	// separate from the coalesce window below: dedup catches duplicate fire events;
+	// coalesce batches genuine repeated drops within a short window into one upload.
+	final Map<String, Long> lastSubmittedAt = new HashMap<>();
+	static final long DEDUP_WINDOW_MS = 3_000;
+
+	// Item ids credited by a REAL loot event (raid chest / NPC drop), with the time last seen. The
+	// collection-log-unlock credit path (creditClogUnlock) skips these so a raid-chest item that
+	// already credited via its loot event can't ALSO credit when its "New item added to your
+	// collection log" line fires on pickup — same acquisition, but the two can land far more than the
+	// 3s loot dedup apart (open the chest, take the items later), which double-counted a CoX unique.
+	final Map<Integer, Long> recentLootItemIds = new HashMap<>();
+	// The reverse order: a chat line credited first (a raid's unique at raid end), the chest's loot later.
+	final ChatCredits chatCredits = new ChatCredits();
+	static final long CLOG_LOOT_DEDUP_MS = 5 * 60_000;
+
+	// PvP-kill attribution — when a hitsplat we dealt lands on a player, remember it. If that
+	// player then dies within the window, we count it as our kill (avoids screenshotting random
+	// nearby deaths). Keyed by lowercased player name. Pruned on each kill check.
+	final Map<String, Long> lastDamagedPlayerAt = new HashMap<>();
+	static final long PVP_KILL_ATTRIBUTION_MS = 6_000;
+
+	// PvP min-loot tiles credit off the LOOT (priced at PlayerLootReceived), not the death — so a
+	// kill on a matching victim is parked here at death and consumed when its loot arrives and prices
+	// at/above the tile's floor. Keyed by lowercased victim RSN. Loot-key / no-loot kills never fire
+	// PlayerLootReceived, so their entry just expires and the min-loot tile isn't credited (intended).
+	final Map<String, Long> pendingMinLootKillAt = new HashMap<>();
+	static final long PVP_MINLOOT_LOOT_WINDOW_MS = 20_000;
+
+	// Rare-drop notification dedup — NpcLootReceived + LootReceived fire for the same NPC kill, so
+	// suppress a repeat post of the same item within a short window. Keyed by itemId.
+	final Map<Integer, Long> lastRareNotifyAt = new HashMap<>();
+	// Aggregate-loot dedup keyed by source name (same NPC kill fires NpcLootReceived + LootReceived).
+	final Map<String, Long> lastAggregateNotifyAt = new HashMap<>();
+	static final long RARE_DEDUP_WINDOW_MS = 5_000;
+	static final String DROP_SHOT = "soulrend-drop.png";
+
+	/**
+	 * Fixed text the plugin ships with — the prestige allowlist and the quest tiers — loaded from soulrend_text.json at startUp, which says what each list is for.
+	 */
+	static final class ShippedText {
+
+		List<String> alwaysNotify = emptyList();
+		Map<String, String> questTiers = emptyMap();
+	}
+
+	ShippedText text = new ShippedText();
+
+	// A drop this rare (or this valuable) earns a spoon reaction line.
+
+
+	// Name-keyed dedup so a prestige item isn't posted twice when both the loot event and the
+	// collection-log unlock message fire for it.
+	final Map<String, Long> lastAllowlistNotifyAt = new HashMap<>();
+
+	// Kill/clear count per source, scraped from "Your <X> kill count is: N" (and the raid
+	// "Your completed <X> count is: N") chat lines, so a rare-drop post can show the KC it
+	// landed on. Chat + loot events both run on the client thread, so no synchronisation needed.
+	final Map<String, Integer> killCounts = new HashMap<>();
+
+	/**
+	 * The "Soulrend" button in the collection log header.
+	 *
+	 * Built in startUp rather than here: `client` arrives by injection, so a field initialiser would
+	 * capture null. Enabled on the same condition the sidebar's Sync profile is — a site and a token
+	 * — because a button that can only produce "you are not signed in" is worse than no button.
+	 */
+	HeaderButton clogSyncButton;
+
+	/**
+	 * The "Soulrend" button in the CLAN window's header, beside other plugins' buttons.
+	 *
+	 * Gated on the same three things the sidebar's Sync-roster button is: a configured site, site
+	 * admin in the clan being addressed, and a readable clan channel. The admin answer is per clan
+	 * and dropped on a switch (see forgetAdminAnswerOnClanChange), so this cannot linger into a clan
+	 * where pressing it could only collect a 403.
+	 */
+	HeaderButton clanSyncButton;
+	/**
+	 * The most recent "Your X kill count is: N" line, and when it landed.
+	 *
+	 * A collection-log unlock names the ITEM and nothing else, so on its own the server can't say
+	 * which kill produced it — and it was left inferring the count from the hiscores snapshot, which
+	 * only flushes on logout. That is how an Ancestral bottom taken on the 80th Chambers landed in
+	 * the log as "at 79 KC" while the Discord post, reading this map, said 80.
+	 *
+	 * The kill line always precedes the loot, so the last one seen is the kill the unlock came from.
+	 */
+	String lastKcName;
+	int lastKcValue;
+	long lastKcAtMs;
+	/** How recent that line has to be for an unlock to be attributed to it. */
+	static final long KC_ATTRIBUTION_WINDOW_MS = 60_000L;
+	// The counter word varies by activity ("kill", "completion" for the Gauntlet, "chest" for
+	// Barrows, "success" for Zalcano, "harvest" for Herbiboar, "lap" for agility courses, and
+	// "Total Ticket" for the Brimhaven Agility Arena) and Wintertodt prefixes "subdued" — all must
+	// be kept OUT of the captured boss name or it never matches a stat rule.
+	// Package-private for KillCountLineTest.
+	// → chat-patterns.json "kc.count" (ChatPatterns).
+	// The Doom of Mokhaiotl has no "Your <X> kill count is" line either. Its hiscores count is deep
+	// delves (delve 9+) completed, which the game announces after each one as
+	//   "Deep delves completed: 893"
+	// Package-private for KillCountLineTest.
+	// → chat-patterns.json "kc.deep_delves" (ChatPatterns).
+	static final String DOOM_BOSS_NAME = "Doom of Mokhaiotl";
+	// A successful pickpocket: "You pick the man's pocket." The game's loot tracker reports the pocket
+	// as NPC loot in the same tick, so ServerNpcLoot can't tell it from a kill without this line.
+	// Same pattern and same-tick rule RuneLite's own loot tracker uses. Package-private for the test.
+	// → chat-patterns.json "pickpocket" (ChatPatterns).
+	// The Hallowed Sepulchre announces itself in its OWN shape, not the "Your <X> count is: N"
+	// one — so agility tiles targeting it need these two lines instead. Both carry a running
+	// total we deliberately ignore: like every other chat-driven tile, one line == one credit,
+	// so a player who has already looted 4,000 coffins starts an event on zero.
+	//
+	//   "You have completed Floor 3 of the Hallowed Sepulchre! Total completions: 1,234."
+	// Fires once per floor cleared, so a full 1→5 run emits five of these.
+	// → chat-patterns.json "sepulchre.floor" (ChatPatterns).
+	//   "You have opened the Grand Hallowed Coffin 42 times!" ("1 time!" in the singular)
+	// The floor-5 coffin — the only signal that means a COMPLETE run rather than a floor.
+	// → chat-patterns.json "sepulchre.coffin" (ChatPatterns).
+	// Target names these lines credit, matched against tiles' targetNpcs like any NPC name. The
+	// floor line credits BOTH its own floor and the any-floor name, so "complete 20 floors" and
+	// "clear floor 5 ten times" are both authorable; creditSepulchre dedups so a tile listing both
+	// still counts one.
+	// SEPULCHRE_ANY = "Hallowed Sepulchre", inlined at its one use.
+	// SEPULCHRE_COFFIN = "Grand Hallowed Coffin", inlined at its one use.
+
+	// Two more activities that keep a count but announce it in their own shape. Both fire on the
+	// ACTION (note the singular forms — "one offering", "1 rumour" — which a query-style report
+	// would have no reason to carry), so like every other chat-driven tile: one line, one credit.
+	//
+	//   "You have completed 42 rumours for the Hunter Guild."
+	// → chat-patterns.json "counter.hunter_rumour" (ChatPatterns).
+	//   "You have made 7 offerings." / "You have made one offering."
+	// Bird's eggs offered at the Woodcutting Guild shrine. The line never names the activity, so
+	// this is the one counter here that would misfire if another piece of content ever printed the
+	// same sentence — kept because nothing else does today, but that's the risk if it ever breaks.
+	// → chat-patterns.json "counter.egg_offering" (ChatPatterns).
+	// ("Doom of Mokhaiotl delves" is a game-value counter now — the per-level completion varps, site
+	// lib/gameCounters — so the "Delve level: N duration:" line, chat-patterns.json "counter.doom_delve",
+	// stays parsed but credits nothing: counting both would double every delve.)
+	// HUNTER_RUMOURS = "Hunter Rumours", inlined at its one use.
+	// EGG_OFFERINGS = "Bird's egg offerings", inlined at its one use.
+
+	// Flag on a credit from a signal nobody has checked in game yet (site INFERRED_FLAGS): it counts,
+	// and staff see a "check" badge. Every unconfirmed game-value counter carries it.
+
+	// Slayer tasks, Doom delves, Tithe/Foundry points, Wintertodt rewards: read off varbits/varps
+	// (GameValueCounters, catalog on the site — lib/gameCounters). The names below are the chat-line
+	// counters, credited here.
+	//
+	// GOTR reward searches: one per "You found some loot:" inside the GOTR region (14484, as
+	// RuneLite's LootTrackerPlugin gates it) — under OUR name, so a "Guardians of the Rift" kill tile
+	// (the KC) never takes a search.
+	// GOTR_REGION = 14484, inlined at its one use.
+	static final String GOTR_SEARCHES = "Guardians of the Rift searches";
+	// "Elemental energy attuned: 1. Catalytic energy attuned: 2." at the end of a GOTR game — the
+	// reward points earned that game (chat-patterns.json "counter.gotr_energy"); amount = N.
+	static final String GOTR_ELEMENTAL = "GOTR elemental energy";
+	static final String GOTR_CATALYTIC = "GOTR catalytic energy";
+	static final String GOTR_ENERGY_TOTAL = "GOTR total energy";
+	// "You rummage through the offerings..." — one Vale Totems research point, five for the bulk
+	// "...five times" line (chat-patterns.json "counter.vale_offerings").
+	static final String VALE_RESEARCH = "Vale research points";
+	// "As you complete the golem it leaves a gift on the ground for you:" — one per sunstone golem
+	// (chat-patterns.json "counter.sunstone_golem"). The "You have crafted X golems on Wyrmscraig."
+	// tally is deliberately NOT read, so a golem counts once.
+	static final String SUNSTONE_GOLEMS = "Sunstone golems crafted";
+	// No trailing "(...)" in any counter name: the kill index drops a trailing parenthetical as a wiki
+	// qualifier (DropSource.inGameNpcName).
+
+	// Last time the loot path (NpcLootReceived) credited a kill for a given NPC name, so the chat
+	// handler can tell whether the very first KC message of the session is for a kill the loot path
+	// already counted (event ordering isn't guaranteed) and avoid double-counting that one kill.
+	final Map<String, Long> lastLootKillAt = new HashMap<>();
+	// KILL_DEDUP_MS = 6000, inlined at its one use.
+
+	// ServerNpcLoot is RuneLite's server-authoritative NPC-loot event: it fires once per ACTUAL kill, so it
+	// counts barraged/clumped kills correctly, where the client-side NpcLootReceived under-fires (several
+	// NPCs despawning the same tick get missed/merged by its ground-item inference) — e.g. a slayer task the
+	// game says was 200 but the tile logged fewer. Once we've seen ServerNpcLoot it's the source of truth for
+	// per-kill counting (kill + value tiles); NpcLootReceived stays a fallback for clients that never emit it.
+	volatile boolean serverNpcLootSeen;
+	// Before the first ServerNpcLoot of a session the fallback below counts the kill — and that first
+	// kill's own ServerNpcLoot can land a tick or two LATER, counting it again (one gorilla, two KC).
+	// The fallback remembers what it credited so the server event can recognise it as the same kill.
+	String fallbackKillName;
+	int fallbackKillTick = -1;
+	// FALLBACK_KILL_TICKS = 2, inlined at its one use.
+	/** Client tick of the last "You pick the X's pocket" line; ServerNpcLoot in that tick is a pocket. */
+	int pickpocketTick = -1;
+
+	// Collection-log unlock chat line, e.g. "New item added to your collection log: Infernal cape".
+	// → chat-patterns.json "clog.unlock".
+	// The clan's version of the same event: "hyperi0n received a new collection log item: Lost bag
+	// (356/1717)". The personal line above only prints when the player has the in-game collection-log
+	// notification switched on, so for anyone who doesn't, this is the only sighting the plugin gets.
+	// The count tail is optional because it is a clan setting, and the name is captured lazily so an
+	// item with a bracket in it survives. Package-private for ClogUnlockLineTest.
+	// → chat-patterns.json "clog.clan_broadcast" (ChatPatterns).
+	// The clan's pet broadcast, which — unlike the player's own pet line — names it, and lands in the
+	// same tick: "Biggie OG has a funny feeling like he's being followed: Dom at 519 levels from Doom
+	// of Mokhaiotl." Also the duplicate ("would have been followed") and backpack variants, and the
+	// Unsired's ("feels like she's acquired something special: Abyssal orphan"). Only the
+	// name is taken: where it came from is the pet catalogue's to answer (DropSource.resolvePetSource).
+	// Package-private for the pattern test.
+	static final Pattern CLAN_PET_BROADCAST_PATTERN = Pattern.compile(
+			"^(.{1,20}?) (?:has a funny feeling like (?:he's|she's|they're|he|she|they) (?:being|would have been) followed"
+					+ "|feels something weird sneaking into (?:his|her|their) backpack"
+					+ "|feels like (?:he's|she's|they've|he has|she has|they have) acquired something special)"
+					+ ": (.+?)(?: at ([\\d,]+) (?:completions|killcount|kill count)\\b.*| at [\\d,]+ .*)?\\.?$");
+
+	// Server drop-attribution line, e.g. "Nisbro received a drop: Elder venator fang (Maggot King)".
+	// Fired for drops handed out through channels that produce NO loot event — Maggot King's
+	// pre-roll uniques spill out beside a corpse that never despawns. Greedy item group so an
+	// item name containing parentheses keeps them; the LAST parenthetical is the source. The
+	// recipient group is length-bounded (RSNs are ≤12 chars; "You" also fits) so the clan-chat
+	// broadcast variant ("... (50,000,000 coins) from Maggot King.") can never contort into a
+	// match. Package-private for DropNotificationLineTest.
+	// → chat-patterns.json "drop.personal" (ChatPatterns).
+
+	// CLAN broadcast variant of the drop-attribution line, e.g. "Nisbro received a drop:
+	// Elder venator fang (50,000,000 coins) from Maggot King." — a fallback signal for the
+	// same spill-out drops. Parsed ONLY when the recipient is the local player, so exactly
+	// one clan member's plugin acts on it (no duplicate posts) — and unlike the personal
+	// line above it doesn't depend on each member's in-game loot-notification setting, only
+	// on the clan's broadcast threshold. The "(N coins) from" tail is anchored so item names
+	// containing parentheses stay intact. Package-private for DropNotificationLineTest.
+	// → chat-patterns.json "drop.clan_broadcast" (ChatPatterns).
+
+	// Chat channels whose TEXT a player authors. The drop-attribution parsing accepts every
+	// OTHER channel — the personal line's exact ChatMessageType is unverified in the wild
+	// (it renders recolored, and guessing an allowlist wrong silently eats 50m drops), so a
+	// denylist is the safe shape: server-sent lines always parse, and the channels a player
+	// could type "X received a drop: …" into (spoofing a credit onto X's client — the
+	// recipient check alone can't catch that) never do.
+	static final Set<ChatMessageType> PLAYER_AUTHORED_CHAT = EnumSet.of(
+			PUBLICCHAT,
+			MODCHAT,
+			AUTOTYPER,
+			MODAUTOTYPER,
+			PRIVATECHAT,
+			MODPRIVATECHAT,
+			PRIVATECHATOUT,
+			FRIENDSCHAT,
+			CLAN_CHAT,
+			CLAN_GUEST_CHAT,
+			CLAN_GIM_CHAT);
+	// The channels the game's own lines arrive on — everything below the drop/clog block parses only these.
+	static final Set<ChatMessageType> PARSED_CHAT = EnumSet.of(GAMEMESSAGE,
+			SPAM, MESBOX, FRIENDSCHATNOTIFICATION);
+
+	// Completions that award a guaranteed item straight to the inventory — no loot event ever
+	// fires, and the collection-log line only fires on the FIRST-ever award, so repeat capes
+	// would need manual submission. The Jagex kill-count chat line fires on every completion,
+	// making it the repeat-safe credit signal. Keyed by the KC-line boss name (lowercase) →
+	// awarded item name. Sol Heredit is deliberately absent: repeat quivers arrive via the
+	// Fortis Colosseum reward chest, which fires LootReceived and is already drop-tracked —
+	// crediting the KC line too would double-count (the chest is claimed after the kill,
+	// outside the dedup window).
+	static final Map<String, String> GUARANTEED_AWARDS = Map.of(
+			"tzkal-zuk", "Infernal cape",
+			"tztok-jad", "Fire cape");
+
+	// Chat styling, in BOTH the forms the game uses. RuneLite's <col=…> / <img=…> markup is the
+	// familiar one; the other is Jagex's older @tag@ colour codes (@red@, @dre@ …), which now
+	// include named ones the game puts inline with the text — a Combat Achievement line arrives as
+	// "…combat task: @ach_comp@Phantom Muspah Speed-Chaser." Stripping only the angle-bracket form
+	// left that code glued to the front of the task name, so it reached the tile matcher, the
+	// Discord title and the wiki link it builds. Neither form is ever content.
+	//
+	// Deliberately narrow: a code is short and alphanumeric, so an @ in ordinary text needs a
+	// second one close behind it to be touched at all — and none of the lines parsed here (kill
+	// counts, personal bests, diaries, quests, collection-log unlocks) can carry an @ in a name.
+	// Package-visible for ChatTagStripTest.
+	static final Pattern CHAT_TAG = Pattern.compile(
+			"<[^>]*>|@[A-Za-z0-9_]{1,20}@");
+
+	// Compiled once: these run per chat line, per XP drop and per LMS tick.
+	static final Pattern MARKUP_TAG = Pattern.compile("<[^>]*>");
+	static final Pattern NON_DIGIT = Pattern.compile("[^0-9]");
+
+	/** A chat line with its styling removed, ready to parse. Null-safe: an absent line is "". */
+	static String stripChatTags(String msg) {
+		return msg == null ? "" : CHAT_TAG.matcher(msg).replaceAll("");
+	}
+
+	// Combat achievement task completion, e.g.
+	// "Congratulations, you've completed an Elite combat task: Whack-a-Mole."
+	// Package-visible for CombatTaskLineTest — CA bingo-tile crediting keys off this line.
+	// → chat-patterns.json "ca.task" (ChatPatterns).
+	// Trailing " (5 points)" appended when the in-game recompletion setting is on.
+	static final Pattern CA_TASK_POINTS = Pattern.compile(
+			"\\s*\\(\\d+ points?\\)$");
+	// Skill level-up, e.g. "Congratulations, you just advanced your Mining level. You are now
+	// level 99." Fires exactly once per level gained, so no dedup/baseline needed (unlike CA).
+	// Accepts the modern "your" and the older "a/an" phrasing.
+	// "Congratulations, you've just advanced your Cooking level. You are now level 99."
+	//
+	// The apostrophe is the whole story. This read "you just advanced" — which the game has never
+	// printed — so the chat fallback matched nothing, ever. It went unnoticed because the test beside
+	// it asserted the same invented sentence: written from the same memory as the pattern, so it
+	// agreed with the bug rather than with the game. The test now uses the real line.
+	// → chat-patterns.json "level.up" (ChatPatterns).
+
+	// Achievement-diary tier completion, e.g. "Congratulations! You have completed all of the
+	// easy tasks in the Ardougne area." Fires exactly once per account per tier, at the moment
+	// the final task is done — so it can't re-trigger for tiers finished before an event.
+	// → chat-patterns.json "diary.complete" (ChatPatterns).
+	// The diary completion line is emitted on more than one chat channel, so onChatMessage sees it
+	// twice; dedup by (area|tier) so we announce + credit once. The line never legitimately
+	// re-fires (once per account per tier), so this only needs to span the same-tick echo.
+	// DIARY_DEDUP_MS = 15_000, inlined at its one use.
+	final Map<String, Long> lastDiaryHandledAt = new HashMap<>();
+
+	// Quest completions come off the quest scroll (InterfaceID.QUESTSCROLL), whose QUEST_TITLE is
+	// the "You have completed <Quest>!" line. Same signal RuneLite's screenshot plugin keys off.
+	// Session dedup — the scroll widget can reload (resizing, lag) without a new completion.
+	final Set<String> announcedQuests = new LinkedHashSet<>();
+
+	// Quest-name extraction, ported from RuneLite's ScreenshotPlugin (BSD-2) — the scroll text
+	// varies: "You have completed The Corsair Curse!", "'One Small Favour' completed!",
+	// "Congratulations! You have defeated the Culinaromancer!" (RFD subquests), and the
+	// "kind of"/"completely" phrasings of Hazeel Cult and Rag and Bone Man.
+	static final Pattern QUEST_PATTERN_1 = Pattern.compile(
+			".+?ve\\.*? (?<verb>been|rebuilt|.+?ed)? ?(?:the )?'?(?<quest>.+?)'?(?: [Qq]uest)?[!.]?$");
+	static final Pattern QUEST_PATTERN_2 = Pattern.compile(
+			"'?(?<quest>.+?)'?(?: [Qq]uest)? (?<verb>[a-z]\\w+?ed)?(?: f.*?)?[!.]?$");
+	static final List<String> RFD_TAGS = List.of("Another Cook", "freed", "defeated", "saved");
+	static final List<String> WORD_QUEST_IN_NAME_TAGS = List.of(
+			"Another Cook", "Doric", "Heroes", "Legends", "Observatory", "Olaf", "Waterfall");
+
+	// Parsed CA completions waiting one tick so the points varbit has settled before we read them.
+	// A queue (not a single slot): one kill can complete several CA tasks in the same tick — the
+	// game prints a message per task and we must post every one, not just the last.
+	final List<PendingCaTask> pendingCaTasks = new ArrayList<>();
+	// Task names already announced this session. Dedups recompletions (the in-game "repeat
+	// completion" message) by NAME — which also lets multiple completions in one tick all post,
+	// unlike the old points-delta guard that saw a single rise per tick and dropped the rest.
+	final Set<String> notifiedCaTasks = new LinkedHashSet<>();
+	// Slots announced moments ago, so the personal line and the clan broadcast — which can both
+	// arrive for the same unlock — post it once. Item names, lowercased, to when; cleared per account.
+	// A window, not the session: several slots share a name (Decorative armour in each colour).
+	final Map<String, Long> recentClogUnlocks = new HashMap<>();
+	// CLOG_UNLOCK_SAME_MS = 15_000, inlined at its one use.
+	// One nudge per session about the in-game "Repeat completion" CA setting.
+	boolean caRepeatNudgeSent;
+	// One nudge per session about the in-game loot drop notifications (rare-drop post dependency).
+	boolean lootNotifyNudgeSent;
+	// One per login: the in-game collection-log notification is off, so unlocks arrive only if the
+	// clan happens to broadcast them.
+	boolean clogNotifyNudgeSent;
+	// Once-per-session tracking-suppression notices, so a member's client.log answers "why did
+	// nothing track" without a line per suppressed loot event. Keyed by reason; reset at login.
+	final Set<String> loggedSuppressions = new LinkedHashSet<>();
+	// Last logged tracking summary — config refreshes every ~30s, so the summary only logs when
+	// the tracking state actually changed (event, tile counts, completions).
+	String lastTrackingFingerprint;
+	// Last-known total CA points, baselined at login; used only for tier-clear detection now.
+	int lastCaPoints = -1;
+	boolean caPointsInitialized;
+
+	@RequiredArgsConstructor
+	static final class PendingCaTask {
+
+		final CombatAchievementTier tier;
+		final String task;
+
+	}
+	// Last-known total level, baselined at login so we only announce genuine crossings (not the
+	// total we logged in with). Total only ever rises on a skill level-up, so we check it there.
+	int lastTotalLevel = -1;
+	boolean totalLevelInitialized;
+	// Per-skill real level, so a milestone is detected off the stat event — independent of the in-game
+	// "Level-up interface" setting, which decides whether the chat line even carries the level number.
+	// announcedLevel (highest level posted or already held, per lowercased skill) dedups a level
+	// arriving from both StatChanged and the chat line.
+	//
+	// Seeded from the live stat table (seedSkillLevels), NOT from whichever XP drop happens to arrive
+	// first. See that method for what the lazy version cost.
+	final Map<Skill, Integer> lastSkillLevel = new EnumMap<>(Skill.class);
+	// Last real-world XP seen per skill, so the "Active now" self-signal fires only on an actual gain —
+	// NOT on the burst of StatChanged RuneLite emits for every skill on login/resync (which otherwise
+	// mislabels every tracked skill tile as "You"). The first sighting per skill just seeds the baseline.
+	final Map<Skill, Integer> lastSkillXp = new EnumMap<>(Skill.class);
+	final Map<String, Integer> announcedLevel = new HashMap<>();
+	// True from the login screen until the game has sent this account's stat table. Until then the
+	// client's levels are placeholders (every skill 1, total 24-ish) and the login burst of StatChanged
+	// is the table ARRIVING, not anyone levelling — so nothing announces and nothing is baselined off
+	// it. Without this, the seed taken at LOGGED_IN read those placeholders and every existing 99
+	// "happened" again on the welcome screen (2026-10-12, a maxed-ish account posted 99 after 99).
+	boolean statsUnsettled;
+	/** The separate-save / preset world flags the stat baseline was taken on (onWorldChanged); null = unknown. */
+	Set<WorldType> statsRealm;
+	int statsSettleTicks;
+	// Quiet ticks (no stat update) after login before the table counts as arrived. Counted from the
+	// LAST update, not from login: a client switching accounts (legacy logins, several on one RuneLite)
+	// still holds the previous account's real-looking table, so "hitpoints looks loaded" alone would
+	// seed the alt's levels if the new burst landed a tick late.
+	// STATS_SETTLE_TICKS = 3, inlined at its one use.
+
+	// A settled burst of screenshot-worthy facts goes this long after its first: two game ticks, enough for
+	// the "moments later" frame to show the floor loot (already down when the loot event fires) and to
+	// fold the facts of one kill into one proof.
+	// COALESCE_FLUSH_MS = 1_200, inlined at its one use.
+	// The credit goes first, image-less, this soon (one event's facts together); the screenshot follows.
+	// CREDIT_COALESCE_MS = 150, inlined at its one use.
+	// Past this since its credit, a screenshot that still can't go up is given up on: the site has reversed it.
+	// PROOF_GIVE_UP_MS = 90_000, inlined at its one use.
+
+	// ---- Kill-count tiles ----------------------------------------------------------------
+	// Lowercased NPC name -> the kill tiles that count it. Rebuilt on each config refresh.
+	// Counters read off varbits/varps (site lib/gameCounters); client thread only.
+	final GameValueCounters gameValueCounters = new GameValueCounters();
+
+
+
+	// Keyed on tileId — coalesces a kill spree into one screenshot + one submission.
+
+
+
+	// Counts this client has seen move but the site hasn't confirmed yet, so the sidebar and pinned
+	// tiles move on the kill rather than on the poll after the push lands (see OptimisticProgress).
+	final OptimisticProgress optimistic = new OptimisticProgress();
+	// The last absolute KC seen this session per boss — what a KC line is a delta against.
+	final Map<String, Integer> lastSeenKc = new ConcurrentHashMap<>();
+	// Debounce buffer: in-game boss name (as seen in chat) → latest ABSOLUTE kill count. Absolute
+	// counts are idempotent, so a kill streak collapses to a single push of the newest value.
+	final CoalescedPush kcPush = new CoalescedPush("KC", KC_PUSH_COALESCE_MS, false,
+			() -> executor, () -> statPushAllowed(), b -> apiClient.submitStatKc(b), () -> refreshConfig());
+	// KC ticks per kill; wait out a streak before pushing. Even a long window beats hiscores' ~1h.
+	static final long KC_PUSH_COALESCE_MS = 15_000;
+	// ── Recap "fun stat" counters (deaths + total loot GP) for the active event. Cosmetic only (feeds the
+	// end-of-event superlatives — never scoring). Held per-event and PERSISTED to the config store so a
+	// client restart mid-event keeps counting instead of resetting to zero; switching events resets both.
+	// Pushed as ABSOLUTE totals, debounced like KC, and max-merged server-side (idempotent).
+	final Object counterLock = new Object();
+	boolean countersLoaded;
+	int counterEventId;
+	int eventDeaths;
+	long eventLootGp;
+	int eventPvpKills;
+	/** Hardest single hitsplat we've landed this event — "Heavy Hitter". */
+	int eventBiggestHit;
+	/** Minutes logged in during the event. Turns every other counter into a rate. */
+	int eventMinutes;
+	/** Combat tasks FIRST completed during the event — "Task Master". Recompletions never count. */
+	int eventCaTasks;
+	/** Ticks counted since the last whole minute was banked; 100 ticks ≈ 60s. */
+	int eventTickAccumulator;
+	ScheduledFuture<?> counterPushTask;
+	final Map<String, Long> lastLootValueAt = new HashMap<>();
+	// Item ids (by lowercased name) and the source from the last loot event, so a collection-log
+	// unlock line — which carries only text — can still draw the right sprite and name where it came
+	// from. Expired against CLOG_LOOT_DEDUP_MS; guarded by its own monitor.
+	final Map<String, RecentItem> recentLootIds = new HashMap<>();
+	String lastLootSource;
+	// Which rarity table the last loot came from ("npc" / "pickpocket" / …). Kept alongside the
+	// source name so a pet post can price its own drop rate — Rocky is a pickpocketing roll and a
+	// Baby mole an NPC one, and asking the wrong service returns nothing rather than a wrong number.
+	String lastLootSourceKind;
+	long lastLootSourceAt;
+	static final long COUNTER_PUSH_COALESCE_MS = 15_000;
+	// ── Highlight feed (SoulrendMoments). Pets, uniques, big hauls and deaths, queued as they happen and
+	// pushed in small batches; the SITE decides which competition week or board each one belongs to
+	// and throws away the rest. Cosmetic only — never scoring. Recorded at the event and never inside
+	// a notification gate, so a member with the drops channel off still lands on the clan's feed.
+	final SoulrendMoments moments = new SoulrendMoments();
+	ScheduledFuture<?> momentPushTask;
+	/** Failed moment pushes in a row; the retry wait doubles from MOMENT_PUSH_COALESCE_MS to 5 minutes. Guarded by `moments`. */
+	int momentFailures;
+	/** Long enough for a kill's two loot events (and a pet's chat lines) to settle into one entry. */
+	static final long MOMENT_PUSH_COALESCE_MS = 8_000;
+	/**
+	 * How stale the "what were we fighting" note may be and still name a killer.
+	 *
+	 * <p>Generous enough to cover a death you spent a few seconds losing, tight enough that the boss
+	 * you killed a minute ago doesn't get the credit for a Wilderness PKer.
+	 */
+	static final long DEATH_ATTRIBUTION_MS = 30_000;
+	/** Game ticks in a minute (600ms each). */
+	static final int TICKS_PER_MINUTE = 100;
+	/** Play time pushes on a slow cadence — the number only ever climbs by one. */
+	static final int MINUTES_PER_PLAYTIME_PUSH = 10;
+	// Bumped whenever a shipped default changes in a way existing installs should adopt. RuneLite
+	// persists every setting the moment a plugin first runs, so a new default alone reaches nobody
+	// who has already used the plugin — the migration below is what actually moves them.
+	static final String CFG_DEFAULTS_VERSION = "configDefaultsVersion";
+	// 2: the notify settings moved to the site (moveNotifyPrefs).
+	static final int CURRENT_DEFAULTS_VERSION = 2;
+
+	// Vestige-rotation counts, per RSN ("boss=rolls:exact;…"). Per-account because the cycle is
+	// account state; a shared config key would smear an alt's rolls into the main's.
+	static final String CFG_VESTIGE_ROLLS = "vestigeRolls";
+	/** The member's clan pick from the sidebar dropdown. "" (or absent) = Auto, let the site decide. */
+	static final String CFG_ACTIVE_CLAN = "activeClan";
+
+	/** How many times a never-configured install has been told where to sign in. See SetupNudge. */
+	static final String CFG_FIRST_RUN_NUDGES = "firstRunNudges";
+
+	/** Characters marked "Not my account" on this install (AccountOptOut digests). */
+	static final String CFG_OPTED_OUT_ACCOUNTS = "optedOutAccounts";
+	/** Characters this install has already said "tracking X for your Soulrend account" about, once. */
+	static final String CFG_ANNOUNCED_ACCOUNTS = "announcedAccounts";
+
+	// The Account Token names whoever set this RuneLite up, not whoever is playing. Every character
+	// links by default; these two are the way out for a sibling or a visitor (see AccountOptOut).
+	volatile AccountOptOut optedOutAccounts = AccountOptOut.EMPTY;
+	volatile AccountOptOut announcedAccounts = AccountOptOut.EMPTY;
+	/** One account action at a time from the panel; a double click is one request. */
+	volatile boolean accountActionRunning;
+
+	static final String CFG_COUNTER_EVENT = "recapCounterEventId";
+	static final String CFG_COUNTER_DEATHS = "recapCounterDeaths";
+	static final String CFG_COUNTER_LOOTGP = "recapCounterLootGp";
+	static final String CFG_COUNTER_PVP = "recapCounterPvpKills";
+	static final String CFG_COUNTER_BIGHIT = "recapCounterBiggestHit";
+	static final String CFG_COUNTER_MINUTES = "recapCounterMinutes";
+	static final String CFG_COUNTER_CATASKS = "recapCounterCaTasks";
+
+	// ── Profile sync (collection log + personal bests) ──────────────────────────────────────
+	// Both are per-ACCOUNT facts, so their state keys carry the RSN the same way vestige rolls do —
+	// an alt's log must never be filed as the main's. What's stored is only what the server has
+	// already accepted, so a restart resumes instead of re-sending a log that hasn't moved.
+	static final String CFG_CLOG_STATE = "clogSyncState";
+	static final String CFG_PB_STATE = "pbSyncState";
+	/** Fingerprint of the last whole log we pushed, per RSN — so a relog doesn't re-send 1,700 items. */
+	static final String CFG_CLOG_FINGERPRINT = "clogFingerprint";
+	static final String CFG_PB_IMPORTED = "pbImportedFromRuneLite";
+	/** RuneLite's own chat-commands store, read once to seed a profile (see importRuneLitePersonalBests). */
+	static final String RUNELITE_PB_GROUP = "personalbest";
+	/** Exact team sizes RuneLite files raids under ("chambers of xeric 3 players"). */
+	static final int MAX_PB_TEAM_SIZE = 24;
+	/** Large teams are recorded as a RANGE, not a count — the buckets the raid chat itself prints. */
+	static final String[] PB_TEAM_BUCKETS = {
+		"5+ players", "10+ players", "11-15 players", "16-23 players", "24+ players",
+		"25+ players", "50+ players", "100+ players",
+	};
+	/** Last automatic roster push, so a channel reload storm can't fire a request per event. */
+	long lastAutoRosterSyncAt;
+	/** Guard against a second automatic push overlapping the first. */
+	volatile boolean autoRosterSyncRunning;
+	/** Same, for the sidebar button — a double click should be one push, not two. */
+	volatile boolean panelRosterSyncRunning;
+	/**
+	 * The next roster push was started by the plugin, not a person, so it reports itself ONLY if the
+	 * roster actually moved. Silence on a login where nothing changed; a line when someone joined,
+	 * left or was renamed, because that is news whether or not you asked for it.
+	 */
+	volatile boolean autoRosterAnnounce;
+	/**
+	 * Has an automatic sync already reported itself this login?
+	 *
+	 * <p>The first one of a session always speaks, even to say nothing moved: that line is how you
+	 * know the plugin is talking to your site at all, and its absence is what made a working sync
+	 * look broken. Every one after it speaks only for news — a "nothing changed" every world hop, or
+	 * every time the collection log is opened, is the noise the silence was protecting against.
+	 */
+	volatile boolean autoRosterReportedThisLogin;
+	volatile boolean autoClogReportedThisLogin;
+	static final long AUTO_ROSTER_MIN_GAP_MS = 30 * 60 * 1000;
+	/**
+	 * When another roster push is allowed.
+	 *
+	 * <p>A roster push rewrites every member row on the site, and the button is right there in two
+	 * places — so it was one impatient double-click away from doing that twice, and nothing but the
+	 * in-flight guard stood between a bored admin and a push per second. The collection log has had
+	 * this cooldown since the site started refusing them; the roster deserves the same manners.
+	 */
+	volatile long rosterPushAllowedAt;
+	static final long ROSTER_PUSH_COOLDOWN_MS = 60_000L;
+	/** Doubling wait after a push that failed for a reason that might clear (site down, no network). */
+	final SyncBackoff rosterBackoff = new SyncBackoff();
+	/** The clan list lands a moment after the channel does; give it time rather than racing it. */
+	static final long AUTO_ROSTER_DELAY_MS = 5_000;
+	final ClogSync clogSync = new ClogSync();
+	/** Whole-log sync: the accumulator for a server transmit (see ClogFullSync). */
+	final ClogFullSync clogFullSync = new ClogFullSync();
+	/** True from asking for a transmit until it has settled, so the re-init we fire can't re-trigger it. */
+	volatile boolean clogTransmitInFlight;
+	/** Game tick the transmit was asked for — the guard is held relative to this. */
+	volatile int clogTransmitTick;
+	/** Wall clock of the last request, for the cooldown that backstops the guard. */
+	volatile long lastClogTransmitAt;
+	/** The player pressed "Sync profile" — the next log open pushes even if nothing has changed. */
+	volatile boolean clogSyncRequested;
+	// A failing push must not become a request every 30 seconds for the rest of the session. One
+	// backoff per path, so a site refusing personal bests doesn't also slow the collection log down.
+	final SyncBackoff clogBackoff = new SyncBackoff();
+	final SyncBackoff clogFullBackoff = new SyncBackoff();
+	/** One in-flight immediate flush at a time — game ticks are 600ms and the push is not. */
+	volatile boolean clogFlushQueued;
+	/** Fingerprint of the last log we successfully pushed, so an unchanged one isn't sent again. */
+	volatile long lastClogFingerprint;
+	/** When a button-press sync began, so one that never delivers says so instead of hanging silently. */
+	volatile long manualSyncStartedAt;
+	/**
+	 * When the site will accept another whole-log push. The server allows one a minute per member,
+	 * and a client that fires into that anyway learns nothing and spends somebody's server time —
+	 * so we hold the number it gives us and wait instead of guessing.
+	 */
+	volatile long clogPushAllowedAt;
+	/** The site's limit, used to hold off BEFORE a request rather than after a refusal. */
+	static final long SERVER_CLOG_COOLDOWN_MS = 60_000L;
+	/** How long a pressed sync may take before we admit it didn't work. */
+	// MANUAL_SYNC_TIMEOUT_MS = 15_000L, inlined at its one use.
+	final SyncBackoff pbBackoff = new SyncBackoff();
+	final PersonalBests personalBests = new PersonalBests();
+	/** The account the two above belong to, so a character switch reloads rather than merges. */
+	String profileSyncRsn;
+	// The server allowlist lowercased, rebuilt with the drop index.
+	volatile Set<String> alwaysNotifyLower = emptySet();
+	// Debounce buffer: skill name → latest ABSOLUTE XP. Idempotent like KC, so a training burst
+	// collapses to one push of the newest value. Shares KC_PUSH_COALESCE_MS.
+	final CoalescedPush skillXpPush = new CoalescedPush("Skill XP", KC_PUSH_COALESCE_MS, false,
+			() -> executor, () -> statPushAllowed(), b -> apiClient.submitStatXp(b), () -> refreshConfig());
+	// ---- Real-time activity push (clue tiers, Colosseum glory, collection-log slots) ------------
+	// The site stat keys the event tracks that ActivityStats can actually read; rebuilt each config
+	// refresh, empty unless the event has such tiles.
+	volatile Set<String> trackedActivityKeys = emptySet();
+	// Debounced like KC; only a RISE over what was last sent goes out, so a varbit firing repeatedly
+	// with the same number doesn't re-send.
+	final CoalescedPush activityPush = new CoalescedPush("Activity", KC_PUSH_COALESCE_MS, true,
+			() -> executor, () -> statPushAllowed(), b -> apiClient.submitStatActivities(b), () -> refreshConfig());
+	// Ticks between safety re-reads. The varbit hook is what makes a finished clue land in seconds;
+	// this is the backstop for a counter that moves without one firing (or fires before login
+	// completes), which is cheap enough at one pass a minute to be worth not having to be sure.
+	static final int ACTIVITY_POLL_TICKS = 100;
+	int activityPollCountdown = ACTIVITY_POLL_TICKS;
+	// OSRS lets a player change their name in game, without logging out, so the RSN stamped at login
+	// can go stale mid-session. Every request would then keep reporting the OLD name (with the right
+	// hash), the site would never see the rename, and the next roster sync would split the character
+	// into the dead name and a stranger holding the new one. Re-read it every few ticks.
+	static final int NAME_CHECK_TICKS = 10;
+	int nameCheckCountdown = NAME_CHECK_TICKS;
+	// Last seen HELD quantities (itemId → total across inventory + worn equipment). Null until
+	// the first snapshot after login/config load, so the baseline never counts as a gain. Worn
+	// items are folded in so equipping/unequipping — which just moves an item between the two
+	// containers — nets zero and is never miscounted as a gain (RuneLite fires a separate
+	// ItemContainerChanged for each container on an equip; diffing them independently reads the
+	// unequip as a +1). The diff is coalesced to onGameTick so both containers have settled.
+	Map<Integer, Integer> lastHeldItemCounts;
+	// Item ids worn at the last game tick, so inventory-diff loot can tell an unequip from a reward.
+	Set<Integer> lastWornItemIds = emptySet();
+	// Set when INV or WORN changes; drained on the next onGameTick so equip/unequip (which touches
+	// both containers in one tick) is evaluated once, after both have updated.
+	boolean heldItemsDirty;
+
+	/** Drop the held-item baseline, so the next snapshot re-seeds instead of reading it all as a gain. */
+	void forgetHeldItems() {
+		lastHeldItemCounts = null;
+		heldItemsDirty = false;
+	}
+
+	// LOOTING-BAG CHEST LOOT. RuneLite's loot tracker reads a Larran's chest by diffing the INVENTORY
+	// around the "You have opened Larran's … chest" line, so whatever the game puts straight into an
+	// open looting bag never reaches its LootReceived — and so never reached any tile. We keep the
+	// bag's last known contents and, around that same line, credit what the bag gained. Only ever
+	// the bag's part: the inventory part still comes through RuneLite, so nothing counts twice.
+	// → chat-patterns.json "chest.larran" (ChatPatterns).
+	static final int LOOTING_BAG_WATCH_TICKS = 5;
+	// THE CHEST'S OWN WORD FOR IT. The game only sends the looting bag's contents when the bag is
+	// looked at, so loot the chest drops into a CLOSED bag is invisible to the watch above — a
+	// Dagon'hai robe went uncounted that way. The game does name the item in the same tick ("X received
+	// a drop: Dagon'hai robe bottom", "Valuable drop: …"), so those lines are held, and once the
+	// inventory and bag paths have had their chance, anything neither of them saw is credited to the
+	// chest. Lines are the local player's own (recipient-checked) from server channels only.
+	// → chat-patterns.json "drop.plain" (ChatPatterns).
+	// → chat-patterns.json "drop.valuable" (ChatPatterns).
+	// CHEST_LINE_SETTLE_TICKS = LOOTING_BAG_WATCH_TICKS + 2, inlined at its one use.
+	@RequiredArgsConstructor
+	static final class DropLine {
+		final int tick;
+		final int qty;
+		final String name;
+	}
+
+	/** A held line tied to a chest open: credited at {@code dueTick} unless another path saw the item. */
+	@RequiredArgsConstructor
+	static final class ChestLineCredit {
+		final int dueTick;
+		final String source;
+		final DropLine line;
+		final long openedAtMs;
+	}
+
+	/** Item lines this tick and last, waiting to learn whether a chest opened. */
+	final List<DropLine> recentDropLines = new ArrayList<>();
+	final List<ChestLineCredit> chestLineCredits = new ArrayList<>();
+	// Contents before the most recent bag change, and after it; null = the client hasn't been told.
+	Map<Integer, Integer> lootingBagBefore;
+	Map<Integer, Integer> lootingBagNow;
+	int lootingBagChangedTick = -1;
+	// An armed watch: which chest, the bag as it stood at the chat line, and ticks left.
+	String lootingBagWatchSource;
+	Map<Integer, Integer> lootingBagWatchBase;
+	int lootingBagWatchTicks;
+	// Gathering is a slow trickle (a catch every few seconds): catches are held per tile and sent
+	// together this long after the first, one POST per fishing stint rather than one per catch (the
+	// facts route allows 240 a minute). Not reset by later catches, so a non-stop gather still syncs.
+	static final long GAIN_COALESCE_MS = 30_000;
+	ScheduledFuture<?> gainsFlush;
+	// Ground "Take" guard: picking your own drop back up looks like a gain. Skip crediting
+	// gains that land within a couple of ticks of a Take click.
+	volatile int lastGroundTakeTick = -10;
+	// Telegrab guard: same idea, but the projectile takes several ticks to deliver the
+	// item, so the window is wider.
+	volatile int lastTelegrabTick = -20;
+	// TELEGRAB_GUARD_TICKS = 8, inlined at its one use.
+	// Trade/bank items can land in the inventory on the same tick their interface closes —
+	// remember the close so those gains stay suppressed too.
+	volatile int lastSuppressCloseTick = -10;
+	// Storage guard: emptying a fish barrel / log basket / coal bag / gem bag / herb sack (or taking
+	// out of any item container) puts items in the inventory that were already gathered — and since
+	// "Fill" moves them back, counting it would let the same fish complete a tile forever. Only items
+	// straight from the source count; anything out of storage is a move.
+	volatile int lastStorageMoveTick = -10;
+
+	// ---- Deathless-raid tiles --------------------------------------------------------------
+	// Player deaths (anyone — raid instances are private, so any player is a party member)
+	// observed since the local player last entered an instance. Consulted when a raid
+	// completion line correlates to a deathless tile; reset on every instance entry.
+	int instancePlayerDeaths;
+	boolean wasInInstance;
+	// Distinct players seen in the current instance (party size for tiles that require one).
+	// Raid teams share the entry room, so everyone renders at least once.
+	final Set<String> instancePlayersSeen = new HashSet<>();
+	// Our overlays sit out the frame a proof is captured from (the site stamps the facts instead).
+	static volatile boolean capturing;
+	// Recent non-player chat, raw. Sent with a proof; the SITE decides which lines mean anything.
+	final ArrayDeque<JsonObject> recentChat = new ArrayDeque<>();
+
+	// ---- Timed-clear tiles ---------------------------------------------------------------
+	// Per-tile dedup so one clear isn't submitted twice (the duration + identity lines correlate,
+	// and some content repeats either line). Parsing/matching lives in TimedClearParser (tested).
+	final Map<Integer, Long> lastTimedSubmittedAt = new HashMap<>();
+	static final long TIMED_DEDUP_WINDOW_MS = 20_000;
+
+	// The duration line and the activity-identifying line are separate, adjacent chat messages,
+	// and the order varies (Inferno prints "Duration:" first; most others print the kill/completion
+	// count first). We buffer recent lines + a pending duration so either order resolves.
+	static final long TIMED_CORRELATION_MS = 8_000;
+
+	@RequiredArgsConstructor
+	static class TimedMsg {
+
+		final String lower;
+		final long ts;
+
+	}
+	final ArrayDeque<TimedMsg> recentTimedMessages = new ArrayDeque<>();
+	Integer pendingTimedSeconds;
+	long pendingTimedAt;
+
+	// Table-free attribution: the most recent NPC the player killed. When a "Duration:" line lands,
+	// the boss that just died names the activity, so a timed tile configured with that boss's name
+	// matches automatically — no per-boss string table needed (raids/friendly names also match via
+	// the activity name appearing in chat, plus the small optional alias set in TimedClearParser).
+	volatile String lastNpcDeathName;
+	volatile long lastNpcDeathAt;
+
+	// Exponential backoff for pending proof retries: 30s doubling to 5 minutes, reset by any success
+	// (and by the site coming back). The 30s loop asks every tick; this decides whether to try.
+	final SyncBackoff proofBackoff = new SyncBackoff(30_000L, 300_000L);
+
+	// Hello/membership flow state
+	volatile Boolean knownMember; // null = unknown (signed out, or the site did not say), true = in clanMembers
+	volatile boolean helloSent;
+
+	// Admin-only clan-roster sync. Authenticated by the player's per-user account token
+	// (config.playerToken()) + their site admin role — verified once per login via GET /api/plugin/me
+	// (apiClient.fetchIsAdmin). There is no admin-link-code mechanism. When isAdmin is true the
+	// side panel renders a "Sync clan roster" button.
+	@Getter
+	volatile boolean isAdmin;
+	// One-shot guard so we only probe admin status once per login session.
+	volatile boolean adminProbeAttempted;
+	/**
+	 * The clan the {@link #isAdmin} answer belongs to.
+	 *
+	 * Authority is per clan on the site — being an admin of one confers nothing in another — so the
+	 * answer does not travel with the member when they switch. Without this, picking a clan you do
+	 * not administer keeps the Sync-roster button on screen, and clicking it collects a 403.
+	 */
+	volatile String adminAnswerFor = "";
+	/** When the last probe ran, so a failed one can be retried instead of costing the whole session. */
+	volatile long lastAdminProbeAt;
+	/** How often to re-ask while the answer is still "no". Cheap request, rare enough to be invisible. */
+	static final long ADMIN_REPROBE_MS = 5 * 60_000L;
+	// Last clan-sync result summary, surfaced in chat after a sync.
+	volatile String lastSyncSummary;
+
+	/**
+	 * Callback for the async clan-sync action invoked from the side panel.
+	 */
+	interface AdminActionCallback {
+
+		void onResult(boolean ok, String message);
+	}
+
+
+	protected void startUp() {
+		// A capture cut short by the last shutdown must not keep every overlay hidden.
+		capturing = false;
+		// Every chat parser reads its line shape from here — before anything can see a chat line.
+		ChatPatterns.loadDefaults(gson);
+		OffThread.bindClientThread(client::isClientThread);
+		// The Patron star's chat icon loads asynchronously; asked for now, it's ready by the first line
+		// that needs it instead of that line going out without it.
+		chatStar();
+		chatFlair.tenureIcon = (e, opaque, shift) -> {
+			long f = e.t == TENURE_STEPS ? currentChatNameFrame() : -1;
+			return tenureIcon(e, opaque, f < 0 || f / 3 % 30 > 3 ? -1 : (int) (f / 3 % 30), shift);
+		};
+		// Built before the directory is known: without one they still work, in memory, for the session.
+		var outbox = new NotifyOutbox(gson, () -> executor, apiClient::interactiveExecutor);
+		outbox.setSender(apiClient::sendQueuedNotification);
+		notifyOutbox = outbox;
+		apiClient.setNotifyOutbox(outbox);
+		apiClient.noShot = k -> {
+			Me m = me();
+			return m != null && m.noShot != null && m.noShot.contains(k);
+		};
+		pushStash = new PushStash(gson);
+		siteUnreachable = false;
+		// WHERE THIS PLUGIN IS ALLOWED TO TOUCH DISK, resolved once and handed out.
+		//
+		// `getPluginDirectory()` is protected on Plugin, so this class is the only one that can ask
+		// for it — the services that actually read and write get handed the Filepath rather than
+		// reaching for RuneLite.RUNELITE_DIR themselves, which is the whole point of the sandbox.
+		//
+		// A failure here is not fatal: each service treats a null root as "disabled" and the rest of
+		// the plugin — overlay, tracking, submissions over the network — never touches disk at all.
+		try {
+			var pluginDir = getPluginDirectory();
+			pendingSubmissionStore.setRoot(pluginDir);
+			bannerSound.setOnClipsChanged(this::repaintSidebar); // a poll wouldn't redraw for it
+			bannerSound.setRoot(pluginDir.join("sounds"));
+			notifyOutbox.setDir(pluginDir.join("outbox", "notify"));
+			pushStash.setDir(pluginDir.join("outbox"));
+			var rc = new ResponseDiskCache(gson);
+			rc.setDir(pluginDir.join("cache"));
+			responseCache = rc;
+			apiClient.setDiskCache(rc);
+		} catch (IOException | RuntimeException e) {
+			log.warn("No plugin directory", e);
+		}
+		try (var r = new InputStreamReader(getClass().getResourceAsStream("/soulrend_text.json"),
+				java.nio.charset.StandardCharsets.UTF_8)) {
+			text = gson.fromJson(r, ShippedText.class);
+		} catch (IOException | RuntimeException e) {
+			log.warn("No soulrend_text.json", e);
+		}
+
+		// The window's TITLE BAR, not the entry pane's header the log also calls a header — that one
+		// is the strip naming the boss you have selected, which is where this button spent its first
+		// release squeezed against the item count. The bar is where other plugins put
+		// theirs, and where somebody looking for a sync button looks.
+		//
+		// The action is the verb ALONE: the game renders a menu entry as "<action> <name>", and the
+		// name is "Soulrend", so spelling it in both produced "Sync to Soulrend Soulrend".
+		// UNIVERSE, not the entry pane's HEADER the button spent its first release in — that is the
+		// strip naming the boss you have selected, halfway down the interface. UNIVERSE is the
+		// container other plugins draw into, which is what puts us in the title bar
+		// beside them and in the same stacking order rather than behind them.
+		//
+		// The offset walks left from the bar's right edge: the close button ends at 28, WikiSync
+		// takes 33..104, and we take the next slot along. An absolute-right offset holds at any
+		// window size, where measuring off a neighbour moves the moment they move.
+		clogSyncButton = new HeaderButton(
+				client, InterfaceID.Collection.UNIVERSE, InterfaceID.Collection.SEARCH_TOGGLE,
+				109 /* CLOG_BUTTON_OFFSET */, 33 /* CLOG_BUTTON_NEAR_OFFSET */, "Soulrend", "Sync to",
+				() -> apiClient.isConfigured() && config.syncClog(), this::syncProfileNow);
+		clogSyncButton.frameId = InterfaceID.Collection.FRAME;
+		clanSyncButton = new HeaderButton(
+				client, InterfaceID.ClansInfo.UNIVERSE, InterfaceID.ClansInfo.CLOSE,
+				33 /* CLAN_BUTTON_OFFSET */, "Soulrend", "Sync roster to",
+				() -> apiClient.isConfigured() && isAdmin && isClanRosterReadable(),
+				this::syncClanRosterFromPanel);
+		// The stat table as it stands right now, before any XP arrives. A plugin started mid-session
+		// — every reload during development, every enable from the sidebar — has no other chance to
+		// learn it, and what it doesn't know it mistakes for a level-up that already happened.
+		seedSkillLevels();
+		// Restore the clan the member last picked, BEFORE the first fetch — otherwise the opening poll
+		// goes out unaddressed and the sidebar shows whichever clan the token happens to resolve to,
+		// then jumps to theirs a few seconds later.
+		apiClient.setChosenClan(cfgGet(CFG_ACTIVE_CLAN));
+		overlayManager.add(overlay);
+		overlayManager.add(clogBanner);
+		invokeLater(() -> GradientLabel.watch(client.getCanvas() == null ? null : SwingUtilities.getWindowAncestor(client.getCanvas())));
+		// A count the site lowered (a deleted submission): the panel asks for its views again now,
+		// not at the 15s catch-up, so the old number doesn't sit on screen.
+		optimistic.onDrop(this::boardChanged);
+		chatFlairTooltip = new ChatFlairTooltip(client, tooltipManager, chatFlair, this::flairOn);
+		overlayManager.add(chatFlairTooltip);
+		tileTracker.setShownProgress(this::shownProgress);
+		tileTracker.setNotes(this::tileNotes);
+		tileTracker.setBoards(() -> {
+			var c = pluginConfig;
+			var ids = new ArrayList<Integer>();
+			if (c != null && c.boards != null) c.boards.forEach(b -> ids.add(b.eventId));
+			return ids;
+		}, this::sendChatMessage);
+		// A finished pin shows "Done" for the linger, then comes down — and the panel's pin list follows.
+		tileTracker.setDoneHooks(
+			id -> later(() -> safely("tileTracker", () -> tileTracker.refresh(id)), TileTracker.DONE_LINGER_MS + 1_000),
+			this::boardChanged);
+		tileTracker.setOnePanel(config.trackerOnePanel());
+		tileTracker.startUp();
+		overlayManager.add(startProofOverlay);
+
+		// Mount the always-on progress sidebar in the RuneLite toolbar.
+		sidebarNavButton = NavigationButton.builder()
+				.tooltip("Soulrend progress")
+				.icon(ImageUtil.loadImageResource(getClass(), "/com/soulrend/sidebar_icon.png"))
+				.priority(7)
+				.panel(sidebarPanel)
+				.build();
+		clientToolbar.addNavigation(sidebarNavButton);
+		migrateChatSettings();
+		keyManager.registerKeyListener(eventChatKey);
+		// Registered now: a chat icon's index only exists once it has loaded, and the first line drawn
+		// before that went without it.
+		relayIcon();
+
+		resetCompletionBaseline();
+		executor = Executors.newSingleThreadScheduledExecutor();
+		pushSocket = new PushSocket(apiClient, executor, gson, this::onPush);
+		sidebarPanel.setPushLive(pushSocket::live);
+		profileLookup.setPanelOpener(name -> {
+			var nav = sidebarNavButton;
+			if (nav == null || !sidebarPanel.playerCardsAvailable()) return false;
+			invokeLater(() -> clientToolbar.openPanel(nav));
+			sidebarPanel.showLookup(name);
+			return true;
+		});
+		profileLookup.startUp();
+
+		liveConfigAnswered = false;
+		configureApiClient();
+		optedOutAccounts = AccountOptOut.parse(cfgGet(CFG_OPTED_OUT_ACCOUNTS));
+		announcedAccounts = AccountOptOut.parse(cfgGet(CFG_ANNOUNCED_ACCOUNTS));
+		// Off the Jagex Launcher, the character about to log in is known before Play: requests made at
+		// the login screen carry it as a read-only hint, so the panel loads that character's board
+		// instead of nothing. Fixed for the life of the client — the launcher starts one character.
+		// Withheld for a character marked Not my account: nothing about it goes to Soulrend.
+		var launcherName = client.getLauncherDisplayName();
+		apiClient.setRsnHint(optedOutAccounts.containsName(launcherName) ? null : launcherName);
+		// Undecided until the first stamp (see the logout reset): closed if anything is opted out.
+		apiClient.setAccountPaused(!optedOutAccounts.isEmpty());
+
+		// Session clock for the starting shot: starting up AT the login screen means the next
+		// LOGGED_IN is a real login we can vouch for — the ordinary "launched the client" case.
+		// Starting up already in-game leaves it unknown, which the rule reads as "log out and back
+		// in", since we can't say when the last hiscores flush was.
+		freshLoginPending = client.getGameState() == GameState.LOGIN_SCREEN;
+		if (!loggedIn()) unsettleStats();
+		sessionLoginAtMs = StartProofRules.UNKNOWN_LOGIN;
+		autoStartProofTried = false;
+
+		// Last session's config + board first (disk, so on the executor): the panel draws them now,
+		// and the fetches below go out as If-None-Match. Queued ahead of them on the one thread.
+		executor.submit(() -> safely("loadSavedResponses", this::loadSavedResponses));
+		// Notifications a previous session couldn't deliver.
+		executor.submit(() -> safely("notifyOutbox", outbox::load));
+
+		// Initial config fetch. If the plugin was enabled mid-session (already logged in),
+		// no LOGGED_IN transition will fire — stamp the RSN/account hash and greet now so
+		// the very first authed request carries the identity headers.
+		if (loggedIn()) executor.submit(this::stampIdentityAndGreet);
+		else if (apiClient.isConfigured()) {
+			// At the login screen. Admin is a question about the PERSON, so it needn't wait for a
+			// character; with the launcher hint the config is this character's already. Paint both now
+			// rather than on the panel's next 15s poll.
+			executor.submit(() -> {
+				safely("refreshConfig", this::refreshConfig);
+				safely("probeAdmin", this::probeAdmin);
+				repaintSidebar();
+			});
+		}
+
+		// Retry any pending submissions from a previous session
+		loopTasks.add(executor.schedule(() -> safely("initial retry", this::retryPendingSubmissions), 3, TimeUnit.SECONDS));
+		// Pins restored from last session fill in now rather than on the first 30s tick.
+		loopTasks.add(executor.schedule(() -> safely("tileTracker", tileTracker::poll), 5, TimeUnit.SECONDS));
+
+		// Refresh config every 30 seconds + retry pending submissions + refresh schedule.
+		// Wrap in try/catch — an uncaught throw inside a scheduleAtFixedRate task silently
+		// cancels the task forever, so a single hiccup would stop all future refreshes.
+		loopTasks.add(executor.scheduleAtFixedRate(() -> {
+			// With the live push up, the site says when something moved; these are only its backstop.
+			if (!pushLive() || now() - lastConfigAttemptAt >= PUSH_FALLBACK_MS) {
+				safely("refreshConfig", this::refreshConfig);
+				safely("tileTracker", tileTracker::poll);
+			}
+			safely("retryPendingSubmissions", this::retryPendingSubmissions);
+
+			safely("pruneDedupMap", this::pruneDedupMap);
+			safely("importRuneLitePbs", this::retryPersonalBestImport);
+			flushProfileSyncs();
+			safely("pushAccountProgress", this::pushAccountProgress);
+			safely("pushGameClan", this::pushGameClan);
+			safely("pushGuestChannel", this::pushGuestChannel);
+		}, 30, 30, TimeUnit.SECONDS));
+	}
+
+	/**
+	 * Quest points, combat-achievement points/tier and diary counts → the site (AccountProgress).
+	 *
+	 * <p>Sampled on the client thread, diffed against what we last sent, and pushed only when
+	 * something moved — which for most logins is nothing at all, so the steady state costs one
+	 * varbit read and no request. The sample itself refuses to report an account that reads as all
+	 * zeroes, which is what the client looks like for the first few ticks after login.
+	 *
+	 * <p>Cleared on logout with the rest of the per-account state: the next login may be an alt, and
+	 * its progress is not this one's.
+	 */
+	void pushAccountProgress() {
+		var cfg = pluginConfig;
+		if (!apiClient.isConfigured() || !loggedIn() || cfg == null) return;
+		clientThread.invoke(() -> {
+			var sampled = AccountProgress.sample(client);
+			if (sampled.isEmpty()) return;
+			var changed = new LinkedHashMap<String, Integer>();
+			for (var e : sampled.entrySet()) {
+				var sent = lastSentProgress.get(e.getKey());
+				if (sent == null || !sent.equals(e.getValue())) changed.put(e.getKey(), e.getValue());
+			}
+
+			// The quest LIST rides along whenever the number of finished quests moves — that's the
+			// only thing that can change what the list says, and hashing 200 names every half minute
+			// to learn the same thing would be work for nothing.
+			var questsNow = sampled.get("questsCompleted");
+			var questsMoved = questsNow != null && !questsNow.equals(lastSentQuestCount);
+			var quests = questsMoved ? AccountProgress.quests(client) : null;
+
+			// Combat tasks, same rule: the points total is the only thing that can change which
+			// tasks are done, so the bits are re-read when it moves. We send the raw varps and the
+			// total; the site decodes them against its catalogue and discards the lot if they don't
+			// reconcile, so a layout change can't produce a wrong list here or there.
+			var caNow = sampled.get("caPoints");
+			var caMoved = caNow != null && caNow > 0 && !caNow.equals(lastSentCaPoints);
+			var caVarps = caMoved && cfg.caVarps != null
+					? AccountProgress.combatVarps(client, cfg.caVarps)
+					: null;
+			// Say which half is quiet when nothing lands: a site that never asked for the varps and a
+			// client that read none of them look identical from the profile page.
+			if (caMoved && cfg.caVarps == null) log.info("CA varps: this site asked for none");
+			else if (caVarps != null) log.info("CA varps: read {} at {} points", caVarps.size(), caNow);
+			int caPointsNow = caNow == null ? 0 : caNow;
+
+			if (changed.isEmpty() && quests == null && (caVarps == null || caVarps.isEmpty())) return;
+			submit(() -> {
+				try {
+					// One request each: the endpoint takes a category at a time, and these two move
+					// independently.
+					apiClient.submitProgress(changed, quests != null ? "quest" : null, quests);
+					lastSentProgress.putAll(changed);
+					if (quests != null) lastSentQuestCount = questsNow;
+					if (caVarps != null && !caVarps.isEmpty()) {
+						apiClient.submitProgress(emptyMap(), null, null, caVarps, caPointsNow);
+						lastSentCaPoints = caNow;
+					}
+				} catch (IOException e) {
+				}
+			});
+		});
+	}
+
+	/**
+	 * The character's own clan row → the site: clan name, rank, the clan's title for it, join date.
+	 * Only ever OUR row — the member list stays in the game. Sent once per login and again when it
+	 * changes, so the steady state is one settings read and no request.
+	 *
+	 * <p>Clan settings are null both while they load after login and for a player in no clan, so
+	 * "no clan" is reported only after two checks (30s apart) both find nothing.
+	 */
+	void pushGameClan() {
+		if (!apiClient.isConfigured() || !loggedIn() || pluginConfig == null || now() < gameClanRetryAt) return;
+		clientThread.invoke(() -> {
+			var myName = getLocalPlayerName();
+			if (myName == null) return;
+			var settings = client.getClanSettings();
+			String clanName = null;
+			Integer rankValue = null;
+			String titleName = null;
+			LocalDate joined = null;
+			if (settings == null || settings.getName() == null) {
+				if (++gameClanMissingChecks < 2) return;
+			} else {
+				gameClanMissingChecks = 0;
+				var self = settings.findMember(myName);
+				// Settings that don't list us yet are still loading.
+				if (self == null) return;
+				clanName = settings.getName();
+				var rank = self.getRank();
+				if (rank != null) {
+					rankValue = rank.getRank();
+					var title = settings.titleForRank(rank);
+					titleName = title != null ? title.getName() : null;
+				}
+				joined = self.getJoinDate();
+			}
+
+			var fingerprint = clanName == null ? "" : clanName + "|" + rankValue + "|" + titleName + "|" + joined;
+			if (fingerprint.equals(lastSentGameClan)) return;
+			var name = clanName;
+			var rankOut = rankValue;
+			var titleOut = titleName;
+			var joinedOut = joined;
+			submit(() -> {
+				try {
+					apiClient.submitGameClan(name, rankOut, titleOut, joinedOut);
+					lastSentGameClan = fingerprint;
+				} catch (IOException e) {
+					gameClanRetryAt = now() + 5 * 60_000L;
+				}
+			});
+		});
+	}
+
+	/**
+	 * Runs a periodic task and swallows any RuntimeException so that one bad
+	 * tick doesn't cancel the whole scheduleAtFixedRate chain.
+	 */
+	void safely(String name, Runnable task) {
+		try {
+			task.run();
+		} catch (Exception e) {
+			// The type too: several JDK exceptions carry no message, and "threw: null" said nothing.
+			log.warn("Task {} threw: {}", name, e.toString());
+		}
+	}
+
+	static long now() {
+		return System.currentTimeMillis();
+	}
+
+	boolean loggedIn() {
+		return client.getGameState() == GameState.LOGGED_IN;
+	}
+
+	/** Whether the executor is up — it only exists between startUp and shutDown. */
+	boolean execLive() {
+		return executor != null && !executor.isShutdown();
+	}
+
+	/** Run {@code task} on the executor, if it is up. */
+	void submit(Runnable task) {
+		var ex = executor;
+		if (ex != null && !ex.isShutdown()) ex.submit(task);
+	}
+
+	/** Run {@code task} on the executor in {@code ms}, if it is up; null when it isn't. */
+	ScheduledFuture<?> later(Runnable task, long ms) {
+		return execLive() ? executor.schedule(task, ms, TimeUnit.MILLISECONDS) : null;
+	}
+
+	/** Cancel a pending task and schedule its replacement — the debounce every push here uses. */
+	ScheduledFuture<?> reschedule(ScheduledFuture<?> pending, Runnable task, long ms) {
+		if (pending != null) pending.cancel(false);
+		return later(task, ms);
+	}
+
+	static void cancel(ScheduledFuture<?> task) {
+		if (task != null) task.cancel(false);
+	}
+
+	/** Cancel every task this plugin scheduled, before the executor itself is shut down. */
+	void cancelScheduledTasks() {
+		for (var task : loopTasks) cancel(task);
+		loopTasks.clear();
+		synchronized (this) {
+			cancel(feedLinger);
+			feedLinger = null;
+			feedWatching = false;
+			cancel(feedHeldFlush);
+			feedHeldFlush = null;
+		}
+		cancel(pendingRefresh);
+		pendingRefresh = null;
+		synchronized (moments) {
+			cancel(momentPushTask);
+			momentPushTask = null;
+		}
+		synchronized (rules) {
+			cancel(gainsFlush);
+			gainsFlush = null;
+		}
+		// shutdownNow drops these without cancelling them: left as they were, isDone() stayed false and
+		// neither scheduled again for the rest of the session.
+		synchronized (chatFlairSync) {
+			cancel(chatFlairSave);
+			chatFlairSave = null;
+		}
+	}
+
+	String cfgGet(String key) {
+		return configManager.getConfiguration("soulrendbingo", key);
+	}
+
+	void cfgSet(String key, String value) {
+		configManager.setConfiguration("soulrendbingo", key, value);
+	}
+
+	/**
+	 * A per-account config key. NOT "name:rsn": RuneLite's ConfigManager refuses any key containing a
+	 * colon (a bare IllegalArgumentException), so every per-account write built that way failed —
+	 * the personal-best import re-ran every 30s forever, and clog/PB sync state never survived a
+	 * login. Nothing was ever stored under the old form, so there is nothing to migrate.
+	 */
+	static String accountKey(String name, String account) {
+		return name + "_" + (account == null ? "" : account.replace(':', '_'));
+	}
+
+	void pruneDedupMap() {
+		var cutoff = now() - DEDUP_WINDOW_MS;
+		synchronized (lastSubmittedAt) {
+			lastSubmittedAt.entrySet().removeIf(e -> e.getValue() < cutoff);
+		}
+	}
+
+	protected void shutDown() {
+		keyManager.unregisterKeyListener(eventChatKey);
+		clientThread.invokeLater(this::unflairAll);
+		invokeLater(() -> GradientLabel.watch(null));
+		overlayManager.remove(overlay);
+		overlayManager.remove(clogBanner);
+		if (chatFlairTooltip != null) {
+			overlayManager.remove(chatFlairTooltip);
+			chatFlairTooltip = null;
+		}
+		tileTracker.shutDown();
+		overlayManager.remove(startProofOverlay);
+		clientThread.invokeLater(startSpotMarker::clear);
+		// OUR WIDGETS ARE OURS TO CLEAR. Disabling the plugin left the buttons sitting in the game's
+		// title bars until the interface happened to be rebuilt — a control for a plugin that is no
+		// longer running, which does nothing when pressed.
+		if (clogSyncButton != null) clientThread.invokeLater(() -> clogSyncButton.hideParts());
+		if (clanSyncButton != null) clientThread.invokeLater(() -> clanSyncButton.hideParts());
+		if (sidebarNavButton != null) {
+			clientToolbar.removeNavigation(sidebarNavButton);
+			sidebarNavButton = null;
+		}
+		// Its timers (countdowns, auto-refresh) must not outlive the plugin; the panel is a singleton.
+		if (sidebarPanel != null) invokeLater(sidebarPanel::onDeactivate);
+		bannerSound.shutdown();
+		resetCoffer(false);
+		capturing = false;
+		profileLookup.shutDown();
+		if (sidebarPanel != null) sidebarPanel.cancelSignIn();
+		cancelScheduledTasks();
+		var outbox = notifyOutbox;
+		if (outbox != null) outbox.stop();
+		apiClient.setNotifyOutbox(null);
+		// What hasn't gone out yet waits on disk for this character's next login. Snapshot here, write
+		// on RuneLite's scheduler (ours is about to stop); the resets below then clear memory.
+		var save = stashPushes();
+		if (save != null) sharedExecutor.submit(save);
+		if (pushSocket != null) pushSocket.scope(null);
+		if (executor != null) {
+			executor.shutdownNow();
+			executor = null;
+		}
+		pluginConfig = null;
+		forgetSavedResponses();
+		apiClient.setDiskCache(null);
+		rules.set(null);
+		forgetHeldItems();
+		kcPush.reset();
+		optimistic.reset();
+		lastSeenKc.clear();
+		// Anything still queued was saved per character above (stashPushes); a day-old one is dropped
+		// on restore rather than filed against whatever happens to be running then.
+		synchronized (moments) {
+			moments.reset();
+		}
+		skillXpPush.reset();
+		trackedActivityKeys = emptySet();
+		activityPush.reset();
+		// Flush the recap counters to the config store (captures loot gained since the last push) and
+		// stop the pending task — the in-memory totals survive so a same-event re-login keeps counting.
+		synchronized (counterLock) {
+			cancel(counterPushTask);
+			counterPushTask = null;
+			if (countersLoaded) persistCounters();
+		}
+		recentTimedMessages.clear();
+		pendingTimedSeconds = null;
+		lastNpcDeathName = null;
+	}
+
+	/**
+	 * Record every skill's real level as the session's starting point.
+	 *
+	 * <p>WHAT THIS FIXES. The baseline used to be taken lazily: the first StatChanged for a skill was
+	 * treated as "where they started" and discarded. That is right at login, when a burst of events
+	 * arrives for skills nobody just trained — and wrong every other time the map is empty, because
+	 * then the first XP drop is a real one. Start the plugin mid-session and the next level a player
+	 * gains is read as their starting level and thrown away.</p>
+	 *
+	 * <p>Which is exactly what a 99 is: one XP drop, once. Reload the plugin at 98, cook one more
+	 * fish, and the announcement is gone — silently, and with the skill marked announced, so the
+	 * chat line can't rescue it either. A once-per-account moment, lost to a plugin restart.</p>
+	 *
+	 * <p>Reading the table up front removes the guess. Skills already at 99 are marked announced (they
+	 * were 99 before we were watching); anything that rises from here is a real level-up.</p>
+	 */
+	void seedSkillLevels() {
+		clientThread.invokeLater(() -> {
+			if (!loggedIn() || !statTableLoaded()) return;
+			lastSkillLevel.clear();
+			announcedLevel.clear();
+			for (var skill : Skill.values()) {
+				int level = client.getRealSkillLevel(skill);
+				if (level <= 0) continue; // not populated yet — the next StatChanged baselines it the old way
+				lastSkillLevel.put(skill, level);
+				announcedLevel.put(skill.getName().toLowerCase(), level);
+			}
+		});
+	}
+
+	/**
+	 * Whether the client holds this account's real stat table rather than the placeholder it shows
+	 * before the game sends it. Hitpoints starts at 10 on every account, so anything under it means
+	 * the table hasn't arrived.
+	 */
+	boolean statTableLoaded() {
+		return client.getRealSkillLevel(Skill.HITPOINTS) >= 10;
+	}
+
+	/** Back at the login screen (or starting there): the next stat burst is a table arriving. */
+	void unsettleStats() {
+		statsUnsettled = true;
+		statsSettleTicks = 0;
+		lastSkillLevel.clear();
+		lastSkillXp.clear();
+		announcedLevel.clear();
+		totalLevelInitialized = false;
+		lastTotalLevel = -1;
+	}
+
+	/**
+	 * Once the login burst is over, take the table as the session's starting point: existing 99s
+	 * marked announced, the total baselined. From here a rise is a real level-up.
+	 */
+	void maybeSettleStats() {
+		if (!statsUnsettled || !loggedIn() || ++statsSettleTicks < 3 /* STATS_SETTLE_TICKS */ || !statTableLoaded()) return;
+		statsUnsettled = false;
+		seedSkillLevels();
+		if (levelsPost()) {
+			lastTotalLevel = client.getTotalLevel();
+			totalLevelInitialized = true;
+		}
+	}
+
+	@Subscribe
+	void onOverlayMenuClicked(OverlayMenuClicked event) {
+		// Every plugin's overlay menu clicks arrive here; only our own Unpin entries are ours to act on.
+		if (tileTracker.unpinFrom(event.getOverlay(), event.getEntry().getOption())) repaintSidebar();
+	}
+
+	/**
+	 * Skill 99s + total-level milestones, detected off StatChanged so they fire regardless of the
+	 * in-game "Level-up interface" setting. (We also parse the level-up chat line, but that only
+	 * carries the level number when the popup is disabled — with it on, the default, nothing matched,
+	 * so 99s/totals silently never posted.) Each skill is baselined on its first event of the session
+	 * (login), so pre-existing 99s and the starting total don't announce; handleTotalMilestone's own
+	 * baseline guards the total the same way.
+	 */
+	@Subscribe
+	void onStatChanged(StatChanged event) {
+		var skill = event.getSkill();
+		if (skill == null) return;
+		// Preset / alt-save worlds (PvP Arena, Leagues, Deadman, LMS, …) report levels/XP that aren't the
+		// player's real progression — never push their XP, and never notify off them unless the site
+		// sent that mode its own level rules (a hop between saves re-baselines, onWorldChanged).
+		if (statsAreArtificial()) {
+			if (levelsPost()) checkLevelUp(skill, event.getLevel());
+			return;
+		}
+		// Real-time skill-XP push (debounced), so skill-XP tiles move without waiting on the hourly
+		// hiscores cron — mirrors the boss-KC push. Runs regardless of the level-up notifier toggle;
+		// hiscores stays the source of truth (server keeps max(hiscores, pushed) and reconciles).
+		// A real gain (XP rose) vs the login/resync baseline burst — only the former marks the tile "You".
+		var name = skill.getName();
+		int xp = event.getXp();
+		var prevXp = lastSkillXp.put(skill, xp);
+		var realGain = prevXp != null && xp > prevXp;
+		if (realGain) {
+			// What a duplicate skilling pet came from: the game's line names nothing (DuplicateInference).
+			lastXpSkill = name;
+			lastXpAt = now();
+		}
+		maybeQueueSkillXpPush(name, xp, realGain && statMoved(rules.xp(name, xp - prevXp, now())));
+
+		checkLevelUp(skill, event.getLevel());
+	}
+
+	void checkLevelUp(Skill skill, int level) {
+		if (statsUnsettled) {
+			statsSettleTicks = 0; // the table is still arriving — restart the quiet count
+			return;
+		}
+		Me me = me();
+		if (me == null || !me.levels) return;
+		var prev = lastSkillLevel.put(skill, level);
+		if (prev == null) {
+			// First sighting this session = baseline; levels already held never announce.
+			announcedLevel.put(skill.getName().toLowerCase(), level);
+			return;
+		}
+		if (level <= prev) return; // XP within a level, or no gain — nothing to announce
+		if (level >= 99 && prev < 99) recordLevelMoment(skill.getName(), 99, "skill");
+		handleLevelMilestone(skill.getName(), prev, level);
+		handleTotalMilestone();
+	}
+
+	void showBingoToast(int tileId, String label, long current, long required) {
+		// Opted out of popups for their own drops: the drop still counts, only the banner and its
+		// sound are skipped.
+		if (config.selfTileBanner() && clogBanner.show(label, (int) current, (int) required)) playBannerSound();
+		// Marked even when the popup is off — otherwise the TEAM banner would announce the same
+		// tile a poll later, which is the popup they just turned off arriving by another door.
+		// This drop completed the tile locally — suppress the duplicate team-completion banner.
+		if (current >= required) locallyShownTiles.add(tileId);
+	}
+
+	@Provides
+	SoulrendConfig provideConfig(ConfigManager configManager) {
+		return configManager.getConfig(SoulrendConfig.class);
+	}
+
+	/**
+	 * Data source for the progress sidebar — the single wiring seam between the panel and its data.
+	 *
+	 * <p>One {@link SoulrendSidebarDataSource} over the config THIS plugin already polls, so rendering the
+	 * board costs no extra request. It used to sit under a federation layer that fanned several sites
+	 * out; one Soulrend now serves every clan, so the clans a member can switch between arrive in that
+	 * same config response ({@code clans[]}) and the switch is an address, not a second data source.
+	 * Offline (signed out) it resolves to the empty state.</p>
+	 */
+	@Provides
+	@Singleton
+	SoulrendSidebarDataSource provideSidebarDataSource(BingoApiClient apiClient, ScheduledExecutorService sharedExecutor) {
+		// Take the (singleton) client as a PARAMETER, not this.field: Guice can invoke this provider to
+		// satisfy the sidebarPanel dependency BEFORE the plugin's own @Inject fields are populated, so
+		// reading this.apiClient here would NPE and the whole plugin would fail to load. The param is
+		// resolved (and the singleton constructed) by Guice first, so it's non-null; the config/stat
+		// method references bind lazily and are only invoked at fetch time. The executor is RuneLite's
+		// shared client-lifetime scheduler (NOT this.executor, which only exists between startUp/shutDown).
+		// Kept in the signature because the sidebar's device sign-in still paces its poll on it.
+		var delegate = new SoulrendSidebarDataSource(this::sidebarConfig, apiClient);
+		// The starting-shot button's action. Bound after construction for the same reason the
+		// suppliers above are method references: this provider can run before the plugin's own
+		// @Inject fields exist, and the capture only ever fires from a click, long after that.
+		delegate.setStartProofCapture(this::captureStartProof);
+		// The panel's buttons act on the plugin: roster sync, profile sync, and the local banner
+		// clips (which live in a folder on this machine, not on any account).
+		delegate.setPlugin(this);
+		return delegate;
+	}
+
+	static final Set<String> INTERNAL_STATE_KEYS = Set.of(
+			CFG_DEFAULTS_VERSION, CFG_FIRST_RUN_NUDGES, CFG_ANNOUNCED_ACCOUNTS,
+			CFG_COUNTER_EVENT, CFG_COUNTER_DEATHS, CFG_COUNTER_LOOTGP, CFG_COUNTER_PVP,
+			CFG_COUNTER_BIGHIT, CFG_COUNTER_MINUTES, CFG_COUNTER_CATASKS, "settingsMovedNoted");
+	// Per-RSN state keys are stored as "<prefix>:<rsn>".
+	static final List<String> INTERNAL_STATE_PREFIXES = List.of(
+			CFG_VESTIGE_ROLLS + ":", CFG_CLOG_STATE + ":", CFG_PB_STATE + ":",
+			CFG_CLOG_FINGERPRINT + ":", CFG_PB_IMPORTED + ":");
+
+	static boolean isInternalStateKey(String key) {
+		return key != null && (INTERNAL_STATE_KEYS.contains(key) || INTERNAL_STATE_PREFIXES.stream().anyMatch(key::startsWith));
+	}
+
+	@Subscribe
+	void onConfigChanged(ConfigChanged event) {
+		if (!"soulrendbingo".equals(event.getGroup())) return;
+		var key = event.getKey();
+		// The plugin's own bookkeeping (recap counters, sync state, nudges) is persisted from the
+		// client thread, often several keys at once — none of it changes what the site sends back.
+		// Colours off (or the plugin about to stop): show the game's own plain text at once, rather
+		// than whenever the game next redraws the chat (the next Enter or private message).
+		// Supporter names changed: strip what's painted and paint again now (chat, member and friends lists,
+		// interfaces), not on the game's next rebuild of each.
+		if ("chatNames".equals(key) || "menuNames".equals(key)) {
+			// The chat setting only governs the chatbox: leave the lists and interfaces alone (they flickered).
+			repaintFlair("chatNames".equals(key));
+			return;
+		}
+		if ("shareSeasonal".equals(key) && sidebarPanel != null) invokeLater(sidebarPanel::seasonalChanged);
+		if (isInternalStateKey(key)) return;
+		configureApiClient();
+		if ("profileLookupMenu".equals(key) || "lookupPlayers".equals(key)) profileLookup.syncPlayerItem();
+		if ("trackerOnePanel".equals(key)) tileTracker.setOnePanel(config.trackerOnePanel());
+		if ("chatFeed".equals(key) || "soulrendChat".equals(key)) {
+			syncPush();
+			submit(() -> safely("pushGuestChannel", this::pushGuestChannel));
+		}
+		// Setting the Account Token is a deliberate one-shot edit — a paste, or the
+		// sign-in flow storing the token — not the rapid churn the debounce exists to coalesce.
+		// Waiting on it left the sidebar looking dead for up to POLL_INTERVAL_MS (15s): the token
+		// was live, the cache filled ~1s later, but the panel only repaints on its own timer. Fetch
+		// now and poke the panel when it lands.
+		if ("playerToken".equals(key)) refreshNowAndRepaint();
+		else scheduleRefresh();
+
+		if ("syncClanCoffer".equals(key)) {
+			// Enabling starts with a fresh baseline; changes made while opted out must not be
+			// replayed as one large movement when the setting comes back on.
+			resetCoffer(clanCofferOpen);
+		}
+		// Setup pasted mid-session (the typical first install: enable the plugin while
+		// logged in, then sign in or paste the Account Token): stamp the RSN/account hash and
+		// greet now, since no LOGGED_IN transition will fire to do it. Reset the admin
+		// probe so a new token gets re-checked. The single-threaded executor runs this
+		// before the debounced refresh, so that refresh already carries the headers.
+		if ("playerToken".equals(key) && loggedIn() && execLive()) {
+			adminProbeAttempted = false;
+			setupWarned = false; // re-evaluate setup after a token edit
+			submit(this::stampIdentityAndGreet);
+		}
+	}
+
+	@Subscribe
+	void onWidgetLoaded(WidgetLoaded event) {
+		int g = event.getGroupId();
+		// Names, rows and the clan window's header are filled in by scripts just after the group appears:
+		// paint before the next frame (onBeforeRender), which is after all of them and never a frame late.
+		if (flairInterfaceRoot(g) != -1 || g == InterfaceID.CLANS_SIDEPANEL || g == InterfaceID.CLANS_GUEST_SIDEPANEL) flairDue = true;
+		if (g == InterfaceID.CLANS_INFO) headerDue = true;
+		// The scroll's text child isn't populated yet on the load event — read it next tick,
+		// with a couple of retries in case the text lands late.
+		if (g == InterfaceID.QUESTSCROLL) scheduleQuestScrollRead(3);
+		if (g == InterfaceID.CLANS_STORAGE_MAIN) resetCoffer(true);
+		movesOpened(g);
+	}
+
+	@Subscribe
+	void onWidgetClosed(WidgetClosed event) {
+		// Gain tiles: trade/bank items can land the tick their interface closes — keep those
+		// inventory changes suppressed (see onItemContainerChanged).
+		int g = event.getGroupId();
+		if (g == InterfaceID.CLANS_STORAGE_MAIN) resetCoffer(false);
+		if (movedFrom != null && (g == InterfaceID.SHARED_BANK || g == InterfaceID.TRADEMAIN || g == InterfaceID.TRADECONFIRM)) movedTick = client.getTickCount() + 2;
+		for (int id : MOVE_INTERFACES) if (g == id) lastSuppressCloseTick = client.getTickCount();
+	}
+
+	/** Interfaces whose item flows are moves, not gathering: bank, deposit box, GE, trade, seed vault. */
+	static final int[] MOVE_INTERFACES = {
+		InterfaceID.BANKMAIN, InterfaceID.BANK_DEPOSITBOX, InterfaceID.GE_OFFERS, InterfaceID.GE_COLLECT,
+		InterfaceID.TRADEMAIN, InterfaceID.TRADECONFIRM, InterfaceID.SEED_VAULT,
+	};
+
+	/** The coffer was opened or closed (or the setting flipped): start again from a fresh baseline. */
+	void resetCoffer(boolean open) {
+		clanCofferOpen = open;
+		clanCofferOpenTicks = 0;
+		clanCofferTracker.reset();
+	}
+
+	/**
+	 * World hop — re-read whether we're on a seasonal world. Login already stamps it, but hopping
+	 * between a main and a league world mid-session doesn't go through login, and the direction that
+	 * matters most is hopping OFF: without this, main-game drops would keep posting to the Leagues
+	 * channel for the rest of the session.
+	 */
+	@Subscribe
+	void onWorldChanged(WorldChanged event) {
+		stampWorld();
+		markSeasonalWorld();
+		// Whether this world counts on a board (quiet) is the site's answer for the world just stamped.
+		submit(() -> safely("refreshConfig", this::refreshConfig));
+		// Hopping between the main game and a separate save swaps the whole stat table: baseline
+		// again, or one character's levels would read as the other's level-ups.
+		var realm = EnumSet.noneOf(WorldType.class);
+		var w = client.getWorldType();
+		if (w != null) {
+			realm.addAll(w);
+			realm.retainAll(ARTIFICIAL_WORLDS);
+		}
+		if (!realm.equals(statsRealm)) {
+			statsRealm = realm;
+			unsettleStats();
+		}
+	}
+
+	/**
+	 * Tell the API client which world this is: the world's flags and world-list activity the site
+	 * maps to a game mode (lib/worldModes). The activity comes
+	 * from RuneLite's cached world list, so it costs nothing here and is null until that list has
+	 * loaded once — the flags alone still identify every mode RuneLite knows.
+	 */
+	void stampWorld() {
+		var worlds = worldService.getWorlds();
+		var w = worlds == null ? null : worlds.findWorld(client.getWorld());
+		apiClient.setWorld(WorldInfo.types(client.getWorldType()), WorldInfo.activity(w == null ? null : w.getActivity()));
+	}
+
+	// --- Whole-log collection sync ---------------------------------------------------------------
+	// Opening the collection log and toggling its Search makes the SERVER transmit every entry, one
+	// script fire per item — the whole log without the player clicking a single page.
+
+	/** Fires once the collection log interface has finished setting itself up. */
+	static final int COLLECTION_LOG_SETUP = 7797;
+	// Where our title-bar buttons sit, measured from each bar's RIGHT edge. The collection log's
+	// close button ends at 28 and WikiSync's button takes 33..104, so we start after it; the clan
+	// window has only its close button, so we sit straight beside that.
+	// CLOG_BUTTON_OFFSET = 109, inlined at its one use.
+	// The slot WikiSync would occupy (33..104), taken when it is not running. Without this the far
+	// offset was unconditional and the button sat a slot-width from the close button with an empty
+	// gap between, reserved for a plugin that was not there.
+	// CLOG_BUTTON_NEAR_OFFSET = 33, inlined at its one use.
+	// CLAN_BUTTON_OFFSET = 33, inlined at its one use.
+	/** One fire per transmitted item: args[1] = item id, args[2] = quantity. */
+	// COLLECTION_DELAYED_TRANSMIT = 4100, inlined at its one use.
+	/** Re-initialises the log's own view, which closes the search we opened to trigger the transmit. */
+	// COLLECTION_INIT = 2240, inlined at its one use.
+	/** Hold the guard at least this long: the re-fire of the setup script arrives a tick or two later. */
+	static final int CLOG_TRANSMIT_MIN_TICKS = 4;
+	/** And no longer than this, so a transmit that yields nothing can't wedge the guard on. */
+	// CLOG_TRANSMIT_MAX_TICKS = 50, inlined at its one use.
+	/** Hard floor between two transmit requests, whatever the guard believes. */
+	static final long CLOG_TRANSMIT_COOLDOWN_MS = 10_000L;
+
+	@Subscribe
+	void onScriptPostFired(ScriptPostFired event) {
+		int id = event.getScriptId();
+		if (id == ScriptID.CHAT_TEXT_INPUT_REBUILD) {
+			flairChatInput();
+			return;
+		}
+		if (id == ScriptID.FRIENDS_UPDATE || id == ScriptID.FRIENDS_CHAT_CHANNEL_REBUILD
+				|| id == ScriptID.CLAN_SIDEPANEL_DRAW) {
+			flairNameLists();
+			if (id == ScriptID.CLAN_SIDEPANEL_DRAW) {
+				flairClanTitleGroup(InterfaceID.CLANS_SIDEPANEL);
+				flairClanTitleGroup(InterfaceID.CLANS_GUEST_SIDEPANEL);
+			}
+			return;
+		}
+		if (id == ScriptID.COLLECTION_DRAW_LIST || id == COLLECTION_LOG_SETUP) {
+			// The title-bar button, before the next frame (onBeforeRender) rather than right here or a
+			// client tick later. A neighbouring plugin clears every dynamic child of this container before
+			// adding its own, on the setup script, each time the game redraws the log: drawing inline would
+			// depend on which plugin the event bus reaches first, and a tick later left frames without the
+			// button (it flickered). BeforeRender is after every subscriber, whatever the load order. Idempotent:
+			// render() returns on an identity scan when ours is still attached.
+			headerDue = true;
+			if (id == ScriptID.COLLECTION_DRAW_LIST) captureClogPage();
+			// Opt-in until the trick has been proven on a real client: an unguarded version of this
+			// recursed through the interface scripts and crashed the game. The button asks for the
+			// same thing deliberately, which is the safe way to try it.
+			if (id == COLLECTION_LOG_SETUP && (config.autoFullClogSync() || clogSyncRequested)) requestFullClogTransmit();
+		}
+	}
+
+	@Subscribe
+	void onScriptPreFired(ScriptPreFired event) {
+		if (event.getScriptId() != 4100 /* COLLECTION_DELAYED_TRANSMIT */) return;
+		// Viewing someone else's log through a POH adventure log fires the same script with THEIR
+		// items. Storing those would overwrite this account's log with a stranger's.
+		if (client.getVarbitValue(VarbitID.COLLECTION_POH_HOST_BOOK_OPEN) == 1) {
+			clogFullSync.reset();
+			return;
+		}
+		var args = event.getScriptEvent().getArguments();
+		if (args == null || args.length < 3) return;
+		try {
+			clogFullSync.onItem((int) args[1], (int) args[2], now());
+		} catch (ClassCastException e) {
+			// A game update changed the script's shape — stop rather than file nonsense as a log.
+			clogFullSync.reset();
+		}
+	}
+
+	/** What a transmit request did, so the button can say something true about it. */
+	enum TransmitResult { STARTED, BUSY, COOLING_DOWN, LOG_CLOSED, UNAVAILABLE }
+
+	/**
+	 * Ask the server for the whole collection log, now that the interface is open.
+	 *
+	 * <p>The Search toggle is what makes the server send every entry; re-running the log's init
+	 * script puts the view back as it was, so the player sees their log open normally. Runs on the
+	 * client thread (it's a script hook) and only ever while their OWN log is open.
+	 */
+	TransmitResult requestFullClogTransmit() {
+		// The POH varbit: someone else's log, via a POH adventure log.
+		if (!supportsProfileSync() || client.getVarbitValue(VarbitID.COLLECTION_POH_HOST_BOOK_OPEN) == 1) return TransmitResult.UNAVAILABLE;
+		// THE GUARD THAT MATTERS. The init script below re-fires the setup script that got us here,
+		// and it does so on a LATER tick — so a flag cleared at the end of this method is already
+		// false when the re-fire lands, and we ask again, and again: toggle search, re-init, setup,
+		// toggle search. That recursion crashed a client with an ArrayIndexOutOfBounds inside the
+		// interface scripts. The flag therefore lives until onGameTick decides the transmit is over.
+		if (clogTransmitInFlight) return TransmitResult.BUSY;
+		// Second belt, because the first one failing crashed someone's game: never fire twice inside
+		// this window whatever the flag says. A missed sync waits for the next open; a loop does not.
+		var now = now();
+		if (now - lastClogTransmitAt < CLOG_TRANSMIT_COOLDOWN_MS) return TransmitResult.COOLING_DOWN;
+		// Only with the log actually on screen — the ops below address ITS widgets.
+		if (client.getWidget(InterfaceID.Collection.FRAME) == null) return TransmitResult.LOG_CLOSED;
+
+		clogTransmitInFlight = true;
+		lastClogTransmitAt = now;
+		clogTransmitTick = client.getTickCount();
+		clogFullSync.begin(clogSyncRequested);
+		clogSyncRequested = false;
+		client.menuAction(-1, InterfaceID.Collection.SEARCH_TOGGLE, MenuAction.CC_OP, 1, -1, "Search", null);
+		client.runScript(2240 /* COLLECTION_INIT */);
+		return TransmitResult.STARTED;
+	}
+
+	/**
+	 * Push a settled transmit AS SOON AS it settles, rather than at the next 30-second tick.
+	 *
+	 * <p>A background trickle can wait for the scheduler; a sync somebody pressed a button for
+	 * cannot. Waiting made a two-second job take up to thirty, which is the difference between
+	 * "synced" and "did that work?". The tick is 600ms, so this costs a flag check per tick and
+	 * gets the push away within one of them.
+	 */
+	void flushFullClogSyncWhenSettled() {
+		if (clogFlushQueued || !execLive() || !clogFullSync.isDue(now())) return;
+		clogFlushQueued = true;
+		submit(() -> {
+			try {
+				safely("flushFullClogSync", this::flushFullClogSync);
+			} finally {
+				clogFlushQueued = false;
+			}
+		});
+	}
+
+	/**
+	 * A manual sync that produced nothing has to say so.
+	 *
+	 * <p>If the search toggle doesn't make the server transmit — a game update moving the script, an
+	 * interface closed mid-flight — the batch never reaches the minimum and nothing is ever pushed.
+	 * The player, who pressed a button and was told "Syncing...", would otherwise wait forever.
+	 */
+	void tickManualSyncWatchdog() {
+		if (manualSyncStartedAt == 0) return;
+		if (now() - manualSyncStartedAt < 15_000L /* MANUAL_SYNC_TIMEOUT_MS */) return;
+		manualSyncStartedAt = 0;
+		// A push in flight or already sent clears the batch, so anything still here never landed.
+		sendChatMessage(WARN, clogFullSync.size() == 0 ? "The game didn't send your collection log. Close and reopen it, then try again."
+				: "Only part of your collection log arrived — reopen it and sync again.");
+		clogFullSync.reset();
+	}
+
+	/**
+	 * Stand the transmit guard down once the items have stopped arriving (or never started).
+	 *
+	 * <p>Held for at least {@link #CLOG_TRANSMIT_MIN_TICKS} so the re-fire of the setup script — the
+	 * one our own init causes — always lands while the flag is still up, and released after that so a
+	 * later, genuine open can sync again. The absolute ceiling covers the case where the toggle
+	 * yielded nothing at all, so a failed attempt can't wedge the flag on for the session.
+	 */
+	void tickClogTransmitGuard() {
+		if (!clogTransmitInFlight) return;
+		int elapsed = client.getTickCount() - clogTransmitTick;
+		if (elapsed < CLOG_TRANSMIT_MIN_TICKS) return;
+		if (elapsed >= 50 /* CLOG_TRANSMIT_MAX_TICKS */ || clogFullSync.isDue(now())) clogTransmitInFlight = false;
+	}
+
+	/**
+	 * "Sync profile" — the button. If their log is already open the transmit is triggered on the
+	 * spot; otherwise we arm it, and opening the log finishes the job. Either way the player never
+	 * has to page through anything.
+	 */
+	void syncProfileNow() {
+		if (!config.syncClog()) {
+			sendChatMessage("Collection log sync is off — turn it on in Configuration → Soulrend → Profile sync.");
+			return;
+		}
+		if (!apiClient.isConfigured()) {
+			sendChatMessage("Sign in first — open the Soulrend panel (the soulrend icon on the right) and press \"Sign in with Discord\".");
+			return;
+		}
+		var wait = clogPushAllowedAt - now();
+		if (wait > 0) {
+			sendChatMessage("Your log was synced less than a minute ago — try again in "
+					+ secs(wait) + "s.");
+			return;
+		}
+		clogSyncRequested = true;
+		// Everything below reads widgets and runs interface scripts, which only the client thread
+		// may do. The in-game button is already on it; the side panel's is on Swing's EDT, where
+		// this threw before saying anything — a button that silently does nothing.
+		clientThread.invoke(this::reportTransmitAttempt);
+	}
+
+	/** Ask for a transmit and say what happened. Client thread only. */
+	void reportTransmitAttempt() {
+		var r = requestFullClogTransmit();
+		if (r == TransmitResult.STARTED) manualSyncStartedAt = now();
+		sendChatMessage(r == TransmitResult.STARTED ? "Syncing your collection log..."
+				: r == TransmitResult.BUSY ? "Already syncing — give it a couple of seconds."
+				: r == TransmitResult.COOLING_DOWN ? "Just asked the game for your log — give it "
+						+ secs(CLOG_TRANSMIT_COOLDOWN_MS - (now() - lastClogTransmitAt)) + "s."
+				: r == TransmitResult.LOG_CLOSED ? "Open your collection log and your profile will sync itself."
+				: "Profile sync isn't available right now — check that you're signed in to Soulrend.");
+	}
+
+	/**
+	 * Read the collection-log page the game just drew, if it's one of the game's own.
+	 *
+	 * <p>On the client thread by definition (this is a script hook), so it stays a widget read and a
+	 * hash compare — no JSON, no HTTP, no allocation in the overwhelmingly common case where the
+	 * page hasn't changed since we last sent it. The push happens on the shared executor's next tick.
+	 *
+	 */
+	void captureClogPage() {
+		var sync = supportsProfileSync();
+		if (!sync && !rules.has("page")) return;
+		var page = ClogPageReader.read(client);
+		if (page != null) {
+			if (sync) clogSync.offer(page, now());
+			proveClogPage(page);
+		}
+	}
+
+	// Raids expose the real party roster in client varbits, which we read for party-size tile gates.
+	// The scene headcount (instancePlayersSeen) is unreliable inside raids: raiders split across
+	// separate rooms — and even when the whole team is co-located (e.g. the CoX Olm room),
+	// client.getPlayers() may not return them — so it reads solo even in a group. ToA and ToB track
+	// each occupied party slot in a run of per-slot varbits (count the non-empty ones); CoX exposes
+	// the count directly.
+	static final int[] TOA_PARTY_SLOTS = {
+			VarbitID.TOA_CLIENT_P0, VarbitID.TOA_CLIENT_P1, VarbitID.TOA_CLIENT_P2, VarbitID.TOA_CLIENT_P3,
+			VarbitID.TOA_CLIENT_P4, VarbitID.TOA_CLIENT_P5, VarbitID.TOA_CLIENT_P6, VarbitID.TOA_CLIENT_P7,
+	};
+	static final int[] TOB_PARTY_SLOTS = {
+			VarbitID.TOB_CLIENT_P0, VarbitID.TOB_CLIENT_P1, VarbitID.TOB_CLIENT_P2,
+			VarbitID.TOB_CLIENT_P3, VarbitID.TOB_CLIENT_P4,
+	};
+	// Where this account sits in each DT2 boss's vestige rotation (VestigeRolls owns the rule).
+	// Loaded lazily per RSN and written back after every counted roll.
+	VestigeRolls vestigeRolls;
+	String vestigeRollsRsn;
+	// The roll line from the loot event the drop post is about — postRareDrop runs off the same
+	// event a moment later, so a short window is enough to pair them without threading it through.
+	volatile String lastVestigeLine;
+	volatile long lastVestigeLineAt;
+	static final long VESTIGE_LINE_WINDOW_MS = 5000;
+
+	// Captured on the client thread (onGameTick) so the party-size tile gates — which can run off the
+	// client thread — read it safely. 0 = not in a recognised raid (gates then fall back to the scene
+	// count, which still covers instanced content without a party varbit).
+	volatile int lastRaidPartySize;
+	// ToA raid level, last non-zero reading this instance — the fallback if the varbit has already
+	// cleared when the completion line lands. Client thread only.
+	int lastToaRaidLevel;
+
+	/**
+	 * Finishing a clue or a Colosseum run moves a counter the site can score a tile on, so report it
+	 * now rather than at the next hiscores sweep. Filtered to the handful of ids we read before
+	 * anything else happens — this event fires constantly, and the check is a short array scan.
+	 */
+	@Subscribe
+	void onVarbitChanged(VarbitChanged event) {
+		if (!trackedActivityKeys.isEmpty() && ActivityStats.isTrigger(event.getVarbitId(), event.getVarpId())) maybeQueueActivityPush();
+		// The chatbox went transparent or opaque: event chat lines take that surface's colours.
+		if (event.getVarbitId() == VarbitID.CHATBOX_TRANSPARENCY && !eventNodes.isEmpty()) {
+			opaqueChatbox();
+			eventNodes.forEach((id, p) -> {
+				var n = client.getMessages().get(id);
+				if (n != null) n.setValue(eventText(p));
+			});
+			client.refreshChat();
+		}
+	}
+
+	/**
+	 * Send this player's own clan-chat coffer line to the site (client thread: reads the clan channel's
+	 * name). Other members' lines are never sent: they'd be crowdsourcing other players' names.
+	 */
+	boolean cofferSyncOn() {
+		return config.syncClanCoffer() && loggedIn() && apiClient.isConfigured();
+	}
+
+	void maybeReportCofferLine(String msg) {
+		if (!cofferSyncOn() || !msg.toLowerCase(ROOT).contains("coffer")) return;
+		var line = stripChatTags(msg);
+		int has = line.indexOf(" has ");
+		if (has <= 0 || !Rsn.same(line.substring(0, has), getLocalPlayerName())) return;
+		var channel = client.getClanChannel();
+		if (pluginConfig == null || channel == null || channel.getName() == null) return;
+		var clanName = channel.getName();
+		submit(() -> {
+			try {
+				apiClient.submitCofferLine(line, clanName);
+			} catch (IOException e) {
+			}
+		});
+	}
+
+	void flushModeLines() {
+		var batch = modeLines.drain(now());
+		if (batch == null || pluginConfig == null || !apiClient.isConfigured() || !config.shareSeasonal() || !execLive()) return;
+		captureFrameAsync(png -> {
+			try {
+				apiClient.submitModeLines(batch, png, "soulrend-mode.png");
+			} catch (IOException e) {
+			}
+		});
+	}
+
+	/** Read the visible coffer after its item widgets have had a few ticks to populate. */
+	void pollClanCoffer() {
+		if (!clanCofferOpen || !cofferSyncOn() || pluginConfig == null || ++clanCofferOpenTicks < 3) return;
+		var balance = readClanCofferBalance();
+		if (balance == null) return;
+		var observation = clanCofferTracker.observe(balance, now());
+		if (observation == null) return;
+		var eventKey = UUID.randomUUID().toString();
+		submit(() -> {
+			try {
+				apiClient.submitClanCoffer(eventKey, observation);
+			} catch (IOException e) {
+				// A later open sends an absolute snapshot, so a lost transition reconciles without
+				// manufacturing an actor. Never block the client thread retrying a money endpoint.
+				log.warn("Coffer sync failed: {}", e.getMessage());
+			}
+		});
+	}
+
+	/** Coin quantity in the Clan Coffer item container; zero is a valid empty coffer. */
+	Integer readClanCofferBalance() {
+		var root = client.getWidget(InterfaceID.ClansStorageMain.ITEMS);
+		if (root == null || root.isHidden()) return null;
+		long[] total = {0};
+		walk(root, w -> total[0] += w.getItemId() == ItemID.COINS ? Math.max(0, w.getItemQuantity()) : 0);
+		return total[0] > Integer.MAX_VALUE ? null : (int) total[0];
+	}
+
+	/** Depth-first over every child set, each widget once. */
+	static void walk(Widget root, Consumer<Widget> visit) {
+		walk(root, visit, newSetFromMap(new IdentityHashMap<>()));
+	}
+
+	static void walk(Widget w, Consumer<Widget> visit, Set<Widget> seen) {
+		if (w == null || !seen.add(w)) return;
+		visit.accept(w);
+		for (Widget[] kids : new Widget[][]{w.getChildren(), w.getDynamicChildren(), w.getStaticChildren(), w.getNestedChildren()}) {
+			if (kids != null) for (var k : kids) walk(k, visit, seen);
+		}
+	}
+
+	@Subscribe
+	void onGameTick(GameTick event) {
+		// Joined, left or changed friends chat: the relay's friends chat room follows (a new ticket).
+		if (!fcSeen.equals(fcOwner())) {
+			fcSeen = fcOwner();
+			pushSoon();
+		}
+		lastWornItemIds = wornItemIds();
+		relayHeal();
+		relayPmMode();
+		maybeSettleStats();
+		tickGameCounters();
+		if (movedTick >= 0 && client.getTickCount() >= movedTick) movesSettled();
+		maybeStampIdentityOnTick();
+		var here = needsStartProof() ? realWorldPosition() : null;
+		startProofStillTicks = here != null && here.equals(startProofPosition) ? startProofStillTicks + 1 : 0;
+		startProofPosition = here;
+		maybeAutoStartProof(here);
+		var cfgNow = pluginConfig;
+		var sp = cfgNow == null ? null : cfgNow.startProof;
+		startSpotMarker.update(here != null && config.startSpotGuide() && cfgNow != null ? StartSpotMarker.target(sp) : null, sp != null ? sp.location : null);
+		resolveDuplicateScroll();
+		trackClogOpen();
+		flushModeLines();
+		// KEEP THE TITLE-BAR BUTTONS HONEST WHILE THE WINDOW IS OPEN.
+		//
+		// They were drawn on two scripts and never reconsidered, so anything that changed while the
+		// interface stayed open was invisible to them: enabling WikiSync stacked its button on top of
+		// ours, disabling it left ours in the far slot with a gap beside it, and turning our own sync
+		// setting off left a button that no longer did anything. WikiSync's own button appears and
+		// disappears instantly because it is re-evaluated, not because it is drawn more cleverly.
+		//
+		// A tick is 600ms and render() returns on an identity scan when nothing has moved, so this is
+		// cheap; it only runs at all while the relevant window is open.
+		if (clogSyncButton != null) clogSyncButton.refresh();
+		if (clanSyncButton != null) clanSyncButton.refresh();
+		pollClanCoffer();
+		tickClogTransmitGuard();
+		tickManualSyncWatchdog();
+		updateClanRosterReadable();
+		flushFullClogSyncWhenSettled();
+		// Play time for the recap. Counted from ticks rather than wall-clock so it measures time
+		// actually in-game — a client left open on the login screen doesn't earn anyone an award.
+		recordEventTick();
+		// Safety re-read of the activity counters. onVarbitChanged is what makes a finished clue
+		// land in seconds; this catches anything that moved without one reaching us — most obviously
+		// the counters that were already set before we logged in.
+		if (--activityPollCountdown <= 0) {
+			activityPollCountdown = ACTIVITY_POLL_TICKS;
+			maybeQueueActivityPush();
+		}
+		if (--nameCheckCountdown <= 0) {
+			nameCheckCountdown = NAME_CHECK_TICKS;
+			restampIfRenamed();
+		}
+		// Deathless raids: reset the party-death counter + roster on every instance entry
+		// (CoX/ToB/ToA runs are instanced; each attempt is a fresh entry). While inside,
+		// collect the distinct players seen — that's the party size for tiles that pin one.
+		// Seeded once on entry from who is already loaded; onPlayerSpawned adds the rest.
+		var topView = client.getTopLevelWorldView();
+		var inInstance = topView != null && topView.isInstance();
+		int toaLevel = client.getVarbitValue(VarbitID.TOA_CLIENT_RAID_LEVEL);
+		if (inInstance && !wasInInstance) {
+			instancePlayerDeaths = 0;
+			instancePlayersSeen.clear();
+			// A run still waiting on its level is judged on the one it showed before this instance.
+			if (toaLevel <= 0) {
+				judgeHeldToaRuns(lastToaRaidLevel);
+				lastToaRaidLevel = 0;
+			}
+			for (var p : client.getPlayers()) noteInstancePlayer(p);
+		}
+		wasInInstance = inInstance;
+		// Raid party size, read from client varbits. Each raid is scoped by its own "am I in this
+		// raid" signal so a stale value from a prior raid can't bleed into another's gating, and we
+		// only ever read one raid's varbits at a time (you can't be in two raids at once).
+		int raidParty = 0;
+		// Left the raid without looting (or never did): judge on the last level it showed.
+		if (!heldToaRuns.isEmpty() && (toaLevel == 0 || now() - heldToaRunsSince > HELD_RUN_MAX_MS)) judgeHeldToaRuns(toaLevel > 0 ? toaLevel : lastToaRaidLevel);
+		if (toaLevel > 0) {
+			// ToA: scoped by a non-zero raid level. Count occupied party slots.
+			lastToaRaidLevel = toaLevel;
+			raidParty = occupied(TOA_PARTY_SLOTS);
+		} else if (client.getVarbitValue(VarbitID.RAIDS_CLIENT_INDUNGEON) == 1) {
+			// CoX: the client exposes the party size directly while inside the dungeon.
+			raidParty = client.getVarbitValue(VarbitID.RAIDS_CLIENT_PARTYSIZE);
+		} else if (client.getVarbitValue(VarbitID.TOB_CLIENT_PARTYSTATUS) > 0) {
+			// ToB: scoped by an active party status. Count occupied party slots.
+			raidParty = occupied(TOB_PARTY_SLOTS);
+		}
+		lastRaidPartySize = raidParty;
+		// Baseline CA points once after login (before any completion) so we can tell first
+		// completions (points rise) from recompletions (points unchanged).
+		if (!caPointsInitialized && loggedIn()) {
+			int p = client.getVarbitValue(VarbitID.CA_POINTS);
+			if (p > 0 || client.getVarbitValue(VarbitID.CA_THRESHOLD_EASY) > 0) {
+				lastCaPoints = p;
+				caPointsInitialized = true;
+			}
+		}
+		// Baseline total level once after login so high-total posts fire on real crossings only. Defer
+		// it on preset/alt-save worlds (PvP Arena, Leagues, …) so their inflated total isn't taken as
+		// the real baseline — it seeds on the first normal world instead.
+		if (!totalLevelInitialized && !statsUnsettled && loggedIn() && levelsPost()) {
+			int t = client.getTotalLevel();
+			if (t > 0) {
+				lastTotalLevel = t;
+				totalLevelInitialized = true;
+			}
+		}
+		if (!pendingCaTasks.isEmpty()) {
+			var batch = new ArrayList<>(pendingCaTasks);
+			pendingCaTasks.clear();
+			handleCombatAchievements(batch);
+		}
+		// Gain tiles: diff held items (inventory + worn) once per tick, after any equip/unequip
+		// has updated both containers, so a gear move never reads as a gain.
+		if (heldItemsDirty) {
+			heldItemsDirty = false;
+			updateHeldItemGains();
+		}
+		settleChestLineCredits();
+		namePetFromSurroundings();
+		if (lootingBagWatchSource != null && --lootingBagWatchTicks <= 0) {
+			// Nothing went to the bag this time — the loot all landed in the inventory.
+			lootingBagWatchSource = null;
+			lootingBagWatchBase = null;
+		}
+		trackLmsTick();
+	}
+
+	/** The relay's rooms, re-sent from the executor. */
+	void pushSoon() {
+		submit(() -> safely("push", this::syncPush));
+	}
+
+	@Subscribe
+	void onPlayerSpawned(PlayerSpawned event) {
+		if (wasInInstance) noteInstancePlayer(event.getPlayer());
+	}
+
+	void noteInstancePlayer(Player p) {
+		if (p != null && p.getName() != null) instancePlayersSeen.add(p.getName().toLowerCase());
+	}
+
+	/** How many of a raid's per-slot party varbits are filled. */
+	int occupied(int[] slots) {
+		int n = 0;
+		for (int slot : slots) {
+			if (client.getVarbitValue(slot) > 0) n++;
+		}
+		return n;
+	}
+
+	/* ------------------------- LMS placement tracking ------------------------- */
+	// Last Man Standing is "BR" (battle royale) in the cache. While the BR_INGAME varbit is up
+	// we sample the HUD's survivor counter every tick; dying while it reads N means we placed
+	// Nth (we were one of the N still standing). Winning never fires our death — the game just
+	// ends — so a session that closes with the last reading at "1 survivor" is a win.
+	volatile boolean lmsInGame;
+	volatile int lmsSurvivors;
+	volatile int lmsKills;
+	volatile boolean lmsPlacementRecorded; // one placement per game
+	volatile int lmsEndedTick = -100;
+	// The game's own word for a win, printed as the game ends. The survivor-counter inference below
+	// missed wins whenever the counter wasn't sampled in time (it can read 0, or stay at 3 when the
+	// final kills land in one tick) — a reported LMS win that never reached its tile.
+	// "You are victorious!" → chat-patterns.json "lms.victory" (ChatPatterns).
+
+	void trackLmsTick() {
+		var inGame = client.getVarbitValue(VarbitID.BR_INGAME) == 1;
+		if (inGame) {
+			if (!lmsInGame) {
+				lmsInGame = true;
+				lmsPlacementRecorded = false;
+				lmsSurvivors = 0;
+				lmsKills = 0;
+			}
+			var survivors = client.getWidget(InterfaceID.BrOverlay.SURVIVOR_COUNT);
+			if (survivors != null && !survivors.isHidden()) {
+				int n = parseLeadingInt(survivors.getText());
+				if (n > 0) lmsSurvivors = n;
+			}
+			lmsKills = client.getVarbitValue(VarbitID.BR_KILLCOUNT);
+		} else if (lmsInGame) {
+			lmsInGame = false;
+			lmsEndedTick = client.getTickCount();
+			// Game ended without us dying (a death records placement via onActorDeath). A win fires no
+			// death — the game just ends. The last survivor reading is usually 1, but landing the final
+			// kill can end the game before a tick samples "1", leaving a stale 2. So treat "ended in the
+			// final duel (1 or 2 left) without ever dying" as a win; 3+ still standing means an x-log /
+			// spectate exit and records nothing. (0 = never got a reading — ambiguous, skip.)
+			if (!lmsPlacementRecorded && lmsSurvivors >= 1 && lmsSurvivors <= 2) recordLmsPlacement(1);
+		}
+	}
+
+	/**
+	 * Submits a qualifying LMS finish to every LMS tile whose placement cap covers it,
+	 * with a baked "Placed Nth — K kills" proof screenshot. Runs at most once per game.
+	 */
+	void recordLmsPlacement(int placement) {
+		lmsPlacementRecorded = true;
+		if (!live()) return;
+		emit(rules.event("lms", RuleEngine.named(), placement, ordinal(placement), null, "place", placement, "kills", lmsKills));
+	}
+
+	static String ordinal(int n) {
+		int m = n % 100, d = n % 10;
+		return n + (m >= 11 && m <= 13 || d < 1 || d > 3 ? "th" : d == 1 ? "st" : d == 2 ? "nd" : "rd");
+	}
+
+	/** Digits of a widget text like "5" or "Survivors: 5" (tags stripped); -1 when unparseable. */
+	static int parseLeadingInt(String text) {
+		if (text == null) return -1;
+		var digits = NON_DIGIT.matcher(MARKUP_TAG.matcher(text).replaceAll("")).replaceAll("");
+		return digits.isEmpty() || digits.length() > 3 ? -1 : Integer.parseInt(digits);
+	}
+
+	@Subscribe
+	void onGameStateChanged(GameStateChanged event) {
+		// Game-value counters: a loading zone pauses reads (same account, values persist); leaving the
+		// session forgets the baselines — the next account's balances are not this one's.
+		var gs = event.getGameState();
+		boolean on = gs == GameState.LOGGED_IN, off = gs == GameState.LOGIN_SCREEN, hop = gs == GameState.HOPPING;
+		if (on || off) markSeasonalWorld();
+		// The relay's public room is the world: a hop (or a log in) re-tickets it.
+		if (on) pushSoon();
+		if (gs == GameState.LOADING) {
+			gameValueCounters.onLoading();
+		} else if (off || hop || gs == GameState.CONNECTION_LOST) {
+			gameValueCounters.onSessionEnd();
+			movedFrom = null;
+			movedTick = -1;
+			// Chat line ids start over with the session, so an old mark would land on a stranger's line.
+			relayMarked.clear();
+			relaySeen.clear();
+			relayNodes.clear();
+		}
+		// SESSION CLOCK for the starting shot (StartProofRules). Only the login screen starts a new
+		// session: LOGGED_IN also fires on every loading zone, and a world hop reconnects without the
+		// logout that flushes the hiscores — treating either as a fresh login would hand out a clean
+		// bill of health to a client that has been up for hours.
+		if (on && freshLoginPending) {
+			freshLoginPending = false;
+			sessionLoginAtMs = now();
+			repaintSidebar(); // "Track on screen" is in-game only
+		}
+		// Re-read on every login: the levels belong to the account that just logged in, and the
+		// previous one's are worse than nothing (a 99 on the alt reads as a 99 already announced).
+		// A hop waits for maybeSettleStats: LOGGED_IN can still expose the old world's table.
+		if (on && !statsUnsettled) seedSkillLevels();
+		if (on && !helloSent) {
+			// The name and account hash aren't populated at this transition. onGameTick stamps on the
+			// first tick that has both, usually the next one, instead of a blind three-second wait.
+			identityStampPending = true;
+			identityWaitTicks = 0;
+		} else if (off || hop) {
+			// Send any catches still held before we tear down — a logout/hop mid-gather would
+			// otherwise lose them (they live only in memory). The executor is still alive here.
+			flushHeldGains();
+			// Gain tiles: drop the held-item baseline so the next snapshot after login/hop
+			// re-seeds instead of reading the whole inventory as a "gain". Deathless: leave
+			// the instance so re-entry re-arms the death counter.
+			forgetHeldItems();
+			wasInInstance = false;
+			// The bag's contents are per account and re-sent after login; forget them.
+			lootingBagBefore = null;
+			lootingBagNow = null;
+			lootingBagWatchSource = null;
+			lootingBagWatchBase = null;
+			recentDropLines.clear();
+			chestLineCredits.clear();
+			// The destination sends a fresh table. Until its burst settles, restoring the real
+			// account after PvP Arena must not look like dozens of level-ups.
+			if (hop) unsettleStats();
+		}
+		if (off) {
+			// The next account may be on another team: its gains don't build on this one's counts.
+			optimistic.reset();
+			// The next account's stats haven't been sent yet; what the client holds until then is
+			// either a placeholder or the previous account's.
+			unsettleStats();
+			helloSent = false;
+			identityStampPending = false;
+			clogOpen = false;
+			// Refreshed on game ticks, and none run at the login screen — so the last in-game answer
+			// would stand and keep "Sync clan roster" on offer while logged out. There is no clan
+			// channel to read here.
+			clanRosterReadable = false;
+			clanRosterMissingTicks = 0;
+			tileTracker.forAccount(-1);
+			repaintSidebar(); // drop "Track on screen" with the session
+			// Back at the login screen: the next LOGGED_IN really is a new session, and until it
+			// arrives we don't have one at all.
+			freshLoginPending = true;
+			sessionLoginAtMs = StartProofRules.UNKNOWN_LOGIN;
+			autoStartProofTried = false;
+			// Membership is per-ACCOUNT: the next login may be an alt that's only a guest here, so drop
+			// the answer rather than let the sidebar rank clans on the previous account's standing.
+			knownMember = null;
+			resetCoffer(false);
+
+			adminProbeAttempted = false;
+			identityStampRetries = 0;
+			// Progress is per ACCOUNT: the next login may be an alt, whose quest points are not
+			// this one's — so the diff starts from nothing again.
+			lastSentProgress.clear();
+			lastSentQuestCount = null;
+			lastSentCaPoints = null;
+			lastSentGameClan = null;
+			gameClanMissingChecks = 0;
+			gameClanRetryAt = 0;
+			// The starting shot is per ACCOUNT: the next login may be an alt that still owes one,
+			// so forget that this one filed (the server's config is the real answer either way).
+			startProofFiled = false;
+			startProofNudged = false;
+			startProofCreditWarned = false;
+			// A half-received collection log belongs to the account that was logged in.
+			clogFullSync.reset();
+			clogSyncRequested = false;
+			lastClogFingerprint = 0;
+			// Next login gets its one line back: "it ran and agreed with the site" is worth saying
+			// once per session, and only once.
+			autoRosterReportedThisLogin = false;
+			autoClogReportedThisLogin = false;
+			recentClogUnlocks.clear();
+			// Nothing is attacking a logged-out player, and whatever was is not attacking the next
+			// account either.
+			deathAttribution.clear();
+			// A game cut short by a logout is over: without this the next login's first tick read
+			// "left the final duel without dying" and filed a win for a game nobody finished.
+			lmsInGame = false;
+			// "Already announced" is per account: an alt's first of the same task or quest is news.
+			notifiedCaTasks.clear();
+			announcedQuests.clear();
+			caRepeatNudgeSent = false;
+			lootNotifyNudgeSent = false;
+			clogNotifyNudgeSent = false;
+			// Re-evaluate setup + linking for the next account that logs in.
+			setupWarned = false;
+			unlinkedWarnedFor = null;
+			// Diagnostics start fresh per account: re-log suppressions and one tracking summary.
+			loggedSuppressions.clear();
+			lastTrackingFingerprint = null;
+			// Unsent counts and moments are this character's: save them for its next login rather
+			// than let them go out under nobody (or the next character) a few seconds from now.
+			var saveForLater = stashPushes();
+			if (saveForLater != null) submit(saveForLater);
+			// Clear the RSN + account hash so we don't keep stamping the previous account
+			// onto requests that fire before the next login completes.
+			apiClient.setCurrentRsn(null);
+			apiClient.setAccountHash(-1L);
+			// FAIL CLOSED until the next character is known. Whoever logs in (or comes back from a
+			// hop) is undecided for the few seconds before stampIdentityAndGreet can read their name
+			// and hash — and drops, deaths and chat posts fire in that window. If this install has
+			// marked any character Not my account, send nothing until the stamp has said which.
+			apiClient.setAccountPaused(!optedOutAccounts.isEmpty());
+			// Re-seed the team-completion baseline on the next login: while logged out a teammate
+			// may finish tiles, and those shouldn't fire a completion banner when you come back —
+			// only tiles completed while you're actually online should. Clearing the baseline makes
+			// the first refresh after login silently absorb whatever's already done.
+			resetCompletionBaseline();
+			// Logged out: claims and roster sync need a character in game, so redraw now rather than
+			// leaving their buttons up until the panel's next 15s poll.
+			repaintSidebar();
+		}
+	}
+
+	/**
+	 * Stamp the API client with the current RSN + account hash so server-side resolution
+	 * can scope per-user tokens to the right clan_member and auto-verify the account on
+	 * play, then fire the login-time round-trips (config, hello, admin probe). Runs on the
+	 * executor. Called on the LOGGED_IN transition, and again from startUp/onConfigChanged
+	 * when the plugin is enabled or configured mid-session — no transition fires then, and
+	 * without the stamp every request until the next relog would go out without X-RSN, so
+	 * the site could never capture the account.
+	 */
+	int identityStampRetries;
+	// Set on LOGGED_IN; the first tick with a name and account hash (or the cap) runs the stamp.
+	boolean identityStampPending;
+	int identityWaitTicks;
+	// MAX_IDENTITY_WAIT_TICKS = 5, inlined at its one use.
+
+	void maybeStampIdentityOnTick() {
+		if (!identityStampPending) return;
+		// Past the cap, stamp anyway: stampIdentityAndGreet has its own retry for whatever is missing.
+		if (!identityReady(getLocalPlayerName(), client.getAccountHash())
+				&& ++identityWaitTicks < 5 /* MAX_IDENTITY_WAIT_TICKS */) return;
+		identityStampPending = false;
+		submit(this::stampIdentityAndGreet);
+	}
+
+	// MAX_IDENTITY_STAMP_RETRIES = 5, inlined at its one use.
+
+	/** Both values are needed for the first-play claim: an RSN finds the synced row and the stable
+	 * account hash is the continuity anchor that lets the site merge it without a manual step. */
+	static boolean identityReady(String rsn, long accountHash) {
+		return !placeholderName(rsn) && accountHash != -1L;
+	}
+
+	/**
+	 * For a tick or two after LOGGED_IN the client names the local player "#Player1281". A real RSN
+	 * never has a '#'; saying hello with the placeholder created statless "#PlayerNNN" join requests.
+	 */
+	static boolean placeholderName(String rsn) {
+		return rsn == null || rsn.isEmpty() || rsn.indexOf('#') >= 0;
+	}
+
+	/**
+	 * Send nothing for this character? Yes if it's marked Not my account — and, when the install has
+	 * marked anything at all, also when the character can't be identified yet (fail closed).
+	 */
+	static boolean shouldPauseAccount(AccountOptOut optedOut, String rsn, long accountHash) {
+		if (optedOut.isEmpty()) return false;
+		return optedOut.contains(accountHash, rsn) || !identityReady(rsn, accountHash);
+	}
+
+	/** The stamped name is set and the live one differs from it — an in-game rename mid-session. */
+	static boolean renamedMidSession(String stamped, String live) {
+		return !Rsn.normalize(stamped).isEmpty() && !Rsn.normalize(live).isEmpty() && !Rsn.same(stamped, live);
+	}
+
+	/**
+	 * Re-stamp identity when the logged-in name no longer matches what requests carry. Re-running
+	 * the login round-trips (config, hello) is what lets the site's hash-matched rename path see the
+	 * new name. The stamp is updated here first, on the client thread, so the next check doesn't fire
+	 * a second re-greet while this one is still in flight.
+	 */
+	void restampIfRenamed() {
+		var live = getLocalPlayerName();
+		if (!renamedMidSession(apiClient.getCurrentRsn(), live) || !execLive()) return;
+		log.info("Renamed to {}", live);
+		apiClient.setCurrentRsn(live);
+		submit(this::stampIdentityAndGreet);
+	}
+
+	void stampIdentityAndGreet() {
+		var rsn = getLocalPlayerName();
+		var accountHash = client.getAccountHash();
+		// Right after the LOGGED_IN transition the local player name (and account hash) can still be
+		// unpopulated. Firing the first resolve with no X-RSN leaves the server unable to scope the
+		// token to a clan_member; firing it with no account hash turns a safe first-use merge into a
+		// manual verification suggestion. Retry either incomplete value a few times so the ordinary
+		// path really does resolve and merge on login.
+		if (!identityReady(rsn, accountHash)
+				&& loggedIn()
+				&& execLive()
+				&& identityStampRetries < 5 /* MAX_IDENTITY_STAMP_RETRIES */) {
+			identityStampRetries++;
+			later(this::stampIdentityAndGreet, 2000);
+			return;
+		}
+		identityStampRetries = 0;
+		apiClient.setCurrentRsn(rsn);
+		apiClient.setAccountHash(accountHash);
+		stampWorld();
+		tileTracker.forAccount(accountHash);
+		// "Not my account" on this install: send nothing at all while this character is logged in —
+		// no config, no hello, no drops. Set before anything below can fire a request. If the
+		// retries ran out without a name or hash we can't tell whose character this is, so with
+		// anything opted out it stays closed (shouldPauseAccount).
+		var paused = shouldPauseAccount(optedOutAccounts, rsn, accountHash);
+		apiClient.setAccountPaused(paused);
+		if (paused) {
+			log.info("{} is Not my account", rsn);
+			dropConfigForPausedAccount();
+			repaintSidebar();
+			return;
+		}
+		// The name is known now; say so before the config round trip rather than after it.
+		repaintSidebar();
+		loadProfileSyncState(rsn);
+		// Refresh config for the character we just logged into so tracking reflects THIS
+		// account's enrollment right away — when one person plays several accounts, only
+		// the enrolled one should track drops (don't wait for the 30s refresh cycle).
+		safely("refreshConfig", this::refreshConfig);
+		// Pinned tiles fetched before the name was known came back with no team marked as yours, so
+		// they showed a bare title until the 30s poll. Re-read them now that the site knows who's asking.
+		safely("tileTracker", tileTracker::poll);
+		safely("restorePushes", () -> restorePushes(rsn, apiClient.getAccountHash()));
+		// The board and event are what the member is waiting for; show them before hello + admin.
+		repaintSidebar();
+		sendHello();
+		safely("probeAdmin", this::probeAdmin);
+		repaintSidebar();
+		checkSetup();
+		announceAccountOnce(rsn, accountHash);
+		repaintSidebar();
+	}
+
+	/**
+	 * Say once per character, per install, whose Soulrend account it's being tracked for — so a sibling
+	 * or a visitor on this PC finds out, and knows where the way out is. After the config refresh,
+	 * which is what says whether the character is someone else's.
+	 */
+	void announceAccountOnce(String rsn, long accountHash) {
+		if (!apiClient.isConfigured() || announcedAccounts.contains(accountHash, rsn)) return;
+		var cfg = pluginConfig;
+		var standing = cfg == null ? null : cfg.accountStanding;
+		// Older site, or the refresh failed — nothing reliable to say yet; try at the next login.
+		if (standing == null) return;
+		announcedAccounts = announcedAccounts.with(accountHash, rsn);
+		cfgSet(CFG_ANNOUNCED_ACCOUNTS, announcedAccounts.serialize());
+		if ("other".equals(standing)) {
+			sendChatMessage(WARN, rsn + " is linked to another Soulrend account, so nothing is tracked here. "
+					+ "If it's yours, open the Soulrend side panel and press \"It's mine\".");
+		} else if (!"ignored".equals(standing)) {
+			sendChatMessage("Tracking " + rsn + " for your Soulrend account. Not yours? "
+					+ "Open the Soulrend side panel and press \"Not my account\".");
+		}
+	}
+
+	/** Forget the previous character's event state so nothing of it lingers while this one is paused. */
+	void dropConfigForPausedAccount() {
+		pluginConfig = null;
+		forgetSavedResponses();
+		rebuildItemDropIndex();
+	}
+
+
+	// -- The sidebar's account row ---------------------------------------------------------------
+
+	/** What the side panel says about the logged-in character, or null when there's nothing to say. */
+	AccountRow accountRow() {
+		var rsn = apiClient.getCurrentRsn();
+		if (rsn == null || !apiClient.isSignedIn()) return null;
+		var cfg = pluginConfig;
+		return new AccountRow(rsn, apiClient.isAccountPaused() ? AccountRow.State.PAUSED
+				: cfg != null && "other".equals(cfg.accountStanding) ? AccountRow.State.OTHER : AccountRow.State.TRACKING);
+	}
+
+	/**
+	 * Run one of the account row's buttons off the EDT and report a one-line outcome to {@code done}
+	 * (called on the executor — the panel marshals it).
+	 */
+	void accountAction(AccountRow.Action action, Consumer<String> done) {
+		if (accountActionRunning || !execLive()) return;
+		accountActionRunning = true;
+		submit(() -> {
+			try {
+				done.accept(runAccountAction(action));
+			} catch (RuntimeException e) {
+				log.warn("Account action {} failed", action, e);
+				done.accept("Something went wrong — try again.");
+			} finally {
+				accountActionRunning = false;
+				repaintSidebar();
+			}
+		});
+	}
+
+	String runAccountAction(AccountRow.Action action) {
+		var rsn = apiClient.getCurrentRsn();
+		var hash = client.getAccountHash();
+		if (rsn == null) return "Log in to the account first.";
+		switch (action) {
+			case NOT_MINE: {
+				// Local first: whatever the site says, this computer stops sending for it now.
+				optedOutAccounts = optedOutAccounts.with(hash, rsn);
+				cfgSet(CFG_OPTED_OUT_ACCOUNTS, optedOutAccounts.serialize());
+				var r = apiClient.postAccountAction("release");
+				apiClient.setAccountPaused(true);
+				dropConfigForPausedAccount();
+				if (r.ok) {
+					sendChatMessage("Stopped tracking " + rsn + " on this computer, and unlinked it from your Soulrend account.");
+					return "Unlinked. Nothing is sent while you're on it.";
+				}
+				if ("live-event".equals(r.reason)) {
+					sendChatMessage("Stopped tracking " + rsn + " on this computer. It's in a live event, so it stays "
+							+ "linked on the site until the event ends — ask your clan staff if it isn't yours.");
+					return "Stopped here. Still linked on the site until the event ends.";
+				}
+				sendChatMessage(WARN, "Stopped tracking " + rsn + " on this computer. Couldn't reach Soulrend to unlink it — "
+						+ "remove it from your profile on the site.");
+				return "Stopped here. " + (r.error == null ? "" : r.error);
+			}
+			case TRACK_AGAIN: {
+				optedOutAccounts = optedOutAccounts.without(hash, rsn);
+				cfgSet(CFG_OPTED_OUT_ACCOUNTS, optedOutAccounts.serialize());
+				apiClient.setAccountPaused(false);
+				var r = apiClient.postAccountAction("resume");
+				// The normal login round-trip re-links it (the site's auto-link, now that it's no
+				// longer ignored) and loads its board.
+				stampIdentityAndGreet();
+				return r.ok ? "Tracking " + rsn + " again." : "Tracking again here. " + (r.error == null ? "" : r.error);
+			}
+			case DISPUTE: {
+				var r = apiClient.postAccountAction("dispute");
+				// The site says what happens next (an XP check to prove it's yours, or that staff have it).
+				if (r.ok) return r.message == null ? "Sent." : r.message.trim();
+				return r.error == null ? "Couldn't send that — try again." : r.error;
+			}
+			default:
+				return "";
+		}
+	}
+
+	// One-shot per login: say something about the plugin's own setup when there is something to say.
+	// Not signed in is a fresh install, which used to get silence and now gets pointed at the way in;
+	// signed in = connected, nothing to say. See SetupNudge for the rule
+	// and the copy, and for why the fresh-install line is capped instead of repeating forever.
+	boolean setupWarned;
+
+	void checkSetup() {
+		if (setupWarned) return;
+		int shown = firstRunNudgesShown();
+		var kind = SetupNudge.decide(config.playerToken(), shown);
+		if (kind == SetupNudge.Kind.NONE) return;
+		setupWarned = true;
+		for (var line : SetupNudge.lines(kind)) sendChatMessage(line);
+		// Counted on the install, not in memory: the point of the cap is that it survives the
+		// restarts, and an in-memory count would re-arm every time RuneLite opened — which is
+		// the nag the cap exists to prevent.
+		if (kind == SetupNudge.Kind.FIRST_RUN) cfgSet(CFG_FIRST_RUN_NUDGES, String.valueOf(shown + 1));
+	}
+
+	/** How many first-run nudges this install has already printed. Absent/garbage reads as none. */
+	int firstRunNudgesShown() {
+		return (int) Math.max(0, cfgLong(CFG_FIRST_RUN_NUDGES));
+	}
+
+	// Warn once per session (per event) when the logged-in RSN is a player in a live bingo that isn't
+	// linked to this account — otherwise tracking is silently off. The server flags it; reset on logout.
+	String unlinkedWarnedFor;
+
+	void warnUnlinkedRsn(String eventName) {
+		if (eventName == null || eventName.equals(unlinkedWarnedFor)) return;
+		unlinkedWarnedFor = eventName;
+		var rsn = getLocalPlayerName();
+		sendChatMessage((rsn != null ? rsn : "This account") + " is playing in \"" + eventName
+				+ "\" but isn't linked to your Soulrend account — your drops won't count. Verify this RSN on the Soulrend site.");
+	}
+
+	// ---- Connection-health nag: broken Account Token / unreachable site ----
+	// A configured plugin whose token is rejected (401/403) or whose site won't resolve tracks
+	// nothing, silently. We surface that in chat — but only after the failure has PERSISTED past a
+	// grace window (so a brief blip, e.g. right after the PC wakes, doesn't nag), then at most once
+	// every few minutes. Driven from the 30s config refresh, the one choke point for authed
+	// connectivity, so it covers both the active-event and weekly-only cases.
+	enum ConnProblem { NONE, TOKEN, UNREACHABLE }
+	long connFailingSinceMs;   // start of the current failure streak; 0 = healthy
+	long connLastWarnedMs;     // last chat nag; 0 = not yet warned this streak
+	ConnProblem connProblem = ConnProblem.NONE;
+	// CONN_WARN_GRACE_MS = 90_000, inlined at its one use. ride out blips before the first nag
+	// CONN_WARN_INTERVAL_MS = 5 * 60_000, inlined at its one use. then re-nag at most this often
+
+	/** A config refresh succeeded — token + URL are good. Clear the streak, announce recovery once. */
+	void noteConnectionOk() {
+		if (connProblem == ConnProblem.NONE) return;
+		if (connLastWarnedMs != 0L && loggedIn()) sendChatMessage(Tone.DONE, "Soulrend: reconnected — tracking is back on.");
+		connProblem = ConnProblem.NONE;
+		connFailingSinceMs = 0L;
+		connLastWarnedMs = 0L;
+	}
+
+	/** A config refresh failed. Classify + (throttled) nag when it's a token/URL problem, not a blip. */
+	void noteConnectionProblem(IOException e) {
+		var problem = classifyConnProblem(e);
+		if (problem == ConnProblem.NONE) return; // unclassified/transient — already logged; don't guess-nag
+		var now = now();
+		if (connProblem != problem) {
+			// First failure of a streak, or the category changed (URL came back but token now bad).
+			connProblem = problem;
+			connFailingSinceMs = now;
+			connLastWarnedMs = 0L;
+		}
+		// A rejected token is the site's answer, not a blip: say so at once. Only an unreachable site gets the grace window.
+		if (problem != ConnProblem.TOKEN && now - connFailingSinceMs < 90_000 /* CONN_WARN_GRACE_MS */
+				|| connLastWarnedMs != 0L && now - connLastWarnedMs < 5 * 60_000 /* CONN_WARN_INTERVAL_MS */ // throttled
+				|| !loggedIn()) return; // no chat to read yet — hold the nag until they're in-game
+		connLastWarnedMs = now;
+		if (problem == ConnProblem.TOKEN) {
+			sendChatMessage(WARN, "Soulrend: your Account Token was rejected — tracking is OFF. "
+					+ "Press Sign out in the Soulrend side panel, then Sign in again.");
+		} else {
+			sendChatMessage(WARN, "Soulrend: can't reach the site" + configuredHostSuffix() + " — tracking is OFF. "
+					+ "Check your connection.");
+		}
+	}
+
+	static ConnProblem classifyConnProblem(IOException e) {
+		if (e instanceof java.net.UnknownHostException
+				|| e instanceof java.net.ConnectException
+				|| e instanceof java.net.SocketTimeoutException
+				|| e instanceof javax.net.ssl.SSLException) return ConnProblem.UNREACHABLE;
+		int code = e instanceof HttpStatusException ? ((HttpStatusException) e).code : 0;
+		return code == 401 || code == 403 ? ConnProblem.TOKEN : ConnProblem.NONE; // NONE: e.g. a 5xx / other transient — logged, but not a config problem
+	}
+
+	/** " (host)" for the unreachable message. */
+	String configuredHostSuffix() {
+		return " (" + BingoApiClient.CANONICAL_SITE.replaceFirst("^https?://", "") + ")";
+	}
+
+	void sendHello() {
+		if (helloSent) return;
+		var rsn = getLocalPlayerName();
+		// A placeholder name: not sent yet, the real name gets this session's hello. No URL: signed
+		// out, the plugin contacts nothing (BingoApiClient.configure).
+		if (placeholderName(rsn) || apiClient.getApiUrl().isEmpty()) return;
+		var resp = apiClient.hello(rsn);
+		helloSent = true;
+		if (resp == null) return;
+		// A clan learned after log in re-tickets the chat relay, or clan lines never reach its clan room.
+		// The site answers membership only to a signed-in caller; signed out mid-greeting, it is unknown.
+		var known = apiClient.needsSignIn() ? null : resp.knownMember;
+		if (!Objects.equals(known, knownMember)) pushSoon();
+		knownMember = known;
+		// The breadcrumb this decision never left. "Tracked as a guest" fired once against a clan the
+		// player holds a MEMBER seat in, and there was no way to tell which clan had answered or
+		// which character it had been asked about — so the message could not be checked, only
+		// believed. One line, at INFO, naming both.
+		log.info("Hello as '{}' -> clan '{}' seat={} knownMember={}",
+				rsn,
+				resp.clanName,
+				resp.seatKind != null ? resp.seatKind : "none",
+				known);
+		if (Boolean.FALSE.equals(known)) {
+			// NAME THE CLAN. Somebody who owns one clan and guests in another read "Tracked as a
+			// guest" as a claim about them, and it is a claim about them IN ONE CLAN — true there and
+			// irrelevant to the clan they run. Without the name it cannot be told apart from a wrong
+			// answer, which is exactly how it was read.
+			var where = empty(resp.clanName) ? "" : " in " + resp.clanName;
+			sendChatMessage("Tracked as a guest" + where
+					+ " — a clan admin can promote you to member on the site.");
+		}
+
+		sendBrief();
+	}
+
+	/**
+	 * Server-authoritative NPC loot (the in-game loot tracker's clientscript). The loot
+	 * signal for corpse-looted bosses — Araxxor, Maggot King's stomach loot — where the
+	 * client-side despawn inference behind NpcLootReceived never fires. NOT sufficient on
+	 * its own: loot that bypasses the in-game tracker (Maggot King's spill-out uniques)
+	 * only surfaces in the drop-attribution chat line — see creditDropFromChat. For
+	 * regular NPCs it can double-fire alongside NpcLootReceived; the per-(tile,item)
+	 * credit dedup and the per-item rare-drop dedup both absorb that. Kill counting stays
+	 * on NpcLootReceived + the Jagex KC chat line (which already covers these bosses), so
+	 * kills never double.
+	 */
+	@Subscribe
+	void onServerNpcLoot(ServerNpcLoot event) {
+		if (event.getComposition() == null) return;
+		var firstServerLoot = !serverNpcLootSeen;
+		serverNpcLootSeen = true;
+		var name = event.getComposition().getName();
+		if (pickpocketTick == client.getTickCount()) {
+			// A pocket, not a kill: its items still count as pickpocket loot, but no kill, no value
+			// haul (LootReceived PICKPOCKET prices it) and no vestige roll.
+			processLoot(name, event.getItems(), "pickpocket");
+			maybeNotifyRareDrop(name, event.getItems(), "pickpocket");
+			return;
+		}
+		npcLoot(name, event.getItems());
+		maybeNotifyRareDrop(name, event.getItems(), "npc");
+		// Count kills + value off the SERVER event — it fires once per real kill, so a barraged clump of
+		// same-tick deaths is counted in full (NpcLootReceived under-fires those). See serverNpcLootSeen.
+		if (firstServerLoot && name != null && name.equalsIgnoreCase(fallbackKillName)
+			&& client.getTickCount() - fallbackKillTick <= 2 /* FALLBACK_KILL_TICKS */) return; // the client-side fallback already counted this very kill (see fallbackKillName)
+		processValueTiles(name, event.getItems(), "npc");
+		processNpcKill(name);
+	}
+
+	/** A kill's loot: its vestige rolls, then the drop tiles for whatever no chat line already credited. */
+	void npcLoot(String name, Collection<ItemStack> items) {
+		trackVestigeRolls(name, items);
+		processLoot(name, chatCredits.unclaimed(items, now()), "npc");
+	}
+
+	@Subscribe
+	void onNpcLootReceived(NpcLootReceived event) {
+		var name = event.getNpc().getName();
+		npcLoot(name, event.getItems());
+		recordEventLoot(name, event.getItems(), "npc");
+		maybeNotifyRareDrop(name, event.getItems(), "npc");
+		// Kill + value counting is owned by ServerNpcLoot when the client emits it (accurate under
+		// clumps); fall back to this client-side event only when it doesn't, so the two never
+		// double-count a kill. Everything above runs either way — those are per-DROP, not per-kill,
+		// and ServerNpcLoot carries the same items.
+		if (!serverNpcLootSeen) {
+			fallbackKillName = name;
+			fallbackKillTick = client.getTickCount();
+			processValueTiles(name, event.getItems(), "npc");
+			processNpcKill(name);
+		}
+	}
+
+	@Subscribe
+	void onLootReceived(LootReceived event) {
+		// Minigame loot isn't real — an LMS kill "drops" the victim's throwaway loadout — so never
+		// post it to the drops channel or feed it to any bingo tile (drop/value/rare-drop).
+		if (lmsInGame) return;
+		// The ToA chest: by now the raid level has taken any failed timer's cut.
+		if (!heldToaRuns.isEmpty() && event.getName() != null && RaidGates.isToa(event.getName())) judgeHeldToaRuns(raidLevelNow());
+		// Covers raid chests, clue caskets, barrows, implings, AND opened loot keys.
+		// We classify the source so per-tile filters can reject drops from the wrong
+		// place (e.g. a "CoX Dragon claws" tile shouldn't credit a PK loot key).
+		var kind = "event"; // raid chests / barrows / wt / clues
+		switch (event.getType()) {
+			case NPC: kind = "npc"; break;
+			case PLAYER: kind = "pvp"; break;
+			case PICKPOCKET: kind = "pickpocket";
+		}
+		// A Wilderness loot key ("Loot Chest") holds PK loot, but RuneLite reports opening it as an
+		// EVENT (like a raid chest), not a PLAYER kill. Without this override it dodges the "PvP loot
+		// rejected by default" drop-tile guard, so PK'd items (dragon boots, berserker ring, …) wrongly
+		// credit PvM drop tiles. Treat key contents as pvp: PvM tiles reject them, pvp/value tiles keep them.
+		if (isLootKeyEvent(event.getName())) kind = "pvp";
+		// Clue caskets arrive under RuneLite's casket/trail name, which varies by version
+		// ("Reward Casket (Master)" / "Master Treasure Trail" / "Clue Scroll (Master)"); fold them all
+		// to the "Clue Scroll (Tier)" the source picker offers so a clue-restricted drop tile matches.
+		var source = normalizeClueSource(event.getName());
+		// Loot RuneLite builds from an INVENTORY DIFF (rubbing a tarnished Maggot King drop clean)
+		// also picks up a gear swap made in the same moment: an unequipped Inquisitor's hauberk
+		// landing in the inventory was reported as "loot from Tarnished longsword", credited an
+		// "any Nightmare unique" tile and posted a 94m rare drop. Nothing worn a tick ago is loot.
+		// Same for a searched bird nest: a Lightbearer taken off as the nest opened posted as a 3m drop.
+		List<ItemStack> items = new ArrayList<>(event.getItems());
+		if (isInventoryDiffLoot(source, event.getType())) {
+			var worn = new HashSet<>(lastWornItemIds);
+			worn.addAll(wornItemIds());
+			items = withoutWorn(items, worn);
+			if (items.isEmpty()) return;
+		}
+		// Count the OPEN itself, not just what fell out — this is what lets a kill tile target a
+		// chest ("open Larran's big chest 20 times") or a casket tier. The loot event is the only
+		// trustworthy signal for those: the game's own "You have opened the crystal chest 128
+		// times." line is a query RESPONSE (it has a "never opened" form), so counting occurrences
+		// of it would credit nothing for a real open and everything for someone re-asking.
+		//
+		// Routed through the loot-driven kill path on purpose: it already stands down for any
+		// source that also prints a "count is:" chat line, so a CoX chest can't credit the same
+		// raid twice. Restricted to EVENT loot — NPC kills come through onNpcLootReceived, and
+		// loot keys were re-typed to "pvp" above.
+		if ("event".equals(kind)) processNpcKill(source);
+		processLoot(source, chatCredits.unclaimed(items, now()), kind);
+		processValueTiles(source, items, kind);
+		recordEventLoot(source, items, kind);
+		maybeNotifyRareDrop(source, items, kind);
+	}
+
+	/** Loot sources RuneLite reads off an inventory diff, which a same-tick gear swap pollutes. */
+	static boolean isInventoryDiffLoot(String source, LootRecordType type) {
+		if (source == null || type == LootRecordType.NPC || type == LootRecordType.PLAYER) return false;
+		var s = source.toLowerCase();
+		// "Tarnished chest" is a chest, not the rub-clean diff.
+		if (s.startsWith("tarnished ")) return !s.equals("tarnished chest");
+		// Nests, sacks, crates, chests and pickpockets are all read off the inventory. Only reward
+		// windows aren't, and there a worn copy of the reward is a real second drop.
+		for (var w : REWARD_WINDOWS) if (s.contains(w)) return false;
+		return true;
+	}
+
+	static final String[] REWARD_WINDOWS = {"chambers of xeric", "theatre of blood", "tombs of amascut",
+		"barrows", "clue scroll", "fortis colosseum", "lunar chest", "gauntlet"};
+
+	/** {@code items} minus anything the player was wearing (an unequip, not a reward). */
+	static List<ItemStack> withoutWorn(Collection<ItemStack> items, Set<Integer> wornIds) {
+		var out = new ArrayList<>(items);
+		out.removeIf(it -> wornIds.contains(it.getId()));
+		return out;
+	}
+
+	static final String[] CLUE_TIERS = {"beginner", "easy", "medium", "hard", "elite", "master"};
+
+	/** Normalise any clue-casket loot source to "Clue Scroll (Tier)" (the source-picker form); returns
+	 *  {@code name} unchanged when it isn't a tiered clue reward (e.g. a Tempoross casket, which has no
+	 *  clue tier). */
+	static String normalizeClueSource(String name) {
+		if (name == null) return null;
+		var lower = name.toLowerCase(ROOT);
+		if (!lower.contains("clue") && !lower.contains("treasure trail") && !lower.contains("casket")) return name;
+		for (var tier : CLUE_TIERS) {
+			if (lower.contains(tier)) return "Clue Scroll (" + Character.toUpperCase(tier.charAt(0)) + tier.substring(1) + ")";
+		}
+		return name;
+	}
+
+	@Subscribe
+	void onPlayerLootReceived(PlayerLootReceived event) {
+		if (lmsInGame) return; // LMS PvP loot is minigame loot — not a real drop; skip tiles + the drops channel.
+		var name = event.getPlayer().getName();
+		processLoot(name, event.getItems(), "pvp");
+		processValueTiles(name, event.getItems(), "pvp");
+		recordEventLoot(name, event.getItems(), "pvp");
+		// Credit any PvP kill tile with a min-loot floor that was parked at the death and whose loot
+		// (priced here) reaches the floor. No-op unless such a kill is pending for this victim.
+		creditPvpMinLootKillTiles(name, event.getItems());
+		maybeNotifyRareDrop(name, event.getItems(), "pvp");
+	}
+
+	/**
+	 * Loot-value tiles ("loot worth ≥ X gp"): price the WHOLE haul (GE value of every item) and, when
+	 * a single haul from a matching source meets the threshold, submit it with a baked screenshot —
+	 * the value-tile equivalent of the drop pipeline. The server decides completion (single-haul: a
+	 * submission ≥ threshold). Source filter mirrors the site: "PvP" = a player kill, "Loot Chest" =
+	 * an opened loot key, otherwise an NPC/chest name; empty = any.
+	 */
+	void processValueTiles(String source, Collection<ItemStack> items, String sourceKind) {
+		if (trackingGateReason() != null || items == null || items.isEmpty()) return;
+		var gp = haulValue(items);
+		// One kill reaches us twice (ServerNpcLoot / NpcLootReceived, then LootReceived): one haul.
+		if (claim(lastSubmittedAt, "value:" + source + ":" + gp, now(), DEDUP_WINDOW_MS)) emit(rules.value(source, sourceKind, gp));
+	}
+
+	/** GE value of a whole haul. Client thread only (itemManager.getItemPrice). */
+	long haulValue(Collection<ItemStack> items) {
+		long haulGp = 0;
+		for (var it : items) {
+			if (it != null && it.getId() > 0) haulGp += (long) Math.max(0, itemManager.getItemPrice(it.getId())) * Math.max(1, it.getQuantity());
+		}
+		return haulGp;
+	}
+
+
+
+	/**
+	 * Something acquired or dropped us as its target.
+	 *
+	 * <p>The only attribution the client offers for incoming damage: a hitsplat says how much and
+	 * what type, never who. Keeping the set of things currently on us is what lets a death name the
+	 * thing that killed it rather than the thing it was killing (DeathAttribution).
+	 */
+	@Subscribe
+	void onInteractingChanged(InteractingChanged event) {
+		var source = event.getSource();
+		if (source == null || source == client.getLocalPlayer()) return; // our own target changing is the other question entirely
+		var name = source.getName();
+		if (name == null || name.isEmpty()) return;
+		// A follower targets its owner to follow them. That is not an attack, but without this
+		// distinction the pet can become the newest candidate and be named after unrelated damage.
+		if (source == client.getFollower()) {
+			deathAttribution.stoppedTargetingUs(name);
+			return;
+		}
+		if (event.getTarget() == client.getLocalPlayer()) deathAttribution.targetedUs(name, source instanceof Player, now());
+		else deathAttribution.stoppedTargetingUs(name);
+	}
+
+	/** An NPC that despawns while on us never "stops targeting" us: drop it, or a Kephri scarab is blamed at Zebak. */
+	@Subscribe
+	void onNpcDespawned(NpcDespawned event) {
+		var npc = event.getNpc();
+		if (npc.getInteracting() == client.getLocalPlayer()) deathAttribution.stoppedTargetingUs(npc.getName());
+	}
+
+	@Subscribe
+	void onHitsplatApplied(HitsplatApplied event) {
+		var ourHit = event.getHitsplat();
+		var actor = event.getActor();
+		var self = client.getLocalPlayer();
+		// Damage TAKEN — the clock a death is attributed against. ANY hit landing on us counts: the
+		// game draws damage we take with the "me" hitsplats and poison / venom / disease with their
+		// own, so testing isOthers() (damage by another player) missed nearly every hit and every
+		// poison tick, and deaths went out with no killer ("Died" to a Hydra that poisoned us). A
+		// mechanic with nobody behind it counts too: the point is when we were last hurt, and whether
+		// anything had us targeted at the time is decided at death. Heals aren't damage.
+		if (ourHit != null && ourHit.getAmount() > 0 && ourHit.getHitsplatType() != HitsplatID.HEAL
+				&& actor == self) deathAttribution.tookDamage(now());
+		// Biggest hit of the event — a recap superlative, so it counts every hit we land on anything,
+		// player or NPC, and is independent of the PvP gates below. One int compare per hitsplat.
+		if (ourHit != null && ourHit.isMine() && ourHit.getAmount() > 0) {
+			recordEventHit(ourHit.getAmount());
+			// Remember WHAT we're fighting, which a death is later attributed against. One field
+			// write per landed hit.
+			if (actor != null && actor != self) {
+				var tname = actor.getName();
+				if (tname != null && !tname.isEmpty()) {
+					lastCombatTarget = tname;
+					lastCombatTargetAt = now();
+				}
+			}
+		}
+
+		// Track damage WE deal to other players so a subsequent death can be attributed to us —
+		// this drives BOTH the PvP kill notification AND PvP-kill tile credit. Cheap: a couple of
+		// reference checks on the client thread. (Loot-key kills produce no reliable chat/loot
+		// signal — the kill message is a random taunt pool and PlayerLootReceived never fires since
+		// the loot goes into a key, not onto the ground — so damage→death is the signal we use.)
+		Me me = me();
+		if ((me == null || !me.pvp) && !hasPvpTiles() && !pvpCounterActive()) return;
+		if (ourHit == null || !ourHit.isMine()) return;
+		if (!(actor instanceof Player) || actor == self) return;
+		var name = actor.getName();
+		if (name == null || name.isEmpty()) return;
+		synchronized (lastDamagedPlayerAt) {
+			var now = now();
+			// Pruned here too: a session of hits with no kill would otherwise only ever grow it.
+			lastDamagedPlayerAt.values().removeIf(t -> now - t > PVP_KILL_ATTRIBUTION_MS);
+			lastDamagedPlayerAt.put(name.toLowerCase(), now);
+		}
+	}
+
+	/**
+	 * Opens the OS file picker to add WAVs of {@code kind}. Wired to the "Banner sounds" and "Mission
+	 * sounds" buttons in the side panel (see SoulrendSidebarPanel.buildPanelActions).
+	 *
+	 * <p>New banner clips join the cycle automatically (empty allowlist = all clips play); users curate
+	 * it by tapping them in the tab list. Missions get a separate folder rather than a separate
+	 * setting: adding a clip there is the whole act of choosing one, and an empty folder means
+	 * missions keep the built-in chime that tells them apart from a completed tile.</p>
+	 */
+	void importSounds(BannerSoundService.Kind kind) {
+		var banner = kind == BannerSoundService.Kind.BANNER;
+		bannerSound.importSounds(kind, names -> sendChatMessage("Added to " + (banner ? "banner" : "mission")
+				+ " sounds: " + String.join(", ", names) + (banner
+						? ". All clips cycle by default — tap one in the Soulrend side panel to toggle it on/off."
+						: ". Missions play these now, instead of the game sound they used before.")));
+	}
+
+	/** Clip filenames in {@code kind}'s folder — the tab's list; missions say "chime" when it's empty. */
+	List<String> soundClips(BannerSoundService.Kind kind) {
+		return bannerSound.listClips(kind);
+	}
+
+	/**
+	 * Whether {@code name} is currently in the play cycle (for the tab's on/off
+	 * rendering).
+	 */
+	boolean bannerSoundSelected(String name) {
+		return bannerSound.isSelected(name);
+	}
+
+	/**
+	 * Toggles a clip in/out of the play cycle from the tab. The cycle is
+	 * persisted as the comma-separated 'bannerSoundClip' allowlist; an empty
+	 * allowlist means "all clips play", so we materialise the full set before
+	 * removing one, and collapse back to empty when everything's on.
+	 */
+	void toggleBannerSound(String name) {
+		var all = bannerSound.listClips(BannerSoundService.Kind.BANNER);
+		var sel = BannerSoundService.parseSelected(config.bannerSoundClip());
+		if (sel.isEmpty()) sel.addAll(all); // blank = everything on; materialise so we can switch one off
+		sel.remove("-.wav"); // "none ticked", below
+
+		// Toggle by case-insensitive filename match.
+		if (!sel.removeIf(s -> s.equalsIgnoreCase(name))) sel.add(name);
+
+		// If every clip ends up selected, store blank ("all") to keep the value tidy and future-proof
+		// against newly-added files (which should default to on). None ticked can't be blank too (it
+		// read back as "all", so muting the last clip unmuted every one): it is stored as "-", which
+		// parseSelected reads as a name no clip has.
+		cfgSet("bannerSoundClip", sel.size() == all.size() && all.size() > 0 ? "" : sel.isEmpty() ? "-" : String.join(", ", sel));
+	}
+
+	/**
+	 * Puts the sounds folder's path on the clipboard, for deleting clips by hand.
+	 *
+	 * <p>It used to open the folder. LinkBrowser::open is restricted for plugin-hub releases, so the
+	 * player pastes the path instead — and is told that's what happened, because a button that
+	 * silently does something other than what it says is worse than one that does less.
+	 */
+	void copyBannerSoundsPath() {
+		bannerSound.copyFolderPath();
+		sendChatMessage("Sounds folder path copied — paste it into your file manager.");
+	}
+
+
+	/**
+	 * Plays the banner sound and, the first time it fires with sound enabled
+	 * but no clips installed, nudges the user to the "Banner sounds" button in
+	 * the Soulrend side panel. Fires at most once per session so it never
+	 * spams.
+	 */
+	void playBannerSound() {
+		bannerSound.play(BannerSoundService.Kind.BANNER);
+		if (bannerSoundHintShown || !config.bannerSound()) return;
+		// hasClips lists the sounds folder, and this runs on the client thread: look on the executor.
+		submit(() -> {
+			if (!bannerSoundHintShown && !bannerSound.hasClips(BannerSoundService.Kind.BANNER)) {
+				bannerSoundHintShown = true;
+				sendChatMessage("Banner sound is on but you have no clips yet — open the Soulrend side panel "
+						+ "and click \"Banner sounds\" to add a .wav.");
+			}
+		});
+	}
+
+	/**
+	 * The mission cue. A mission DROPPING is the opposite kind of news from a tile being finished, so
+	 * sharing the completion clip made the two indistinguishable.
+	 *
+	 * <p>THE FOLDER DECIDES, not a setting. A .wav in {@code sounds/mission/} is played for missions;
+	 * an empty folder falls back to a short built-in game chime, which needs nothing installed and is
+	 * unmistakably not the completion sound. This used to be a toggle choosing between that chime and
+	 * the banner clip — which meant the one thing nobody could do was give missions a clip of their
+	 * own.</p>
+	 *
+	 * Runs from the config-poll executor, so the actual play hops to the client thread.
+	 *
+	 * @param claimed false when a mission is announced, true when someone claims one — a slightly
+	 *                different chime, so "new thing to do" and "someone beat you to it" don't sound alike.
+	 */
+	void playMissionSound(boolean claimed) {
+		if (!config.bannerSound()) return; // the master "make noise at me" switch still wins
+		if (bannerSound.hasClips(BannerSoundService.Kind.MISSION)) {
+			bannerSound.play(BannerSoundService.Kind.MISSION);
+			return;
+		}
+		int id = claimed ? net.runelite.api.SoundEffectID.GE_COLLECT_BLOOP : net.runelite.api.SoundEffectID.GE_ADD_OFFER_DINGALING;
+		clientThread.invoke(() -> client.playSoundEffect(id));
+	}
+
+	@Subscribe
+	void onChatMessage(ChatMessage event) {
+		var msg = event.getMessage();
+		if (msg == null || msg.isEmpty()) return;
+		maybeKeepFlairBroadcast(event);
+		relayHeard(event);
+		var ct = event.getType();
+		var plain = stripChatTags(msg);
+
+		// Every coffer use is announced to the whole clan ("X has deposited 519 coins into the coffer."),
+		// the actor included. Each client reports only its own player's line; the site books the
+		// movement with it once a coffer reading shows the money.
+		if (ct == CLAN_MESSAGE) maybeReportCofferLine(msg);
+		// On a game-mode world the site turns the game's announcements into relic/area/task posts.
+		if (ct == GAMEMESSAGE && config.shareSeasonal() && WorldInfo.separateSave(client.getWorldType())) modeLines.offer(msg, now());
+		if (ct == GAMEMESSAGE || ct == SPAM || ct == TRADE) watchLine(plain);
+		// A death with no ActorDeath behind it (doomed in the Colosseum) still prints the game's own line.
+		if (ct == GAMEMESSAGE && plain.equals("Oh dear, you are dead!") && now() - ownDeathAt > 15_000) ownDeath();
+
+		// The widget tracker still uses a line naming this player to attribute its own readings.
+		// Player-authored channels are excluded so typing a sentence cannot name oneself as actor.
+		if (!PLAYER_AUTHORED_CHAT.contains(ct)) {
+			var line = BingoApiClient.obj("tick", client.getTickCount(), "type", ct.name(), "text", msg);
+			synchronized (recentChat) {
+				recentChat.addLast(line);
+				if (recentChat.size() > 30) recentChat.removeFirst();
+			}
+			var sender = event.getName();
+			var cofferLine = sender == null || sender.trim().isEmpty() ? msg : sender + " " + msg;
+			clanCofferTracker.onChatLine(stripChatTags(cofferLine), getLocalPlayerName(), now());
+
+			// Server drop-attribution lines — the ONLY signal for drops that bypass both loot
+			// events (Maggot King's spill-out uniques). Parsed from ANY non-player-authored
+			// channel (see PLAYER_AUTHORED_CHAT): the personal line's exact type is unverified,
+			// and an allowlist that guessed wrong would eat these silently. Two variants, both
+			// recipient-checked inside creditDropFromChat so only the drop's owner acts:
+			//   personal  "Nisbro received a drop: Elder venator fang (Maggot King)"
+			//   clan      "Nisbro received a drop: Elder venator fang (50,000,000 coins) from
+			//             Maggot King." — fallback for members whose in-game loot-notification
+			//             setting is off; guests outside the clan rely on the personal line.
+			var stripped = MARKUP_TAG.matcher(msg).replaceAll("");
+			if (ChatPatterns.full("pickpocket", stripped) != null) pickpocketTick = client.getTickCount();
+			noteChestDropLine(stripped);
+			// LMS win: the line arrives as the game ends, with BR_INGAME up or just cleared.
+			if (ChatPatterns.full("lms.victory", stripped.trim()) != null && !lmsPlacementRecorded
+					&& (lmsInGame || client.getTickCount() - lmsEndedTick <= 5)) recordLmsPlacement(1);
+			var larran = ChatPatterns.full("chest.larran", stripped);
+			if (larran != null) onLarranChestOpened(larran.group("size"));
+			if (ChatPatterns.mayMatch("drop.clan_broadcast", msg) || ChatPatterns.mayMatch("drop.personal", msg)) {
+				// Each line shape matches exactly one of the two patterns (DropNotificationLineTest
+				// pins this down both ways), so a single chat line can never credit twice here.
+				var drop = ChatPatterns.full("drop.clan_broadcast", stripped);
+				if (drop == null) drop = ChatPatterns.full("drop.personal", stripped);
+				if (drop != null) creditDropFromChat(drop.group("rsn"), drop.group("qty"), drop.group("item"), drop.group("source"));
+			}
+
+			// THE CLAN'S COPY OF A COLLECTION-LOG UNLOCK, and it has to be read UP HERE.
+			//
+			// Same shape as the drop broadcast above and for the same reason: the personal line
+			// depends on an in-game setting the player may never have turned on, the clan's copy
+			// depends on the clan's settings instead. It also has to be read before the type gate
+			// below, which accepts only GAMEMESSAGE/SPAM/MESBOX/FRIENDSCHATNOTIFICATION — a clan
+			// broadcast is none of those, so a check placed with the personal line would compile,
+			// read correctly, and never once run.
+			//
+			// Only ever acted on for the LOCAL player: a clanmate's unlock is their own client's to
+			// report, and posting it from here would file their slot under this account.
+			if (msg.contains("funny feeling like") || msg.contains("sneaking into")
+					|| msg.contains("acquired something special")) {
+				var petBroadcast = CLAN_PET_BROADCAST_PATTERN.matcher(plain);
+				if (petBroadcast.matches() && Rsn.same(petBroadcast.group(1), getLocalPlayerName())) {
+					var pet = claimPetName(petBroadcast.group(2).trim());
+					// "Orion at 80 completions": a pet with no loot source to count (an activity, not a
+					// kill) takes its count from the broadcast.
+					if (pet != null && petBroadcast.group(3) != null) synchronized (petLock) {
+						if (pet.resolvedKc == null) pet.resolvedKc = Integer.valueOf(petBroadcast.group(3).replace(",", ""));
+					}
+				}
+			}
+			if (ChatPatterns.mayMatch("clog.clan_broadcast", msg)) {
+				var clogBroadcast = ChatPatterns.full("clog.clan_broadcast", plain);
+				if (clogBroadcast != null && Rsn.same(clogBroadcast.group("rsn"), getLocalPlayerName())) handleClogUnlock(clogBroadcast.group("item").trim());
+			}
+		}
+
+		// FRIENDSCHATNOTIFICATION carries the ToA/ToB raid completion-TIME summary lines
+		// ("… total completion time: mm:ss") — a legacy channel, NOT GAMEMESSAGE — so it must
+		// be accepted or timed raid clears never see the real raid time and mis-correlate a
+		// per-room duration instead. This mirrors RuneLite's own ChatCommandsPlugin, which
+		// allows the same type for exactly this reason.
+		if (!PARSED_CHAT.contains(ct)) return;
+		// Collection-log unlocks — the reliable signal for awarded prestige items (Infernal cape,
+		// Dizana's quiver, …) that don't fire a loot event. Strip any styling first — both forms,
+		// or an @ach_comp@ ends up part of a task name (see CHAT_TAG) — `plain` above.
+		// Personal bests, captured whether or not an event is running — a best time is a profile
+		// fact, not an event one. Costs one indexOf on lines that don't mention a personal best,
+		// which is all of them bar a handful a session.
+		if (config.syncPersonalBests()) personalBests.onChatLine(plain, now());
+		// Track boss/raid kill counts so a rare-drop post can show the KC the drop landed on.
+		// The Jagex kill-count line is also the reliable kill signal for bosses whose loot comes
+		// from corpse interaction rather than a normal on-death drop (Maggot King, Araxxor, …),
+		// where NpcLootReceived may never fire — so it drives kill-count tiles for those bosses.
+		var kcMatcher = find("kc.count", plain);
+		if (kcMatcher != null) {
+			try {
+				var kcName = kcMatcher.group("name").trim();
+				var kcKey = kcName.toLowerCase();
+				// Name the activity for personal-best correlation. Free — this line is already
+				// parsed for kill crediting, so PB capture adds no regex to the chat hot path.
+				if (config.syncPersonalBests()) personalBests.onActivitySeen(kcName, now());
+				var firstSeen = !killCounts.containsKey(kcKey);
+				int kc = Integer.parseInt(kcMatcher.group("count").replace(",", ""));
+				killCounts.put(kcKey, kc);
+				lastKcName = kcName;
+				lastKcValue = kc;
+				lastKcAtMs = now();
+				creditBossKillFromChat(kcName, firstSeen);
+				// Real-time boss-KC tiles: push the absolute count so the tile updates now instead
+				// of waiting ~1h for the hiscores cron (debounced).
+				maybeQueueKcPush(kcName, kc);
+				// Guaranteed completion awards (Infernal cape, Fire cape) credit off the KC
+				// line — the only signal that fires on repeat completions.
+				var award = GUARANTEED_AWARDS.get(kcKey);
+				if (award != null) creditGuaranteedAward(kcName, award);
+			} catch (NumberFormatException ignored) {
+			}
+		}
+		// Doom: push the deep-delve count as its boss KC. Deliberately NOT through the kill-line path
+		// above: that would put Doom in killCounts, and the loot path would then stop crediting the
+		// delve 1-8 kills that Doom kill tiles count today.
+		var delveMatcher = find("kc.deep_delves", plain);
+		if (delveMatcher != null) {
+			try {
+				int kc = Integer.parseInt(delveMatcher.group("count").replace(",", ""));
+				lastKcName = DOOM_BOSS_NAME;
+				lastKcValue = kc;
+				lastKcAtMs = now();
+				maybeQueueKcPush(DOOM_BOSS_NAME, kc);
+			} catch (NumberFormatException ignored) {
+			}
+		}
+		// Hallowed Sepulchre — its own line shapes (see the patterns above). A floor clear credits
+		// that floor and the any-floor name; the Grand Hallowed Coffin credits a complete run.
+		var floorMatcher = find("sepulchre.floor", plain);
+		if (floorMatcher != null) creditNamedCounter("Hallowed Sepulchre Floor " + floorMatcher.group("floor"), "Hallowed Sepulchre" /* SEPULCHRE_ANY */);
+		if (find("sepulchre.coffin", plain) != null) creditNamedCounter("Grand Hallowed Coffin" /* SEPULCHRE_COFFIN */);
+		// Hunter Guild rumours and Woodcutting Guild egg offerings — same one-line-one-credit rule.
+		if (find("counter.hunter_rumour", plain) != null) creditNamedCounter("Hunter Rumours" /* HUNTER_RUMOURS */);
+		if (find("counter.egg_offering", plain) != null) creditNamedCounter("Bird's egg offerings" /* EGG_OFFERINGS */);
+		// counter.doom_delve deliberately credits nothing: "Doom of Mokhaiotl delves" is the sum of
+		// the per-level completion varps (site lib/gameCounters), which counts the same delves.
+		if (find("counter.reward_search", plain) != null && regionId() == 14484 /* GOTR_REGION */) creditNamedCounter(GOTR_SEARCHES);
+		var vale = find("counter.vale_offerings", plain);
+		if (vale != null) creditNamedCounter("five".equalsIgnoreCase(vale.group("times")) ? 5 : 1, null, VALE_RESEARCH);
+		if (find("counter.sunstone_golem", plain) != null) creditNamedCounter(SUNSTONE_GOLEMS);
+		var energy = find("counter.gotr_energy", plain);
+		if (energy != null) {
+			int elemental = parseCount(energy.group("elemental"));
+			int catalytic = parseCount(energy.group("catalytic"));
+			var amounts = new HashMap<String, Integer>();
+			amounts.put(GOTR_ELEMENTAL, elemental);
+			amounts.put(GOTR_CATALYTIC, catalytic);
+			amounts.put(GOTR_ENERGY_TOTAL, elemental + catalytic);
+			if (!trackingOff()) emit(rules.kill(amounts, null, null));
+		}
+		// (PvP-kill tiles are credited off the victim's death in onActorDeath — damage-attributed,
+		// so it works for loot-key kills where no reliable "you defeated X" chat line exists.)
+		var clogLine = find("clog.unlock", plain);
+		if (clogLine != null) {
+			var item = clogLine.group("item").trim();
+			if (item.endsWith(".")) item = item.substring(0, item.length() - 1).trim();
+			handleClogUnlock(item);
+		}
+		// (Drop-attribution lines are handled ABOVE the type gate — they parse from any
+		// non-player-authored channel, not just the three types this section accepts.)
+		// Combat achievement task completion. Credits CA bingo tiles first (independent of the
+		// notification toggle), then — when announcements are on — stashes the parse to finish
+		// on the next game tick (the points varbit hasn't settled yet; it's read there to detect
+		// a tier clear). With the in-game "Repeat completion" setting on, already-owned tasks
+		// re-fire this exact line (plus a " (N points)" suffix), which is what lets CA tiles
+		// count tasks the player completed before the event.
+		var caMatcher = find("ca.task", plain);
+		if (caMatcher != null) {
+			var caTier = CombatAchievementTier.byName(caMatcher.group("tier"));
+			if (caTier != null) {
+				var caTask = CA_TASK_POINTS.matcher(caMatcher.group("task").trim()).replaceAll("").trim();
+				// Breadcrumb so client.log shows the parse even when no tile matches.
+				creditCombatTaskTiles(caTier, caTask);
+				// Stashed unconditionally: the next tick reads the points varbit, which is what
+				// tells a genuine first completion from a "Repeat completion" echo — and the
+				// highlight feed and the recap counter both need that answer whether or not this
+				// player has the achievements channel switched on.
+				pendingCaTasks.add(new PendingCaTask(caTier, caTask));
+			}
+		}
+		// Achievement-diary tier completions — announce to the clan achievements channel and
+		// credit any diary bingo tiles. The line fires exactly once per account per tier.
+		var diaryMatcher = find("diary.complete", plain);
+		if (diaryMatcher != null) {
+			var tier = diaryMatcher.group("tier").trim();
+			tier = Character.toUpperCase(tier.charAt(0)) + tier.substring(1).toLowerCase();
+			var area = diaryMatcher.group("area").trim();
+			// The game emits this completion line on more than one chat channel (e.g. GAMEMESSAGE
+			// + SPAM), so onChatMessage sees it twice — dedup by (area, tier) or we'd double-post
+			// the announcement AND double-credit the tile. The line can't legitimately re-fire
+			// (once per account per tier ever), so a short window is safe.
+			if (claim(lastDiaryHandledAt, (area + "|" + tier).toLowerCase(ROOT), now(),
+					15_000 /* DIARY_DEDUP_MS */)) {
+				// Rare (once per account per tier) — a breadcrumb so client.log shows the parse
+				// even when no tile matches.
+				maybeNotifyDiaryCompletion(area, tier);
+				recordFeedMoment(new Moment("diary", null, area, 1, null, null, null, null, null, tier,
+						now(), ("diary|" + area + "|" + tier).toLowerCase(ROOT)));
+				creditDiaryTiles(area, tier);
+			}
+		}
+		// Level milestones. The level-up message fires once when the level is reached, so no
+		// varbit/baseline dance needed.
+		Me me = me();
+		if (me != null && me.levels && !statsUnsettled && !statsAreArtificial()) {
+			var lvl = find("level.up", plain);
+			if (lvl != null) {
+				try {
+					int level = Integer.parseInt(lvl.group("level"));
+					if (level == 99) recordLevelMoment(lvl.group("skill").trim(), 99, "skill");
+					// Same key as the StatChanged sighting, so whichever arrives first wins and the
+					// other collapses onto it rather than posting the level twice.
+					handleLevelMilestone(lvl.group("skill").trim(), level - 1, level);
+				} catch (NumberFormatException ignored) {
+				}
+				// Any level gain bumps total — check for a high-total milestone (or max) crossing.
+				handleTotalMilestone();
+			}
+		}
+		// Pet drops — no LootReceived fires for these. The third line is the duplicate ("would have
+		// been followed") shown when the pet is already owned; we handle it the same, so a member who
+		// already has the pet still gets a proof for the tile.
+		var duplicatePet = find("pet.duplicate", msg) != null;
+		if (duplicatePet || find("pet.drop", msg) != null) {
+			// Notify the clan rare-drops channel (independent of bingo — fires even with no event)
+			// and note it for the clan's highlight feed, which is NOT gated on that channel.
+			// A duplicate never fires a collection-log unlock (the slot is already filled), so it
+			// posts unnamed — which is why the two cases are told apart rather than merged.
+			handlePetDrop(duplicatePet);
+			// A NEW pet credits its tile off the collection-log line that follows (creditClogUnlock). A
+			// duplicate gets no such line, so work out which pet from what was just killed or trained:
+			// named, the post says so and the tile is credited — flagged for staff, since it's a guess.
+			var inferredPet = duplicatePet ? inferDuplicatePet() : null;
+			if (inferredPet != null) claimPetName(inferredPet);
+			if (duplicatePet && hasEvent()) {
+				if (inferredPet == null) askForManualSubmission("Duplicate pet");
+				else creditInferredByName(inferredPet, petSource(inferredPet), "inferred_duplicate_pet");
+			}
+		}
+		// Champion's scroll — when a challenge is already complete the game shows only "…funny feeling
+		// that you would have received a Champion's scroll…" with NO item and no loot event, so a
+		// real-drop tile would never see it. The line names no specific champion, so (like pets) we
+		// capture a proof for manual submission rather than auto-credit.
+		// The kill's loot can land a tick after this line, so name it on the next ticks
+		// (resolveDuplicateScroll) from whatever was just killed.
+		if (find("scroll.champion_duplicate", msg) != null && hasEvent()) {
+			dupScrollLineAt = now();
+			dupScrollTick = client.getTickCount();
+		}
+		// Timed-clear tiles: pull a clear time out of completion/boss-kill messages.
+		handleTimedChat(plain);
+	}
+
+
+	/**
+	 * One new collection-log slot, however we heard about it.
+	 *
+	 * <p>Two lines say the same thing: the personal "New item added to your collection log: X",
+	 * which only prints when the player's in-game notification setting is on, and the clan
+	 * broadcast, which depends on the clan's settings instead. Either can be the only one that
+	 * arrives, so both route here and a short memory of recent names keeps a slot from being
+	 * announced twice when both do.</p>
+	 */
+	void handleClogUnlock(String item) {
+		if (item == null || item.isEmpty()) return;
+		var t = now();
+		recentClogUnlocks.values().removeIf(at -> t - at > 15_000 /* CLOG_UNLOCK_SAME_MS */);
+		if (recentClogUnlocks.putIfAbsent(item.toLowerCase(ROOT), t) != null) return; // the other line for this unlock got here first
+		// A pet drop moments ago is still waiting to learn WHICH pet it was — this line is the
+		// only thing that says so. It takes the name and both clog posts stand down, or the same
+		// pet lands twice, once as 🐾 and once as 📕.
+		// Tell the server the killcount this unlock happened at, while we still know it.
+		//
+		// The site stamps kcAtUnlock when the collection log next syncs, and had nothing better
+		// to read than the hiscores snapshot — which only flushes on logout, so it was routinely
+		// a kill or more behind. That is how an Ancestral bottom taken on the 80th Chambers was
+		// filed as "at 79 KC" while the Discord post, reading killCounts, said 80.
+		//
+		// Pushed even when no tile tracks this boss (maybeQueueKcPush deliberately won't) and
+		// regardless of whether an event is running: a collection log is a profile, not a board.
+		// Once per unlock, which is once per account per item, ever.
+		pushKcForUnlock();
+		sendClogUnlock(item);
+		var claimedPet = claimPetName(item);
+		// Not a pet, so this is the ungated route to the clan's feed for an unlock that the
+		// loot path can't see: an untradeable with no GE price to clear a floor, or anything
+		// handed over without a loot event at all.
+		if (claimedPet == null) recordClogUnlockMoment(item);
+		if (claimedPet == null || !claimedPet.announce) {
+			// Two posts, deliberately different audiences: the prestige allowlist shouts a notable
+			// unlock at the drops channel, while every OTHER new slot goes quietly to the
+			// achievements channel. maybeNotifyClogSlot skips anything the allowlist just claimed,
+			// so a Dizana's quiver never lands twice.
+			maybeNotifyCollectionUnlock(item);
+			maybeNotifyClogSlot(item);
+			recordFeedMoment(new Moment("clog", null, item, 1, null, null, null, null, now(),
+					"clog|" + item.toLowerCase(ROOT)));
+		}
+		// Credit bingo drop/collection tiles for items that never fire a loot event — shop-bought
+		// minigame rewards (Barbarian Assault torso/hats), gamble pets (Penance Queen), and any
+		// other collection-log-only unlock. Loot-fired items are deduped by processLoot.
+		creditClogUnlock(item);
+		// Collection-log tiles: the line is a new slot (once per account per item); the site checks it.
+		if (!trackingOff()) emit(rules.event("clog", RuleEngine.named(RuleEngine.key(item)), 0, null, null, "what", item));
+	}
+
+	/**
+	 * A whole-page clog tile waits for a screenshot of the finished page: take it when the player
+	 * opens one. The site takes one per member while it is live; the window only stops one open's redraws.
+	 */
+	void proveClogPage(ClogPage page) {
+		if (trackingOff() || page.itemIds == null) return;
+		var got = new HashSet<Integer>();
+		for (int id : page.itemIds) got.add(id);
+		emit(rules.event("page", r -> r.keys.contains(page.name) && got.containsAll(r.need), 0, null, t -> claim(lastSubmittedAt, "page:" + t, now(), DEDUP_WINDOW_MS), "what", page.name, "pg", true));
+	}
+
+	/**
+	 * Where a pet came from, for crediting. Its chat lines name the pet but not the boss, and a tile
+	 * limited to that boss (a Zuk tile wanting Jal-nib-rek) rejects anything else. Null when nothing
+	 * can place it — a skilling pet has no monster.
+	 */
+	String petSource(String petName) {
+		return DropSource.resolvePetSource(dropFacts(), petName, freshLootSource(), killCounts);
+	}
+
+	/**
+	 * Credits drop/collection tiles from a "New item added to your collection
+	 * log: X" chat line. The reliable signal for clog items that never fire a
+	 * loot event: shop-bought minigame rewards (Barbarian Assault Fighter
+	 * torso/hats/armour), gamble-only pets (Penance Queen), etc.
+	 *
+	 * The clog line names the item, so we resolve tracked item IDs → names via
+	 * ItemManager and synthesise a single-item loot event through
+	 * {@link #processLoot}. That reuses the whole drop pipeline
+	 * (source/requirement filters, coalesce, screenshot + submit) AND its
+	 * per-(tile,item) dedup — so an item that IS a real drop (fires a loot
+	 * event AND a clog line the same tick) is still counted exactly once. Runs
+	 * on the client thread (onChatMessage), where ItemManager is safe.
+	 *
+	 * Caveat: the clog line fires once per account, ever — a member who already
+	 * owns the item won't re-trigger it. Surfaced to admins in the tile UI.
+	 * Guaranteed completion awards (Infernal cape, Fire cape) sidestep this via
+	 * {@link #creditGuaranteedAward}, which fires on every completion.
+	 */
+	void creditClogUnlock(String itemName) {
+		if (itemName == null || itemName.isEmpty() || trackingOff() || !rules.active()) return;
+		// Notable clog unlocks (a ToA Cursed phalanx, a raid ornament kit) that fire ONLY the clog line and
+		// no loot event still deserve a rare-drop post. Route through maybeNotifyRareDrop — its per-item +
+		// name-keyed dedup absorbs the duplicate if a loot event fired for the same item — and do it
+		// independent of whether any TILE tracks the item (the webhook shouldn't need a tile).
+		var notableId = notableIdForName(itemName);
+		if (notableId != null) maybeNotifyRareDrop(itemName, singletonList(new ItemStack(notableId, 1)), "clog");
+		var synthetic = new ArrayList<ItemStack>(1);
+		var now = now();
+		for (var id : idsNamed(rules.dropItemIds(), itemName)) {
+			// Skip an item a real loot event just credited — the clog-unlock line is the same
+			// acquisition (raid chest, NPC drop) firing later on pickup, so crediting here would
+			// double-count it (e.g. a CoX Twisted buckler counting twice: once at the chest, once
+			// when taken). Genuine clog-only unlocks (BA torso, gamble pets) never hit this.
+			synchronized (recentLootItemIds) {
+				recentLootItemIds.values().removeIf(t -> now - t > CLOG_LOOT_DEDUP_MS);
+				var seen = recentLootItemIds.get(id);
+				if (seen != null && now - seen < CLOG_LOOT_DEDUP_MS) continue;
+			}
+			synthetic.add(new ItemStack(id, 1));
+		}
+		if (synthetic.isEmpty()) return; // no tile tracks this clog item (or all matches were just looted)
+		// "clog" source kind passes the default (non-PvP) tile source filter. Source name is the
+		// item itself — a tile with a specific sourceNpcs list won't match, which is intended
+		// (clog rewards have no NPC source to whitelist against).
+		// A pet came from a monster, and is credited from it so a boss-limited tile accepts it.
+		var petFrom = DropSource.petEntry(dropFacts(), itemName) != null ? petSource(itemName) : null;
+		processLoot(petFrom != null ? petFrom : itemName, synthetic, petFrom != null ? "npc" : "clog");
+		chatCredits.note(synthetic, now);
+	}
+
+	/** The notable-item id whose name matches {@code name} (case-insensitive), or null. Lets the clog-unlock
+	 *  path resolve an untradeable prestige item to its id for a rare-drop post without a GE search. */
+	Integer notableIdForName(String name) {
+		if (name == null || name.isEmpty()) return null;
+		var ids = idsNamed(notableItemIds, name);
+		return ids.isEmpty() ? null : ids.get(0);
+	}
+
+	/** The ids among {@code ids} whose item is called {@code name} (case-insensitive). */
+	List<Integer> idsNamed(Collection<Integer> ids, String name) {
+		List<Integer> out = new ArrayList<>(1);
+		for (var id : ids) {
+			var comp = itemManager.getItemComposition(id);
+			if (comp != null && name.equalsIgnoreCase(comp.getName())) out.add(id);
+		}
+		return out;
+	}
+
+	/** A stack of {@code qty} for every tracked drop-tile item called {@code name} — names are unique per family, ids aren't. */
+	List<ItemStack> trackedStacks(String name, int qty) {
+		List<ItemStack> out = new ArrayList<>(1);
+		for (var id : idsNamed(rules.dropItemIds(), name)) out.add(new ItemStack(id, qty));
+		return out;
+	}
+
+	/**
+	 * Fallback drop crediting off the server's drop-attribution chat line —
+	 * "&lt;player&gt; received a drop: &lt;item&gt; (&lt;source&gt;)". Maggot King's uniques
+	 * spill out beside its corpse: the corpse never despawns (no NpcLootReceived) and the
+	 * in-game loot-tracker script behind ServerNpcLoot doesn't report the spill, so this
+	 * line is the only signal that fires. It names the recipient, so crediting stays
+	 * attribution-safe where other players' drops are also announced. When a loot event
+	 * DOES also fire, processLoot's per-(tile,item) window and the rare-drop per-item
+	 * window absorb the duplicate — same contract as creditGuaranteedAward.
+	 */
+	void creditDropFromChat(String recipient, String qtyText, String itemName, String source) {
+		var local = getLocalPlayerName();
+		if (local == null || recipient == null || itemName == null || itemName.isEmpty()) return;
+		if (!Rsn.same(recipient, local) && !recipient.trim().equalsIgnoreCase("You")) return; // another player's drop
+		int qty = qtyText == null ? 1 : Math.max(1, parseCount(qtyText));
+
+		// Bingo tiles: synthesize loot for every tracked item id whose name matches, exactly
+		// like creditClogUnlock (item names are unique per family, ids aren't). Sourced as
+		// "npc" loot from the boss so tiles restricted to sourceNpcs=["Maggot King"] match.
+		var synthetic = trackedStacks(itemName, qty);
+		Integer notifyId = null;
+		if (!synthetic.isEmpty()) {
+			notifyId = synthetic.get(synthetic.size() - 1).getId();
+			// Claim only items no loot event already brought: a stale claim eats the next real drop.
+			var t = now();
+			var claim = new ArrayList<>(synthetic);
+			synchronized (recentLootItemIds) {
+				claim.removeIf(st -> { var at = recentLootItemIds.get(st.getId()); return at != null && t - at <= CLOG_LOOT_DEDUP_MS; });
+			}
+			processLoot(source, synthetic, "npc");
+			chatCredits.note(claim, t);
+		}
+
+		// Clan rare-drop post — also for items no tile tracks (kill may pre-date any event).
+		// Resolve untracked names against the GE item list; untradeables that reach this line
+		// are covered by the prestige allowlist via the clog path instead.
+		if (notifyId == null) notifyId = findTradeableItemId(itemName);
+		// Every gate below this line fails silently, and these drops can be worth 50m+ — leave a
+		// breadcrumb so a "why didn't my fang post?" is answerable with debug logging on.
+		if (notifyId != null) maybeNotifyRareDrop(source, singletonList(new ItemStack(notifyId, qty)), "npc");
+	}
+
+	/**
+	 * Exact-name lookup against the GE item list (tradeables only); null when not found. The search
+	 * walks the whole item list, so a found id is remembered: a name maps to the same item for the
+	 * whole session. A miss isn't, since the price list may simply not have loaded yet.
+	 */
+	Integer findTradeableItemId(String name) {
+		var key = name.toLowerCase(ROOT);
+		synchronized (itemIdByName) {
+			var known = itemIdByName.get(key);
+			if (known != null) return known;
+		}
+		try {
+			for (var p : itemManager.search(name)) {
+				if (p != null && name.equalsIgnoreCase(p.getName())) {
+					synchronized (itemIdByName) {
+						itemIdByName.put(key, p.getId());
+					}
+					return p.getId();
+				}
+			}
+		} catch (Exception ignored) {
+		}
+		return null;
+	}
+
+	/** findTradeableItemId's answers, oldest dropped past 512 names. */
+	final Map<String, Integer> itemIdByName = capped(512, true);
+
+	// ---- Duplicates the game doesn't name (DuplicateInference) ----------------------------------
+	// Set only around the synthetic processLoot call below, on the client thread: it rides the loot fact to the site.
+	String inferringFlag;
+	String lastXpSkill;
+	long lastXpAt;
+	long dupScrollLineAt;
+	int dupScrollTick = -1;
+	// INFER_SKILL_WINDOW_MS = 10_000, inlined at its one use.
+	// DUP_SCROLL_WAIT_TICKS = 3, inlined at its one use.
+
+	/** The last loot source, if it landed recently enough to be what this chat line is about. */
+	String freshLootSource() {
+		synchronized (recentLootIds) {
+			return lastLootSource != null && now() - lastLootSourceAt <= CLOG_LOOT_DEDUP_MS
+					? lastLootSource : null;
+		}
+	}
+
+	/** Which pet a duplicate line was: from the fresh kill/loot, else from the skill just trained. */
+	String inferDuplicatePet() {
+		var pet = DuplicateInference.petForSource(dropFacts(), freshLootSource());
+		if (pet == null && lastXpSkill != null && now() - lastXpAt <= 10_000 /* INFER_SKILL_WINDOW_MS */) pet = DuplicateInference.petForSkill(dropFacts(), lastXpSkill);
+		// Drop facts key pets lowercased; the game writes them in sentence case ("Rock golem").
+		return pet == null || pet.isEmpty() ? null : Character.toUpperCase(pet.charAt(0)) + pet.substring(1);
+	}
+
+	/**
+	 * Name the champion's scroll from what was just killed, a few ticks after the line so a kill whose
+	 * loot lands late still counts. Nothing nameable means a manual proof, as before.
+	 */
+	void resolveDuplicateScroll() {
+		if (dupScrollTick < 0) return;
+		String source;
+		synchronized (recentLootIds) {
+			source = lastLootSource != null && lastLootSourceAt >= dupScrollLineAt - CLOG_LOOT_DEDUP_MS
+					? lastLootSource : null;
+		}
+		var scroll = DuplicateInference.championScrollFor(source);
+		if (scroll == null && client.getTickCount() - dupScrollTick < 3 /* DUP_SCROLL_WAIT_TICKS */) return; // the kill's loot may still be on its way
+		dupScrollTick = -1;
+		if (!hasEvent()) return;
+		if (scroll == null) askForManualSubmission("Duplicate Champion's scroll");
+		else creditInferredById(scroll, source, "inferred_duplicate_scroll");
+	}
+
+	/** The site's config names an event. */
+	boolean hasEvent() {
+		var c = pluginConfig;
+		return c != null && c.event != null;
+	}
+
+	boolean creditInferredByName(String itemName, String source, String flag) {
+		return itemName != null && trackingGateReason() == null && creditInferred(trackedStacks(itemName, 1), source, flag);
+	}
+
+	boolean creditInferredById(int itemId, String source, String flag) {
+		return trackingGateReason() == null && rules.dropItemIds().contains(itemId) && creditInferred(singletonList(new ItemStack(itemId, 1)), source, flag);
+	}
+
+	/** Credit through the ordinary drop path, marked so the site flags it. False when no tile tracks it. */
+	boolean creditInferred(List<ItemStack> synthetic, String source, String flag) {
+		if (synthetic.isEmpty()) return false;
+		inferringFlag = flag;
+		try {
+			processLoot(source, synthetic, "npc");
+		} finally {
+			inferringFlag = null;
+		}
+		return true;
+	}
+
+	/**
+	 * Credits drop/collection tiles for a completion-awarded item (Infernal cape,
+	 * Fire cape) off the Jagex kill-count chat line. These go straight to the
+	 * inventory — no loot event — and the clog line only fires on the first-ever
+	 * award, so repeat capes would otherwise need manual submission. The KC line
+	 * fires on every completion.
+	 *
+	 * Synthesised as loot FROM the boss (sourceKind "npc"), so a tile restricted
+	 * to e.g. sourceNpcs=["TzKal-Zuk"] still matches. On a first-ever award the
+	 * clog line lands in the same message batch; processLoot's per-(tile,item)
+	 * dedup counts the pair exactly once.
+	 */
+	void creditGuaranteedAward(String bossName, String itemName) {
+		if (trackingOff()) return;
+		var synthetic = trackedStacks(itemName, 1);
+		if (!synthetic.isEmpty()) processLoot(bossName, synthetic, "npc"); // else no tile tracks this award item
+	}
+
+	/* ----------------------------- Rules (site-matched facts) ----------------------------- */
+
+	/** One event's outcome: print now, move the panel rows, and hand the fact on (with a screenshot or not). */
+	void emit(RuleEngine.Out o) {
+		emit(o, o.coop ? coopFingerprint() : null);
+	}
+
+	/** ...with who was there, read when it happened ({@code coop}). */
+	void emit(RuleEngine.Out o, CoopFingerprint coop) {
+		o.raised.forEach((t, have) -> raiseLocal(t, (int) Math.min(have, Integer.MAX_VALUE), now()));
+		say(o.say);
+		o.toasts.forEach(r -> showBingoToast(r.t, r.label, r.have, r.of));
+		for (var f : o.facts) {
+			if (o.shot && f.has("t")) noteLocalProgress(f.get("t").getAsInt()); // "Active now": this account credited this tile
+			queueFact(f, o.shot, coop);
+		}
+	}
+
+	void queueFact(JsonObject fact, boolean shot, CoopFingerprint coop) {
+		// Its id (27 URL-safe characters of a random UUID), once and for good: the site credits an id one time (POST /api/plugin/facts), so
+		// every resend — a retry, the stash after a restart — carries this one. A fact restored from an
+		// older stash file has none yet and gets it here.
+		if (!fact.has("id")) fact.addProperty("id", UUID.randomUUID().toString().substring(9));
+		if (!execLive()) return;
+		if (shot) {
+			synchronized (factBurst) {
+				if (burst == null) {
+					// The at-moment frame; the flush shot lands once floor loot has settled.
+					burst = new PendingSubmission();
+					factBurstFrame = null;
+					var show = hideChatForShot();
+					drawManager.requestNextFrameListener(img -> {
+						factBurstFrame = (BufferedImage) img;
+						if (show != null) clientThread.invokeLater(show);
+					});
+				}
+				factBurst.add(fact);
+				factBurstCoop = richer(factBurstCoop, coop);
+				factBurstCredit = reschedule(factBurstCredit, this::creditBurst, 150 /* CREDIT_COALESCE_MS */);
+				factBurstFlush = reschedule(factBurstFlush, this::flushFactBurst, 1_200 /* COALESCE_FLUSH_MS */);
+			}
+		} else {
+			synchronized (factQueue) {
+				factQueue.add(fact);
+				factQueueCoop = richer(factQueueCoop, coop);
+				factQueueFlush = reschedule(factQueueFlush, this::flushFactQueue, 400 /* FACT_QUEUE_MS */);
+			}
+		}
+	}
+
+	// FACT_QUEUE_MS = 400, inlined at its one use.
+
+	static CoopFingerprint richer(CoopFingerprint had, CoopFingerprint fp) {
+		return fp != null && (had == null || fp.teammates.size() > had.teammates.size()) ? fp : had;
+	}
+
+	void say(List<String> lines) {
+		RuleEngine.fold(lines).forEach(s -> sendChatMessage(Tone.NEAR, s));
+	}
+
+	/** Image-less facts: one POST; on failure they go back in the queue, tried again with the next or in 30s. */
+	void flushFactQueue() {
+		JsonArray facts;
+		CoopFingerprint coop;
+		synchronized (factQueue) {
+			facts = PushStash.drain(factQueue);
+			factsSending.addAll(facts);
+			coop = factQueueCoop;
+			factQueueCoop = null;
+		}
+		if (facts.size() == 0) return;
+		submit(() -> {
+			var again = facts;
+			try {
+				warnStartProofBeforeCredit();
+				var reply = apiClient.postFacts(facts, null, coop);
+				adoptFacts(reply);
+				again = PendingSubmissionStore.retries(reply); // only the facts whose filing failed
+			} catch (PermanentSubmissionException e) {
+				log.info("Facts refused for good: {}", e.getMessage());
+				again = null;
+			} catch (IOException ignored) {
+			} finally {
+				// Answered, failed (back in the queue below) or thrown out of: no longer on the wire.
+				synchronized (factQueue) {
+					facts.forEach(factsSending::remove);
+				}
+			}
+			if (again == null) return;
+			synchronized (factQueue) {
+				factQueue.addAll(again);
+				factQueueCoop = richer(factQueueCoop, coop);
+				factQueueFlush = reschedule(factQueueFlush, this::flushFactQueue, GAIN_COALESCE_MS);
+			}
+		});
+	}
+
+	/** The burst's facts so far, credited now, image-less: the screenshot follows under the reply's key. */
+	void creditBurst() {
+		JsonArray facts;
+		PendingSubmission b;
+		CoopFingerprint coop;
+		synchronized (factBurst) {
+			b = burst;
+			coop = factBurstCoop;
+			facts = PushStash.drain(factBurst);
+		}
+		var cfg = pluginConfig;
+		if (b == null || facts.size() == 0 || cfg == null || cfg.event == null || cfg.team == null || cfg.player == null) return;
+		if (b.proof == null) {
+			b.label = "your proof";
+			b.timestamp = now();
+			b.capturedRsn = getLocalPlayerName();
+			b.proof = proofMeta();
+		}
+		if (coop != null) {
+			b.coopGroup = coop.teammates;
+			b.coopPartySize = coop.partySize;
+		}
+		var again = credit(b, facts);
+		if (b.facts == null) b.facts = again;
+		else b.facts.addAll(again);
+	}
+
+	/** A settled burst: its dual-frame proof, persisted, then uploaded under its credits' keys. Executor. */
+	void flushFactBurst() {
+		creditBurst(); // anything not yet credited first, so its key is in hand
+		PendingSubmission b;
+		var trigger = factBurstFrame;
+		synchronized (factBurst) {
+			b = burst;
+			burst = null;
+			factBurstCoop = null;
+		}
+		// Nothing filed wants the picture (and nothing is left to file): no screenshot.
+		if (b == null || b.proof == null || b.keys.size() == 0 && (b.facts == null || b.facts.size() == 0)) return;
+		onCleanFrame(image -> {
+			try {
+				var buffered = composeDualProof(trigger, image);
+				if (trigger != null) b.proof.addProperty("split", (double) trigger.getHeight() / buffered.getHeight());
+				if (pendingSubmissionStore.save(b, jpeg(buffered)) == null) {
+					log.error("Proof not saved");
+					return;
+				}
+				if (processPendingSubmission(b)) proofBackoff.onSuccess();
+				else notifyUploadFailed(b.label);
+			} catch (IOException e) {
+				sendChatMessage(WARN, "Screenshot failed: " + BingoApiClient.forPlayer(e));
+			}
+		});
+	}
+
+	/**
+	 * One image-less credit request for a proof's facts, its answer shown at once; the key it names (the
+	 * credits the screenshot is owed to) joins {@code p.keys}. Returns the facts to send again.
+	 */
+	JsonArray credit(PendingSubmission p, JsonArray facts) {
+		try {
+			if (p.clan == null) warnStartProofBeforeCredit(); // the active board's starting shot, not another board's
+			var reply = apiClient.postFacts(facts, p.proof, pendingCoop(p));
+			adoptFacts(reply);
+			if (reply != null && reply.has("proofKey")) {
+				var labels = new ArrayList<String>();
+				if (reply.has("proofFor")) reply.getAsJsonArray("proofFor").forEach(l -> labels.add(l.getAsString()));
+				p.keys.addProperty(reply.get("proofKey").getAsString(), String.join(", ", labels));
+				p.keyAt = now();
+			}
+			var again = PendingSubmissionStore.retries(reply); // only the facts whose filing failed
+			return again == null ? new JsonArray() : again;
+		} catch (PermanentSubmissionException e) {
+			log.info("Facts refused for good: {}", e.getMessage());
+			return new JsonArray();
+		} catch (IOException e) {
+			return facts;
+		}
+	}
+
+	/** The site's answer: real counts over the local guesses, its notes, and any tile this just completed. */
+	void adoptFacts(JsonObject reply) {
+		if (reply == null) return;
+		say(rules.adopt(reply));
+		List<String> done = new ArrayList<>(), no = new ArrayList<>();
+		if (reply.has("credits")) {
+			for (var el : reply.getAsJsonArray("credits")) {
+				var c = el.getAsJsonObject();
+				if (c.has("completed") && c.get("completed").getAsBoolean() && announceCompletedNow(c.get("t").getAsInt(), c.get("label").getAsString())) done.add("Tile complete: " + c.get("label").getAsString());
+				// The site turned it down (its reason in "error"): say so, and drop the count this client guessed.
+				if (c.has("ok") && !c.get("ok").getAsBoolean() && c.has("error") && !c.get("error").isJsonNull()
+						&& !"Will retry".equals(c.get("error").getAsString())) {
+					optimistic.clear(c.get("t").getAsInt());
+					no.add("Not counted: " + c.get("label").getAsString() + " — " + c.get("error").getAsString());
+				}
+			}
+		}
+		completeSoon(getLocalPlayerName(), done);
+		RuleEngine.fold(no).forEach(s -> sendChatMessage(WARN, s));
+		refreshConfig();
+		// Our proof is on the site now: the open view (its proofs, who's on it) shows it at once.
+		boardChanged();
+	}
+
+	void boardChanged() {
+		var panel = sidebarPanel;
+		if (panel != null) panel.boardChanged();
+	}
+
+	void processLoot(String source, Collection<ItemStack> items, String sourceKind) {
+		if (trackingOff() || items == null || items.isEmpty()) return;
+		var pairs = new ArrayList<int[]>();
+		for (var item : items) {
+			// A later clog-unlock line for an item a real loot event brought must not re-credit it.
+			if (!"clog".equals(sourceKind)) synchronized (recentLootItemIds) {
+				recentLootItemIds.put(item.getId(), now());
+			}
+			pairs.add(new int[]{item.getId(), Math.max(1, item.getQuantity())});
+		}
+		emit(rules.loot(source, sourceKind, pairs, wasInInstance ? partySize() : null, inferringFlag, now()));
+	}
+
+
+	/* ----------------------------- Kill-count tiles ----------------------------- */
+	/**
+	 * Loot-driven kill crediting: the right signal for anything with no Jagex
+	 * count message. Two callers — NpcLootReceived for normal NPCs, and the
+	 * EVENT branch of LootReceived for things you OPEN rather than kill (chests,
+	 * clue caskets), where one loot event is exactly one open. Bosses that DO
+	 * print a KC line are handled by the chat handler instead — once a KC message
+	 * has been seen for this name we defer to it, so a source firing both a KC
+	 * line and a loot event is counted exactly once.
+	 */
+	void processNpcKill(String npcName) {
+		if (npcName == null || npcName.isEmpty() || trackingOff()) return;
+		var key = npcName.toLowerCase();
+		if (!rules.tracksKill(key)) return;
+		lastLootKillAt.put(key, now());
+		// KC-driven boss (a "Your <X> kill count is:" line has fired for it) → the chat handler owns
+		// the count. Skip here to avoid double-crediting the same kill.
+		if (killCounts.containsKey(key)) return;
+		creditKill(npcName, 1); // one NpcLootReceived == one kill
+	}
+
+	/**
+	 * Kill crediting driven by the Jagex "Your <X> kill count is: N" chat line
+	 * — the reliable signal for bosses whose loot comes from corpse interaction
+	 * (Maggot King, Araxxor, …) and so may never fire NpcLootReceived.
+	 */
+	void creditBossKillFromChat(String npcName, boolean firstSeen) {
+		if (npcName == null || npcName.isEmpty() || trackingOff()) return;
+		var key = npcName.toLowerCase();
+		if (!rules.tracksKill(key)) return;
+		// First KC line of the session for this boss: the loot path may have already credited this
+		// very kill moments ago (event ordering isn't guaranteed). If so, don't count it twice.
+		if (firstSeen) {
+			var lootAt = lastLootKillAt.get(key);
+			if (lootAt != null && now() - lootAt < 6000 /* KILL_DEDUP_MS */) return;
+		}
+		creditKill(npcName, 1); // one KC line == one kill
+	}
+
+	/**
+	 * Credit a tile from an activity that keeps its own count but announces it in a shape the
+	 * generic "Your &lt;X&gt; count is: N" parser can't read — Sepulchre floors, the Grand Hallowed
+	 * Coffin, Hunter Guild rumours, Woodcutting Guild egg offerings. The count in those lines is
+	 * deliberately ignored: they all fire on the action, so one line is one credit, and a player
+	 * who arrives with 4,000 already banked starts an event on zero.
+	 *
+	 * <p>Takes SEVERAL names because one line can match a tile under more than one — a floor clear
+	 * announces both "Hallowed Sepulchre Floor 3" and the any-floor "Hallowed Sepulchre" — so a
+	 * tile listing both would be credited twice for one floor by a naive per-name loop. Collect the
+	 * union of matching tiles first (identity-based, since a tile object appears in every index
+	 * bucket its names put it in) and credit each exactly once.
+	 */
+	void creditNamedCounter(String... names) {
+		creditNamedCounter(1, null, names);
+	}
+
+	/**
+	 * As above, crediting {@code amount} (a game-value delta, or the N in "energy attuned: N") and
+	 * carrying {@code inferred} — {@link #UNVERIFIED_COUNTER} for a signal nobody has checked in game
+	 * yet, so the credit counts but staff see a "check" badge on it.
+	 */
+	void creditNamedCounter(int amount, String inferred, String... names) {
+		if (amount <= 0 || trackingOff()) return;
+		var moved = new LinkedHashMap<String, Integer>();
+		for (var name : names) moved.put(name, amount);
+		emit(rules.kill(moved, null, inferred));
+	}
+
+	void creditKill(String name, int amount) {
+		if (!trackingOff()) emit(rules.kill(singletonMap(name, amount), null, null));
+	}
+
+	static int parseCount(String digits) {
+		try {
+			return digits == null ? 0 : Integer.parseInt(digits.replace(",", ""));
+		} catch (NumberFormatException e) {
+			return 0;
+		}
+	}
+
+	/** The region the local player stands in, or -1. Client thread. */
+	int regionId() {
+		var me = client.getLocalPlayer();
+		if (me == null) return -1;
+		var wp = WorldPoint.fromLocalInstance(client, me.getLocalLocation());
+		return wp == null ? -1 : wp.getRegionID();
+	}
+
+	/**
+	 * Per tick: read the catalog's varbits/varps that some kill tile targets and credit each positive
+	 * change (GameValueCounters). Reading a handful of ids a tick is cheaper than filtering every
+	 * VarbitChanged, and catches changes that landed while the baseline was settling.
+	 */
+	void tickGameCounters() {
+		if (!loggedIn()) return;
+		var cfg = pluginConfig;
+		gameValueCounters.configure(cfg != null ? cfg.gameCounters : null);
+		if (gameValueCounters.entries().isEmpty()) return;
+		gameValueCounters.onLoggedIn();
+		var credits = gameValueCounters.tick(
+				(varp, id) -> varp ? client.getVarpValue(id) : client.getVarbitValue(id),
+				e -> rules.tracksKill(e.name));
+		if (credits.isEmpty()) return;
+		var amounts = new HashMap<String, Integer>();
+		var unverified = new HashSet<String>();
+		for (var c : credits) {
+			amounts.merge(c.entry.name, c.amount, Math::max);
+			if (!c.entry.confirmed) unverified.add(c.entry.name);
+		}
+		if (!trackingOff()) emit(rules.kill(amounts, unverified, null));
+	}
+
+	/* ----------------------------- Item-gain tiles ----------------------------- */
+	/**
+	 * Counts tracked items appearing in the inventory (fishing catches, cooked food, jarred
+	 * implings) toward gain tiles. Diffs each inventory snapshot against the previous one;
+	 * gains while a bank/GE/deposit/trade/seed-vault interface is open (or just closed), or
+	 * right after a ground "Take", are recorded but never credited — those are moves, not
+	 * gathers. Unequipping tracked wearables still reads as a gain; the baked running total
+	 * on the proof screenshot is the audit trail for that (same trust model as kill tiles).
+	 */
+	@Subscribe
+	void onItemContainerChanged(ItemContainerChanged event) {
+		// Flag inventory OR worn changes; the actual diff runs once on the next onGameTick, after
+		// both containers have settled. Equipping/unequipping touches both in the same tick, so
+		// diffing here per-container would read the unequip's inventory bump as a phantom gain.
+		int id = event.getContainerId();
+		if (id == InventoryID.INV || id == InventoryID.WORN) heldItemsDirty = true;
+		if (id == InventoryID.LOOTING_BAG) onLootingBagChanged(event.getItemContainer());
+	}
+
+	void onLootingBagChanged(ItemContainer bag) {
+		var now = new HashMap<Integer, Integer>();
+		if (bag != null) {
+			for (var it : bag.getItems()) {
+				if (it != null && it.getId() > 0 && it.getQuantity() > 0) now.merge(it.getId(), it.getQuantity(), Integer::sum);
+			}
+		}
+		lootingBagBefore = lootingBagNow;
+		lootingBagNow = now;
+		lootingBagChangedTick = client.getTickCount();
+		// A watch armed by the chest line — only against a bag we already knew. The first contents
+		// the client is ever sent are the whole bag, not what the chest added.
+		if (lootingBagWatchSource != null && lootingBagWatchBase != null) {
+			creditLootingBagGain(lootingBagWatchSource, lootingBagWatchBase, now);
+			lootingBagWatchSource = null;
+			lootingBagWatchBase = null;
+		}
+	}
+
+	/** Hold an item line the game prints for the local player's own loot (see chat-patterns.json "drop.plain"). */
+	void noteChestDropLine(String line) {
+		String qty = null;
+		String name = null;
+		var v = ChatPatterns.full("drop.valuable", line);
+		var d = v != null ? null : ChatPatterns.full("drop.plain", line);
+		if (v != null) {
+			qty = v.group("qty");
+			name = v.group("item");
+		} else if (d != null && !line.endsWith(")") && !line.contains(") from ")) {
+			if (!Rsn.same(d.group("rsn"), getLocalPlayerName())) return; // someone else's drop
+			qty = d.group("qty");
+			name = d.group("item");
+		}
+		if (name == null || name.isEmpty()) return;
+		int n = qty == null ? 1 : Math.max(1, parseCount(qty));
+		int tick = client.getTickCount();
+		recentDropLines.removeIf(l -> tick - l.tick > 1);
+		recentDropLines.add(new DropLine(tick, n, name.trim()));
+	}
+
+	/** Credit held chest lines whose items no loot event or bag change accounted for. Client thread. */
+	void settleChestLineCredits() {
+		if (chestLineCredits.isEmpty()) return;
+		int tick = client.getTickCount();
+		var it = chestLineCredits.iterator();
+		while (it.hasNext()) {
+			var c = it.next();
+			if (c.dueTick > tick) continue;
+			it.remove();
+			var unseen = new ArrayList<ItemStack>(1);
+			for (var st : trackedStacks(c.line.name, c.line.qty)) {
+				synchronized (recentLootItemIds) {
+					// Seen by a loot event since this open (a second's slack for the order lines land in):
+					// the inventory or bag path counted it. An older sighting is an earlier chest.
+					var seen = recentLootItemIds.get(st.getId());
+					if (seen != null && seen >= c.openedAtMs - 1000) continue;
+				}
+				unseen.add(st);
+			}
+			if (!unseen.isEmpty()) processLoot(c.source, unseen, "event");
+		}
+	}
+
+	/** The chest line: credit a bag change that landed this tick, or watch for one in the next few. */
+	void onLarranChestOpened(String size) {
+		var source = "Larran's " + size + " chest";
+		// The item lines printed with this open (same tick, or the one before) belong to it.
+		int tick = client.getTickCount();
+		var named = new HashSet<String>();
+		for (var l : recentDropLines) if (tick - l.tick <= 1 && named.add(l.name.toLowerCase(ROOT))) chestLineCredits.add(new ChestLineCredit(tick + LOOTING_BAG_WATCH_TICKS + 2 /* CHEST_LINE_SETTLE_TICKS */, source, l, now()));
+		recentDropLines.clear();
+		if (lootingBagChangedTick == tick && lootingBagBefore != null) {
+			creditLootingBagGain(source, lootingBagBefore, lootingBagNow);
+			return;
+		}
+		if (lootingBagNow == null) return;
+		lootingBagWatchSource = source;
+		lootingBagWatchBase = lootingBagNow;
+		lootingBagWatchTicks = LOOTING_BAG_WATCH_TICKS;
+	}
+
+	void creditLootingBagGain(String source, Map<Integer, Integer> before, Map<Integer, Integer> after) {
+		var gained = lootingBagGains(before, after);
+		if (gained.isEmpty()) return;
+		log.info("{}: {} stack(s) into the looting bag", source, gained.size());
+		processLoot(source, gained, "event");
+		processValueTiles(source, gained, "event");
+		recordEventLoot(source, gained, "event");
+		maybeNotifyRareDrop(source, gained, "event");
+	}
+
+	/** What the bag gained between two snapshots — increases only (a withdrawal isn't loot). */
+	static List<ItemStack> lootingBagGains(Map<Integer, Integer> before, Map<Integer, Integer> after) {
+		var out = new ArrayList<ItemStack>();
+		if (before == null || after == null) return out;
+		for (Map.Entry<Integer, Integer> e : after.entrySet()) {
+			int added = e.getValue() - before.getOrDefault(e.getKey(), 0);
+			if (added > 0) out.add(new ItemStack(e.getKey(), added));
+		}
+		return out;
+	}
+
+	/**
+	 * Coalesced gain diff over held items (inventory + worn equipment). Runs at most once per
+	 * game tick from {@link #onGameTick}. Counting the two containers together means an equip or
+	 * unequip — a move between them — cancels out, so only genuinely acquired items credit a gain
+	 * tile. Ground-pickup / telegrab / trade-close / bank guards still suppress non-gather flows.
+	 */
+	void updateHeldItemGains() {
+		var counts = new HashMap<Integer, Integer>();
+		addContainerCounts(counts, InventoryID.INV);
+		addContainerCounts(counts, InventoryID.WORN);
+		var previous = lastHeldItemCounts;
+		lastHeldItemCounts = counts;
+
+		// Baseline snapshot (login/config load), no live gain tiles, a blackout, bank/GE/trade/seed vault
+		// open, a recent ground Take or telegrab, an interface just closed, or emptied from storage:
+		// record only.
+		int tick = client.getTickCount();
+		if (previous == null || !rules.has("gain") || !live() || rules.blackout() || gainSuppressingInterfaceOpen()
+				|| tick - lastGroundTakeTick <= 2 || tick - lastTelegrabTick <= 8 /* TELEGRAB_GUARD_TICKS */
+				|| tick - lastSuppressCloseTick <= 2 || tick - lastStorageMoveTick <= 2) return;
+
+		for (var e : counts.entrySet()) {
+			int delta = e.getValue() - previous.getOrDefault(e.getKey(), 0);
+			// Every tile tracking this item credits, mirroring drops/kills; held for its tile's batch.
+			if (delta <= 0) continue;
+			var o = rules.event("gain", RuleEngine.named(String.valueOf(e.getKey())), delta, null, null);
+			emit(o);
+			if (o.held) synchronized (rules) {
+				if (gainsFlush == null) gainsFlush = later(this::flushHeldGains, GAIN_COALESCE_MS);
+			}
+		}
+	}
+
+	Set<Integer> wornItemIds() {
+		var c = client.getItemContainer(InventoryID.WORN);
+		if (c == null) return emptySet();
+		var ids = new HashSet<Integer>();
+		for (var item : c.getItems()) if (item != null && item.getId() > 0) ids.add(item.getId());
+		return ids;
+	}
+
+	/** The inventory before a trade or a group storage visit, while the player has that kind on. */
+	Map<Integer, Integer> movedFrom;
+	String movedKind;
+	int movedTick = -1;
+
+	void movesOpened(int g) {
+		if (g == InterfaceID.TRADECONFIRM) movedTick = -1; // still trading
+		var kind = g == InterfaceID.TRADEMAIN ? "trade" : g == InterfaceID.SHARED_BANK ? "storage" : null;
+		Me me = me();
+		if (kind == null || movedFrom != null || me == null || me.on == null || !me.on.containsKey(kind)) return;
+		movedFrom = new HashMap<>();
+		addContainerCounts(movedFrom, InventoryID.INV);
+		movedKind = kind;
+	}
+
+	/** What the trade or storage visit changed in the inventory, once it settled: nothing (declined, unsaved) posts nothing. */
+	void movesSettled() {
+		var now = new HashMap<Integer, Integer>();
+		addContainerCounts(now, InventoryID.INV);
+		movedFrom.forEach((id, q) -> now.merge(id, -q, Integer::sum));
+		movedFrom = null;
+		movedTick = -1;
+		var f = new NotifyFacts(movedKind, getLocalPlayerName());
+		now.forEach((id, q) -> {
+			if (q != 0 && (!f.facts.has("items") || f.facts.getAsJsonArray("items").size() < 30)) f.item(id, itemManager.getItemComposition(id).getName(), q, (long) itemManager.getItemPrice(id) * q);
+		});
+		if (f.facts.has("items") && announceBudget()) announce(f, true);
+	}
+
+	void addContainerCounts(Map<Integer, Integer> counts, int containerId) {
+		var c = client.getItemContainer(containerId);
+		if (c == null) return;
+		for (var item : c.getItems()) if (item != null && item.getId() > 0) counts.merge(item.getId(), Math.max(1, item.getQuantity()), Integer::sum);
+	}
+
+	/**
+	 * Ground-pickup guards: a "Take" (or a Telekinetic Grab cast) makes a later inventory
+	 * change look like a fresh gain when it's really floor loot.
+	 */
+	@Subscribe
+	void onMenuOptionClicked(MenuOptionClicked event) {
+		var opt = event.getMenuOption();
+		var target = event.getMenuTarget();
+		if ("Take".equalsIgnoreCase(opt)) lastGroundTakeTick = client.getTickCount();
+		else if (isStorageMove(opt)) lastStorageMoveTick = client.getTickCount();
+		else if ("Cast".equalsIgnoreCase(opt) && target != null && target.contains("Telekinetic Grab")) lastTelegrabTick = client.getTickCount();
+	}
+
+	/**
+	 * Options that take items OUT of a storage item into the inventory: "Empty" (fish barrel, log
+	 * basket, coal/gem bag, herb sack, seed box, plank sack…), "Withdraw…" and "Remove…" from an
+	 * item's own interface. A move, never a gather.
+	 */
+	static boolean isStorageMove(String option) {
+		if (option == null) return false;
+		var o = option.trim().toLowerCase(ROOT);
+		return o.startsWith("empty") || o.startsWith("withdraw") || o.startsWith("remove");
+	}
+
+	/** True while an interface whose item flows aren't "gathering" is open. */
+	boolean gainSuppressingInterfaceOpen() {
+		for (int id : MOVE_INTERFACES) if (client.getWidget(id, 0) != null) return true;
+		// Bought isn't gathered: a shop would otherwise sell a "catch 100 karambwan" tile.
+		return client.getWidget(InterfaceID.SHOPMAIN, 0) != null;
+	}
+
+	/** Every held catch, as count-only facts (the batch timer, and logout / hop). */
+	void flushHeldGains() {
+		synchronized (rules) {
+			cancel(gainsFlush);
+			gainsFlush = null;
+		}
+		emit(rules.flushGains());
+	}
+
+	/** What the site stamps a proof's banner from, less the title/detail (lib/proofStamp). */
+	JsonObject proofMeta() {
+		var proof = new JsonObject();
+		proof.addProperty("tz", ZoneId.systemDefault().getId());
+		proof.addProperty("capturedAt", now());
+		proof.addProperty("tick", client.getTickCount());
+		synchronized (recentChat) {
+			proof.add("chat", gson.toJsonTree(recentChat));
+		}
+		return proof;
+	}
+
+	/* ----------------------------- Timed-clear tiles ----------------------------- */
+	/** Raid party size from the varbits, else the distinct players seen in this instance. */
+	int partySize() {
+		return lastRaidPartySize > 0 ? lastRaidPartySize : instancePlayersSeen.size();
+	}
+
+	/** The ToA raid level as it stands now (0 outside ToA). Client thread. */
+	int raidLevelNow() {
+		int level = client.getVarbitValue(VarbitID.TOA_CLIENT_RAID_LEVEL);
+		return level > 0 ? level : lastToaRaidLevel;
+	}
+
+	/** Normalised RSNs of this team's roster, from the event roster the server ships for these tiles. */
+	Set<String> myTeamRoster() {
+		var mine = new HashSet<String>();
+		var cfg = pluginConfig;
+		if (cfg != null && cfg.pvpRoster != null && cfg.team != null) for (var e : cfg.pvpRoster) {
+			if (e != null && e.name != null && e.teamId == cfg.team.id) mine.add(Rsn.normalize(e.name));
+		}
+		return mine;
+	}
+
+	static CoopFingerprint pendingCoop(PendingSubmission p) {
+		return p.coopGroup == null && p.coopPartySize <= 1 ? null : new CoopFingerprint(p.coopGroup, p.coopPartySize);
+	}
+
+	/**
+	 * Does this line name the tile's activity? An Entry Mode clear never credits a base-raid tile
+	 * ("Theatre of Blood" is a substring of its Entry line); harder modes (CM / Hard / Expert)
+	 * crediting a base tile is intended.
+	 */
+	boolean namesActivity(String lowerMessage, String activity) {
+		return TimedClearParser.messageMatchesActivity(lowerMessage, activity)
+				&& (!lowerMessage.contains("entry mode") || activity.toLowerCase(ROOT).contains("entry mode"))
+				&& !TimedClearParser.clearBelongsElsewhere(recentTimedLines(), activity);
+	}
+
+	List<String> recentTimedLines() {
+		List<String> lines = new ArrayList<>(recentTimedMessages.size());
+		for (var m : recentTimedMessages) lines.add(m.lower);
+		return lines;
+	}
+
+	/**
+	 * Correlates a clear time (from a "Duration:/completion time:" line) with
+	 * the adjacent line that names the activity (the boss kill/completion-count
+	 * line). The two are separate chat messages and their order varies, so we
+	 * keep a short ring buffer of recent lines plus a pending duration and
+	 * resolve whichever arrives second. Parsing/matching is delegated to the
+	 * unit-tested {@link TimedClearParser}. Runs on the client thread (from
+	 * onChatMessage).
+	 */
+	void handleTimedChat(String plain) {
+		// Deathless tiles piggyback on the same correlation: a raid's completion is announced
+		// by the very duration + identity lines the timed machinery already pairs up.
+		if (!rules.has("timed") && !rules.has("deathless") || !live()) return;
+		var now = now();
+		var lower = plain.toLowerCase();
+
+		// Maintain the recent-line buffer (prune by age, cap size).
+		recentTimedMessages.addLast(new TimedMsg(lower, now));
+		while (!recentTimedMessages.isEmpty() && now - recentTimedMessages.peekFirst().ts > TIMED_CORRELATION_MS) recentTimedMessages.removeFirst();
+		while (recentTimedMessages.size() > 12) recentTimedMessages.removeFirst();
+
+		var seconds = TimedClearParser.parseDurationSeconds(lower);
+		if (seconds != null) {
+			// Duration line. The identifying line may already be in the buffer (count-first
+			// content) or may still be coming (Inferno prints the duration first).
+			var submitted = false;
+			for (var m : recentTimedMessages) {
+				if (now - m.ts <= TIMED_CORRELATION_MS) {
+					submitted |= submitTimedForMessage(m.lower, seconds, now);
+					submitted |= submitDeathlessForMessage(m.lower, now);
+				}
+			}
+			// Table-free fallback: attribute to the boss we just killed.
+			submitted |= lastNpcDeathName != null && now - lastNpcDeathAt <= TIMED_CORRELATION_MS
+					&& submitTimedForMessage(lastNpcDeathName.toLowerCase(), seconds, now);
+			if (submitted) {
+				pendingTimedSeconds = null;
+			} else {
+				pendingTimedSeconds = seconds;
+				pendingTimedAt = now;
+			}
+		} else if (pendingTimedSeconds != null && now - pendingTimedAt <= TIMED_CORRELATION_MS) {
+			// No duration here, but a duration is waiting — does THIS line identify the activity?
+			if (submitTimedForMessage(lower, pendingTimedSeconds, now) | submitDeathlessForMessage(lower, now)) pendingTimedSeconds = null;
+		}
+	}
+
+	/**
+	 * Credits deathless tiles this line identifies. Reaching here means a raid completion is
+	 * being announced (a duration line is part of the correlation), so the run counts when no
+	 * player died in the instance since we entered — and, when the tile pins a party size,
+	 * when exactly that many distinct players were seen inside.
+	 */
+	boolean submitDeathlessForMessage(String lowerMessage, long now) {
+		int deaths = instancePlayerDeaths;
+		int party = partySize();
+		var no = new ArrayList<String>();
+		// Attempts are claimed too — several nearby identity lines would otherwise repeat the verdict.
+		var hit = rules.match("deathless", r -> timedHit(lowerMessage, r.key()), deaths,
+				deaths + (deaths == 1 ? " death" : " deaths"), party,
+				RaidGates.wholePartyFromTeam(new ArrayList<>(instancePlayersSeen), myTeamRoster(), party),
+				t -> claim(lastTimedSubmittedAt, t, now, TIMED_DEDUP_WINDOW_MS), no);
+		no.forEach(m -> sendChatMessage(WARN, m));
+		for (var r : hit) {
+			// Who was there is read NOW, while the party is still together in the Warden's room.
+			var coop = r.coop ? coopFingerprint() : null;
+			creditAtRaidLevel(r.key(), r.lvl, "Deathless run", r.label,
+					level -> emit(rules.credit(new RuleEngine.Out(), r, 1, null, "party", party, "lvl", toaLevel(r, level)), coop));
+		}
+		return !hit.isEmpty();
+	}
+
+	/** The ToA raid level for a fact, only on a ToA tile. */
+	static Integer toaLevel(RuleEngine.EventRule r, int level) {
+		return RaidGates.isToa(r.key()) && level > 0 ? level : null;
+	}
+
+	/** Does this line name the activity: a Barracuda Trials rank tile wants the exact course and rank. */
+	boolean timedHit(String lowerMessage, String activity) {
+		var want = TimedClearParser.trialTileTarget(activity);
+		if (want == null) return namesActivity(lowerMessage, activity);
+		var got = TimedClearParser.parseTrialCompletion(lowerMessage);
+		return got != null && got[0].equals(want[0]) && got[1].equals(want[1]);
+	}
+
+	// ---- ToA runs held for the raid level they END at ---------------------------------------
+	// The Warden's death prints the completion lines, but a failed time-limit invocation only takes
+	// its cut once the party reaches the chest room — judged at the completion line, a 500 that
+	// missed its timer would still read 500. So a ToA tile with a level floor holds the run and
+	// judges it when the chest is looted, or on leaving the raid, or after HELD_RUN_MAX_MS, each
+	// with the level read then. Client thread only.
+	static final long HELD_RUN_MAX_MS = 15 * 60_000;
+	final List<IntConsumer> heldToaRuns = new ArrayList<>();
+	long heldToaRunsSince;
+
+	/**
+	 * Credit with the raid level now — or, for a ToA tile with a level floor, hold the run and credit
+	 * it with the level read at the chest, saying "{what} not counted" when that falls short.
+	 */
+	void creditAtRaidLevel(String activity, int minRaidLevel, String what, String label, IntConsumer credit) {
+		if (minRaidLevel <= 0 || !RaidGates.isToa(activity)) {
+			credit.accept(raidLevelNow());
+			return;
+		}
+		if (heldToaRuns.isEmpty()) heldToaRunsSince = now();
+		heldToaRuns.add(level -> {
+			var why = RaidGates.raidLevel(activity, minRaidLevel, level);
+			if (why != null) sendChatMessage(WARN, what + " not counted for " + label + ": " + why + ".");
+			else credit.accept(level);
+		});
+		sendChatMessage(label + ": checking the raid level at the chest.");
+	}
+
+	void judgeHeldToaRuns(int level) {
+		if (heldToaRuns.isEmpty()) return;
+		var held = new ArrayList<>(heldToaRuns);
+		heldToaRuns.clear();
+		for (var judge : held) judge.accept(level);
+	}
+
+	/** Credits every timed tile this line identifies whose cap and party the clear meets, once per dedup window. */
+	boolean submitTimedForMessage(String lowerMessage, int seconds, long now) {
+		var clock = TimedClearParser.formatClock(seconds);
+		var hit = rules.match("timed", r -> timedHit(lowerMessage, r.key()), seconds, clock, partySize(), null,
+				t -> claim(lastTimedSubmittedAt, t, now, TIMED_DEDUP_WINDOW_MS), new ArrayList<>());
+		for (var r : hit) creditAtRaidLevel(r.key(), r.lvl, "Timed clear", r.label,
+				level -> emit(rules.credit(new RuleEngine.Out(), r, 1, clock, "sec", seconds, "lvl", toaLevel(r, level))));
+		return !hit.isEmpty();
+	}
+
+	/**
+	 * Stacks the at-drop frame above the flush frame (thin gold divider) so the proof shows both the
+	 * moment of the drop and the floor loot once it settled; the site tags the two halves. Returns the
+	 * flush frame untouched when there is no trigger frame (toggle off, or the frame never arrived).
+	 */
+	BufferedImage composeDualProof(BufferedImage triggerFrame, BufferedImage flushFrame) {
+		if (triggerFrame == null) return flushFrame;
+		int divider = 4;
+		int w = Math.max(triggerFrame.getWidth(), flushFrame.getWidth());
+		int h = triggerFrame.getHeight() + divider + flushFrame.getHeight();
+		var out = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
+		var g = out.createGraphics();
+		try {
+			g.setColor(Color.BLACK);
+			g.fillRect(0, 0, w, h);
+			g.drawImage(triggerFrame, 0, 0, null);
+			g.setColor(new Color(212, 160, 23));
+			g.fillRect(0, triggerFrame.getHeight(), w, divider);
+			g.drawImage(flushFrame, 0, triggerFrame.getHeight() + divider, null);
+		} finally {
+			g.dispose();
+		}
+		return out;
+	}
+
+	/**
+	 * One chat line when a proof can't be submitted right now. The PNG (banner
+	 * already baked) is safe on disk in the pending store and auto-retried with
+	 * backoff — this just makes the failure visible and points at the file.
+	 */
+	void notifyUploadFailed(String label) {
+		sendChatMessage(WARN, "Couldn't submit \"" + label + "\" — proof saved locally, will keep retrying.");
+	}
+
+
+	/**
+	 * Burns a self-attesting proof banner (title + detail line + RSN/team/event/UTC) onto the
+	 * top-left of a screenshot. Starting shots only: bingo proofs are stamped by the site.
+	 */
+	void annotateProofBanner(BufferedImage img, String title, String detail, String rsn) {
+		var g = img.createGraphics();
+		try {
+			g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+
+			var meta = new ArrayList<String>();
+			var cfg = pluginConfig;
+			if (rsn != null && !rsn.isEmpty()) meta.add("RSN: " + rsn);
+			if (cfg != null && cfg.team != null && cfg.team.name != null) meta.add("Team: " + cfg.team.name);
+			if (cfg != null && cfg.event != null && cfg.event.name != null) meta.add("Event: " + cfg.event.name);
+			meta.add("UTC: " + ZonedDateTime.now(ZoneOffset.UTC)
+					.format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")));
+
+			var titleFont = new Font(Font.SANS_SERIF, Font.BOLD, 14);
+			var detailFont = new Font(Font.SANS_SERIF, Font.BOLD, 18);
+			var metaFont = new Font(Font.SANS_SERIF, Font.PLAIN, 12);
+			var tfm = g.getFontMetrics(titleFont);
+			var dfm = g.getFontMetrics(detailFont);
+			var mfm = g.getFontMetrics(metaFont);
+
+			int textW = Math.max(dfm.stringWidth(detail), tfm.stringWidth(title));
+			for (var s : meta) textW = Math.max(textW, mfm.stringWidth(s));
+
+			int padX = 14, padY = 10;
+			int boxW = textW + padX * 2;
+			int contentH = tfm.getHeight() + dfm.getHeight() + 4 + 6 + meta.size() * (mfm.getHeight() + 1);
+			int boxH = contentH + padY * 2;
+			int boxX = 12, boxY = 12;
+
+			// Drop shadow
+			g.setColor(new Color(0, 0, 0, 120));
+			g.fillRoundRect(boxX + 3, boxY + 3, boxW, boxH, 10, 10);
+			// Background
+			g.setColor(new Color(20, 18, 14, 230));
+			g.fillRoundRect(boxX, boxY, boxW, boxH, 10, 10);
+			// Gold accent border
+			var gold = new Color(212, 160, 23);
+			g.setStroke(new BasicStroke(2f));
+			g.setColor(gold);
+			g.drawRoundRect(boxX, boxY, boxW, boxH, 10, 10);
+
+			int textX = boxX + padX;
+
+			// Title in gold
+			g.setFont(titleFont);
+			g.setColor(gold);
+			int textY = boxY + padY + tfm.getAscent();
+			g.drawString(title, textX, textY);
+
+			// Detail in white
+			g.setFont(detailFont);
+			g.setColor(Color.WHITE);
+			int detailY = textY + tfm.getHeight() + 4;
+			g.drawString(detail, textX, detailY);
+
+			// Proof meta lines
+			g.setFont(metaFont);
+			g.setColor(new Color(220, 220, 220));
+			int my = detailY + 6;
+			for (var s : meta) {
+				my += mfm.getHeight() + 1;
+				g.drawString(s, textX, my);
+			}
+		} finally {
+			g.dispose();
+		}
+	}
+
+	/**
+	 * The game said something was found but not WHICH (a duplicate pet or champion's scroll with
+	 * nothing to infer it from), so nothing was credited. Say so, rather than leave a tile waiting.
+	 */
+	void askForManualSubmission(String label) {
+		sendChatMessage(WARN, label + " — the game didn't say which, so it wasn't counted. "
+				+ "If a tile needs it, submit it on the Soulrend site with a screenshot.");
+	}
+
+	/**
+	 * Is a STARTING SHOT outstanding for this account right now? Drives the sidebar button and the
+	 * login nudge. False on every site/event that doesn't ask for one, and the moment one is filed.
+	 */
+	boolean needsStartProof() {
+		var cfg = pluginConfig;
+		var sp = cfg == null ? null : cfg.startProof;
+		return sp != null
+				&& sp.required
+				&& sp.drawn
+				&& sp.needsUpload
+				&& !startProofFiled
+				&& !cfg.quiet
+				&& cfg.event != null
+				&& SoulrendOverlay.isEventActive(cfg.event);
+	}
+
+
+	/**
+	 * Take the STARTING SHOT (site lib/startProof): grab the next frame, burn the standard proof
+	 * banner onto it (RSN / team / event / UTC) with the drawn location and this player's keyword,
+	 * upload it and file it. The keyword is derived server-side from a stamp that didn't exist before
+	 * the event went live, so a shot carrying it could not have been staged in advance.
+	 *
+	 * Filed exactly once — {@link #startProofFiled} latches on success and the button disappears the
+	 * moment the next config poll agrees. A failure says so in chat and leaves the button up, since
+	 * the whole action is one keypress to repeat.
+	 */
+	void captureStartProof() {
+		// The click arrives on the Swing thread; where the player stands is client-thread state.
+		clientThread.invokeLater(this::captureStartProofOnClientThread);
+	}
+
+	void captureStartProofOnClientThread() {
+		var cfg = pluginConfig;
+		if (cfg == null || cfg.startProof == null || cfg.event == null || !cfg.startProof.drawn) {
+			sendChatMessage("No starting shot is being asked for right now.");
+			return;
+		}
+		if (drawManager == null || !execLive()) return;
+		if (startProofInFlight) {
+			sendChatMessage("Starting shot already in progress.");
+			return;
+		}
+
+		// Where this account is standing, for the drawn spot's position check. Read before anything
+		// async: by the time the frame arrives the player may have taken a step.
+		var worldX = localWorldX();
+		var worldY = localWorldY();
+		var loginAtMs = sessionLoginAtMs;
+
+		// Refuse rather than file something staff will only have to chase: standing in the wrong
+		// place or on a session too old to have flushed the hiscores are both fixable in-game, in
+		// seconds, and the message says how.
+		var blocked = StartProofRules.blockReason(cfg.startProof, loginAtMs, now(), worldX, worldY);
+		if (blocked != null) {
+			sendChatMessage(blocked);
+			return;
+		}
+
+		startProofInFlight = true;
+
+		int eventId = cfg.event.id;
+		var location = cfg.startProof.location;
+		var keyword = cfg.startProof.keyword;
+		var capturedRsn = getLocalPlayerName();
+		var capturedAt = Instant.now().toString();
+		var loginAt = loginAtMs == StartProofRules.UNKNOWN_LOGIN ? null : Instant.ofEpochMilli(loginAtMs).toString();
+
+		onNextFrame(image -> {
+			try {
+				var detail = keyword != null ? keyword : "";
+				if (!empty(location)) detail = detail.isEmpty() ? location : detail + "  @  " + location;
+				var url = apiClient.uploadImage(bakeCopy(image, "STARTING SHOT", detail, capturedRsn), "start-proof-" + eventId + ".png");
+				apiClient.submitStartProof(eventId, url, keyword, capturedAt, worldX, worldY, loginAt);
+				startProofFiled = true;
+				startProofFiledAt = now();
+				sendChatMessage(Tone.DONE, "Starting shot sent. You're clear to play.");
+				refreshConfig();
+			} catch (IOException e) {
+				log.error("Starting shot failed: {}", e.getMessage());
+				sendChatMessage(WARN, "Starting shot failed: " + BingoApiClient.forPlayer(e) + " — try again.");
+			} finally {
+				startProofInFlight = false;
+			}
+		}, () -> startProofInFlight = false);
+	}
+
+	/**
+	 * Uploads screenshot and submits a pending drop. Removes from disk on
+	 * success. Returns true on success, false on failure.
+	 */
+	boolean processPendingSubmission(PendingSubmission pending) {
+		// Only submit while logged into the account that obtained the drop. Guards the multi-account
+		// case: a drop caught on a non-enrolled alt is never credited to the enrolled account, even
+		// if it was queued during the brief window after switching characters.
+		if (otherCharacter(pending)) return false;
+		var pngBytes = pendingSubmissionStore.readScreenshot(pending);
+		if (pngBytes == null) {
+			log.error("No screenshot for proof {}", pending.label);
+			pendingSubmissionStore.remove(pending);
+			return false;
+		}
+
+		if (pending.proof == null) pending.proof = new JsonObject(); // an old capture: its credit still waits for this picture
+		if (pending.facts != null && pending.facts.size() > 0) pending.facts = credit(pending, pending.facts);
+		for (var key : new ArrayList<>(pending.keys.keySet())) {
+			var labels = pending.keys.get(key).getAsString();
+			try {
+				apiClient.postProof(key, pngBytes, pending.proof);
+			} catch (PermanentSubmissionException e) {
+				proofLost(labels, e);
+			} catch (IOException e) {
+				log.error("Proof upload failed: {}", e.getMessage());
+				if (now() - pending.keyAt < 90_000 /* PROOF_GIVE_UP_MS */) continue;
+				proofLost(labels, e);
+			}
+			pending.keys.remove(key);
+		}
+		if ((pending.facts == null || pending.facts.size() == 0) && pending.keys.size() == 0) {
+			pendingSubmissionStore.remove(pending);
+			return true;
+		}
+		pendingSubmissionStore.update(pending); // what is still owed stays, with the screenshot
+		return false;
+	}
+
+	/** Caught on a character other than the one logged in now. */
+	boolean otherCharacter(PendingSubmission p) {
+		return p.capturedRsn != null && !p.capturedRsn.isEmpty() && !Rsn.same(p.capturedRsn, apiClient.getCurrentRsn());
+	}
+
+	/** A screenshot the site will never take now (too late, or refused): its credits were reversed. */
+	void proofLost(String labels, IOException e) {
+		log.info("Proof given up: {}", e.getMessage());
+		sendChatMessage(WARN, "Proof didn't upload in time — " + (labels.isEmpty() ? "that drop" : labels) + " wasn't counted.");
+	}
+
+	/**
+	 * Retries any pending submissions with exponential backoff.
+	 */
+	void retryPendingSubmissions() {
+		if (!apiClient.isConfigured()) return;
+
+		if (!proofBackoff.ready(now())) return; // the last pass failed; wait out the backoff (the site coming back cuts it short)
+		var pending = pendingSubmissionStore.loadAll();
+		// Saved manual proofs never upload; don't log a "retry" for them every 30s.
+		pending.removeIf(sub -> sub.manual);
+		if (pending.isEmpty()) return;
+
+		log.info("Retrying {} proof(s)", pending.size());
+		var anyFailed = false;
+		for (var sub : pending) {
+			// Manual proofs (older versions saved them for pets / duplicate Champion's scrolls) have no
+			// tile to auto-submit to. Never upload.
+			// Held for the character that caught it — waiting on a login, not a failure to back off from.
+			if (otherCharacter(sub)) continue;
+			// A previously-failed proof finally made it — say so, since the original
+			// "submitted" message never fired.
+			if (processPendingSubmission(sub)) sendChatMessage(Tone.DONE, "Queued proof submitted: " + sub.label);
+			else anyFailed = true;
+		}
+
+		if (anyFailed) {
+			proofBackoff.onFailure(now());
+			log.info("Proof retry failed; next in {}s", proofBackoff.secondsUntilReady(now()));
+		} else proofBackoff.onSuccess();
+
+		// Refresh config to get updated counts from server
+		refreshConfig();
+	}
+
+	/**
+	 * Fetch config immediately (cancelling any debounced refresh) and repaint the sidebar once it
+	 * lands. For credential changes only — everything else can wait for the debounce.
+	 */
+	synchronized void refreshNowAndRepaint() {
+		// The panel is currently showing a clan reached with the OLD credentials. Drop it before
+		// anything else: on a wrong URL or a bad token nothing ever arrives to replace it, and a
+		// member who just changed their settings would sit looking at the clan they left.
+		invokeLater(sidebarPanel::clearForCredentialChange);
+		if (!execLive()) return;
+		cancel(pendingRefresh);
+		if (!apiClient.isConfigured()) {
+			// SIGNING OUT HAS TO CLEAR WHAT SIGNING IN PUT THERE. The panel wipes its own view above,
+			// then rebuilds it from these fields — so leaving them set repaints the clan that was
+			// just disconnected: its board list, "You: #36" in a competition the client can no
+			// longer identify anyone in, and the admin-only roster-sync button. Nothing leaves the
+			// machine, and it still asserts a session that no longer exists.
+			pluginConfig = null;
+			// Nothing queued under the old sign-in may go out under the next one.
+			var outbox = notifyOutbox;
+			var stash = pushStash;
+			if (apiClient.needsSignIn()) submit(() -> {
+				if (outbox != null) outbox.clear();
+				if (stash != null) stash.clearAll();
+			});
+
+			knownMember = null;
+			isAdmin = false;
+			// So a later sign-in greets again rather than assuming it already did.
+			helloSent = false;
+			// Half-configured (URL but no token, or vice versa): nothing to fetch, but the panel
+			// still needs to re-evaluate its sign-in row against the new state.
+			repaintSidebar();
+			return;
+		}
+		submit(() -> {
+			safely("refreshConfig", this::refreshConfig);
+			repaintSidebar();
+		});
+	}
+
+	/**
+	 * Debounced config refresh — collapses multiple rapid onConfigChanged calls
+	 * into one fetch.
+	 */
+	synchronized void scheduleRefresh() {
+		if (apiClient.isConfigured() && execLive()) pendingRefresh = reschedule(pendingRefresh, this::refreshConfig, 1000 /* REFRESH_DEBOUNCE_MS */);
+	}
+
+	/* -------------------------------------------------------------- */
+ /* Player/account helpers                                          */
+ /* -------------------------------------------------------------- */
+	String getLocalPlayerName() {
+		var p = client == null ? null : client.getLocalPlayer();
+		return p == null ? null : p.getName();
+	}
+
+	/**
+	 * The names the Lookup box suggests — clan (online and the whole roster), friends, and players
+	 * nearby — read on the client thread, then handed to {@code then} there. Empty while logged out.
+	 */
+	void lookupNames(Consumer<LookupSuggestions.Names> then) {
+		if (client == null || clientThread == null) {
+			then.accept(LookupSuggestions.Names.EMPTY);
+			return;
+		}
+		clientThread.invoke(() -> {
+			if (!loggedIn()) {
+				then.accept(LookupSuggestions.Names.EMPTY);
+				return;
+			}
+			var online = new ArrayList<String>();
+			var ch = client.getClanChannel();
+			if (ch != null && ch.getMembers() != null) ch.getMembers().forEach(m -> online.add(m.getName()));
+			var clan = new ArrayList<String>();
+			var cs = client.getClanSettings();
+			if (cs != null && cs.getMembers() != null) cs.getMembers().forEach(m -> clan.add(m.getName()));
+			var friends = new ArrayList<String>();
+			var fc = client.getFriendContainer();
+			if (fc != null && fc.getMembers() != null) for (var f : fc.getMembers()) friends.add(f.getName());
+			var nearby = new ArrayList<String>();
+			for (var p : client.getPlayers()) if (p != null && p != client.getLocalPlayer()) nearby.add(p.getName());
+			then.accept(new LookupSuggestions.Names(online, friends, nearby, clan));
+		});
+	}
+
+	// Where the player really stands, refreshed every tick for the starting-shot card's live checks
+	// (the panel reads it off the Swing thread, where the client can't be asked). Null when unknown.
+	volatile WorldPoint startProofPosition;
+
+	/** Client thread. The real-world square, not the instance copy — a POH or raid reads as itself. */
+	WorldPoint realWorldPosition() {
+		var me = client.getLocalPlayer();
+		if (me == null || me.getLocalLocation() == null) return null;
+		return WorldPoint.fromLocalInstance(client, me.getLocalLocation());
+	}
+
+	Integer localWorldX() {
+		var p = realWorldPosition();
+		return p == null ? null : p.getX();
+	}
+
+	Integer localWorldY() {
+		var p = realWorldPosition();
+		return p == null ? null : p.getY();
+	}
+
+	int startProofStillTicks;
+	// One automatic attempt per login: a failure says so in chat and leaves the button, rather than
+	// retrying a broken upload every tick. Reset with the session clock.
+	boolean autoStartProofTried;
+
+	/** Client thread, every tick: take the starting shot unprompted once every check is green. */
+	void maybeAutoStartProof(WorldPoint here) {
+		if (here == null || autoStartProofTried || startProofInFlight || !config.autoStartShot()) return;
+		var cfg = pluginConfig;
+		var proof = cfg == null ? null : cfg.startProof;
+		if (!StartProofRules.autoReady(proof, sessionLoginAtMs, now(),
+				here.getX(), here.getY(), startProofStillTicks)) return;
+		autoStartProofTried = true;
+		sendChatMessage("Checks passed at " + (proof.location != null ? proof.location : "the start spot")
+				+ " — taking your starting shot.");
+		captureStartProofOnClientThread();
+	}
+
+	boolean autoStartShotEnabled() {
+		return config.autoStartShot();
+	}
+
+	/** Whether a starting shot is being taken and sent right now. */
+	boolean startProofSending() {
+		return startProofInFlight;
+	}
+
+	/** When this session's starting shot was filed (epoch ms), or 0. */
+	long startProofFiledAt() {
+		return startProofFiledAt;
+	}
+
+	/** The sidebar's "Route me there": hand the start spot to Shortest Path, if it's installed. */
+	void routeToStartSpot() {
+		var cfg = pluginConfig;
+		var target = cfg == null ? null : StartSpotMarker.target(cfg.startProof);
+		clientThread.invokeLater(() -> startSpotMarker.route(target));
+	}
+
+	/**
+	 * Whether a character is logged in. A pinned tile is a widget over the GAME, so there is nothing to
+	 * pin it to at the login screen — and pinning there would file it under whatever board the last
+	 * account was on, not the one about to log in.
+	 */
+	boolean inGame() {
+		return client != null && loggedIn();
+	}
+
+	/** Whether there is a config to serve per-tile progress for the pinned in-game tracker. */
+	boolean supportsTileTracker() {
+		return pluginConfig != null;
+	}
+
+	TileTracker tileTracker() {
+		return tileTracker;
+	}
+
+	/** Pin or unpin a tile's in-game widget, fetching a fresh pin straight away. */
+	void setTrackedTile(int eventId, int tileId, boolean on) {
+		if (!TileNotes.pinnable(tileId)) return; // a cap counter's virtual entry is never pinned
+		// A combo's part pins its combo, whose pin lists every part.
+		indexNotes(pluginConfig);
+		int pin = partCombo.getOrDefault(tileId, tileId);
+		tileTracker.set(eventId, pin, on);
+		submit(() -> safely("tileTracker", () -> tileTracker.refresh(pin)));
+	}
+
+	/** The starting-shot card's live requirements: session age, then position. Any thread. */
+	List<StartProofRules.Check> startProofChecks(StartProof proof) {
+		var checks = new ArrayList<StartProofRules.Check>(2);
+		var session = StartProofRules.sessionCheck(proof, sessionLoginAtMs, now());
+		if (session != null) checks.add(session);
+		var p = loggedIn() ? startProofPosition : null;
+		var where = StartProofRules.positionCheck(proof,
+				p == null ? null : p.getX(), p == null ? null : p.getY());
+		if (where != null) checks.add(where);
+		return checks;
+	}
+
+	/**
+	 * Take what's waiting in the KC / XP / activity pushes and the moments queue for this character,
+	 * clear them, and return the disk write that keeps them (null when there's nothing, or no way to
+	 * tell whose they are). Any thread: the snapshot is memory only; run the result off the client thread.
+	 */
+	Runnable stashPushes() {
+		var key = PushStash.keyFor(apiClient.getCurrentRsn(), apiClient.getAccountHash());
+		var stash = pushStash;
+		if (key == null || stash == null) return null;
+		var data = new PushStash.Data();
+		data.savedAt = now();
+		data.kc = kcPush.snapshot();
+		data.xp = skillXpPush.snapshot();
+		data.activity = activityPush.snapshot();
+		synchronized (moments) {
+			data.moments = moments.snapshot();
+			moments.reset();
+		}
+		kcPush.reset();
+		skillXpPush.reset();
+		activityPush.reset();
+		// Facts not yet answered: on the wire right now, queued, or handed back by a failed send. The
+		// one on the wire may have landed; its id makes sending it again safe.
+		synchronized (factQueue) {
+			data.facts = PushStash.drain(factsSending);
+			data.facts.addAll(PushStash.drain(factQueue));
+			factQueueCoop = null;
+		}
+		data.account = DiskFiles.fingerprint(apiClient.playerToken);
+		return data.isEmpty() ? null : () -> stash.save(key, data);
+	}
+
+	/** This character logged in: queue again what an earlier session couldn't send. Executor only (disk). */
+	void restorePushes(String rsn, String accountHash) {
+		var stash = pushStash;
+		if (stash == null || !apiClient.isConfigured()) return;
+		var t = now();
+		PushStash.Data data = null;
+		// By hash first; by name for one saved before the hash was known.
+		for (var key : new String[]{PushStash.keyFor(null, accountHash), PushStash.keyFor(rsn, null)}) if (key != null) data = PushStash.merge(data, stash.take(key, t));
+		if (data == null || data.isEmpty()) return;
+		log.info("Resending {} count(s), {} moment(s)",
+				sizeOf(data.kc) + sizeOf(data.xp) + sizeOf(data.activity), sizeOf(data.moments));
+		kcPush.restore(data.kc);
+		skillXpPush.restore(data.xp);
+		activityPush.restore(data.activity);
+		// Off disk already (take deleted the file), so a client that dies after this send replays nothing.
+		// Only under the sign-in they were queued under.
+		if (DiskFiles.fingerprint(apiClient.playerToken).equals(data.account)) data.facts.forEach(f -> queueFact(f.getAsJsonObject(), false, null));
+		if (sizeOf(data.moments) > 0) {
+			moments.restore(data.moments, t, PushStash.MAX_AGE_MS); // takes the moments monitor itself
+			scheduleMomentPush();
+		}
+	}
+
+	/** Client closing (not just the plugin stopping): save unsent pushes, and have the client wait for it. */
+	@Subscribe
+	void onClientShutdown(ClientShutdown event) {
+		var save = stashPushes();
+		if (save != null) event.waitFor(sharedExecutor.submit(save));
+	}
+
+	/**
+	 * The site answered after a stretch of not answering. Everything that backed off while it was down
+	 * goes now rather than sitting out the rest of its wait (up to ten minutes for the profile syncs).
+	 */
+	void onSiteRecovered() {
+		log.info("Site back");
+		clogBackoff.reset();
+		clogFullBackoff.reset();
+		pbBackoff.reset();
+		rosterBackoff.reset();
+		proofBackoff.reset();
+		kcPush.kick();
+		skillXpPush.kick();
+		activityPush.kick();
+		synchronized (moments) {
+			momentFailures = 0;
+		}
+		if (!moments.isEmpty()) scheduleMomentPush();
+		var outbox = notifyOutbox;
+		if (outbox != null) outbox.kick();
+		submit(() -> {
+			safely("retryPendingSubmissions", this::retryPendingSubmissions);
+			flushProfileSyncs();
+		});
+	}
+
+	void flushProfileSyncs() {
+		safely("flushClogSync", this::flushClogSync);
+		safely("flushFullClogSync", this::flushFullClogSync);
+		safely("flushPersonalBests", this::flushPersonalBests);
+	}
+
+	void configureApiClient() {
+		apiClient.configure(config.playerToken());
+		// Signing out, or another account signing in: the saved answers were the last account's.
+		var rc = responseCache;
+		var stale = rc == null ? null : rc.switchAccount(config.playerToken());
+		if (stale != null) {
+			forgetSavedResponses();
+			submit(() -> rc.clear(stale));
+		}
+	}
+
+	/** Read last session's config off disk for the panel. Executor only (disk). */
+	void loadSavedResponses() {
+		var rc = responseCache;
+		if (rc == null || !apiClient.isConfigured() || liveConfigAnswered) return;
+		var cfgEntry = rc.load(ResponseDiskCache.CONFIG);
+		// Saved for another character than the one about to play: their team, not this one's.
+		var who = apiClient.getCurrentRsn() != null ? apiClient.getCurrentRsn() : apiClient.getRsnHint();
+		if (cfgEntry != null && cfgEntry.rsn != null && who != null && !Rsn.same(cfgEntry.rsn, who)) return;
+		var cfg = apiClient.seedFromDisk(cfgEntry, PluginConfigResponse.class);
+		if (cfg == null || liveConfigAnswered) return; // the site beat the disk to it
+		savedConfig = cfg;
+		repaintSidebar();
+	}
+
+	/** The site has answered (or the account changed): stop showing last session's copy. */
+	void forgetSavedResponses() {
+		savedConfig = null;
+	}
+
+	/**
+	 * What the SIDE PANEL draws from: the live config, or — until the site's first answer this
+	 * session — last session's saved copy. Never read by tracking; that is {@link #pluginConfig}.
+	 */
+	PluginConfigResponse sidebarConfig() {
+		var live = pluginConfig;
+		return live != null || liveConfigAnswered ? live : savedConfig;
+	}
+
+
+	// ─── Admin clan-roster sync (triggered from the in-game collection-log "Bingo" tab) ───
+	// Authenticated solely by the player's per-user account token (config.playerToken()) plus
+	// their site admin role. No admin-link-code mechanism exists anymore.
+	/**
+	 * Once per login, ask the site whether this account token belongs to an
+	 * admin (GET /api/plugin/me). On success, flip the isAdmin flag so the
+	 * in-game collection-log "Bingo" tab renders its admin-only "Sync clan
+	 * roster" button; otherwise it stays hidden. Guarded so it only probes when
+	 * both the player token and site URL are set, and only once per login
+	 * session.
+	 */
+	void probeAdmin() {
+		if (adminProbeAttempted) return;
+		var token = config.playerToken();
+		if (empty(token)) return;
+		adminProbeAttempted = true;
+		lastAdminProbeAt = now();
+		// Repaint the side panel so the admin button appears/disappears.
+		if (isAdmin != (isAdmin = apiClient.fetchIsAdmin(token))) repaintSidebar();
+	}
+
+	/**
+	 * Is the clan roster readable RIGHT NOW, as last seen from the client thread?
+	 *
+	 * <p>The side panel renders on Swing's EDT and has to know whether to offer a roster sync, but
+	 * asking the client directly from there is a thread violation. This is refreshed on the game
+	 * tick and read from anywhere.
+	 */
+	@Getter
+	volatile boolean clanRosterReadable;
+	/** Consecutive ticks the clan channel has been missing — see updateClanRosterReadable. */
+	int clanRosterMissingTicks;
+	/** ~6 seconds of a genuinely absent channel before the button goes away. */
+	static final int CLAN_ROSTER_GRACE_TICKS = 10;
+
+	/**
+	 * Refresh the cached "can we read the roster" answer, with hysteresis.
+	 *
+	 * <p>{@code getClanChannel()} is momentarily null on login, on a world hop, and while the clan
+	 * tab loads. Mirroring that straight into the panel made the roster button appear and disappear
+	 * for no reason a player could see, so it takes a few seconds of genuinely NOT being there
+	 * before we withdraw the button — while it comes back the instant the channel does.
+	 */
+	void updateClanRosterReadable() {
+		var before = clanRosterReadable;
+		if (isClanScrapeAvailable()) {
+			clanRosterReadable = true;
+			clanRosterMissingTicks = 0;
+		} else if (!clanRosterReadable || ++clanRosterMissingTicks >= CLAN_ROSTER_GRACE_TICKS) clanRosterReadable = false;
+		// The roster button follows this; the clan channel usually loads a few seconds after login.
+		if (before != clanRosterReadable) {
+			var cs = client.getClanSettings();
+			log.info("Clan roster {} (channel={}, settings={}, members={})",
+					clanRosterReadable ? "readable" : "not readable",
+					client.getClanChannel() != null, cs != null,
+					cs == null || cs.getMembers() == null ? 0 : cs.getMembers().size());
+			repaintSidebar();
+		}
+	}
+
+	boolean isClanScrapeAvailable() {
+		if (client == null) return false;
+		var settings = client.getClanSettings();
+		return client.getClanChannel() != null && settings != null && settings.getMembers() != null && !settings.getMembers().isEmpty();
+	}
+
+
+	/**
+	 * Scrape the in-game clan roster (on the client thread) then POST it to the
+	 * site (off the client thread), authenticated with the player's account
+	 * token.
+	 */
+	void syncClanRoster(AdminActionCallback cb) {
+		// Every way out of here says why when somebody pressed the button: after "Syncing the clan
+		// roster..." a silent return reads as a sync that never finished.
+		var automatic = autoRosterAnnounce;
+		if (!execLive()) {
+			cb.onResult(false, "Plugin not running");
+			return;
+		}
+		var token = config.playerToken();
+		if (empty(token)) {
+			syncFailed(cb, !automatic, null, "Sign in from the Soulrend side panel first.");
+			return;
+		}
+
+		// Wait your turn. Both buttons and the login-time push come through here, so this is the one
+		// place that can hold the line — a cooldown after a push that worked, and a doubling wait
+		// after one that didn't, so a site that's down isn't asked again every time someone clicks.
+		var gate = now();
+		var backedOff = !rosterBackoff.ready(gate);
+		var waitMs = backedOff
+				? rosterBackoff.secondsUntilReady(gate) * 1000L
+				: rosterPushAllowedAt - gate;
+		if (waitMs > 0) {
+			// This attempt isn't happening, so it doesn't get to speak for the login either.
+			autoRosterAnnounce = false;
+			var secs = secs(waitMs);
+			var why = backedOff
+					? "The site didn't take the last roster push — trying again in " + secs + "s."
+					: "The roster was just synced — try again in " + secs + "s.";
+			syncFailed(cb, !automatic, why, why);
+			return;
+		}
+
+		// Read clan data on the client thread, then POST on the executor thread.
+		clientThread.invokeLater(() -> {
+			if (!isClanScrapeAvailable()) {
+				autoRosterAnnounce = false;
+				// The panel offered the button off a cached answer; this is the live one, so believe
+				// it and take the button away now rather than after the grace period.
+				clanRosterReadable = false;
+				clanRosterMissingTicks = CLAN_ROSTER_GRACE_TICKS;
+				repaintSidebar();
+				syncFailed(cb, !automatic, null, "Join your clan channel first — the roster is read from it.");
+				return;
+			}
+			var settings = client.getClanSettings();
+			var clanName = settings.getName();
+			List<BingoApiClient.ClanMember> members = new ArrayList<>();
+			for (var m : settings.getMembers()) {
+				var out = new BingoApiClient.ClanMember();
+				out.rsn = m.getName();
+				var rank = m.getRank();
+				if (rank != null) {
+					var title = settings.titleForRank(rank);
+					out.rank = title != null ? title.getName() : String.valueOf(rank.getRank());
+					out.rankNum = rank.getRank();
+				}
+				var joined = m.getJoinDate();
+				if (joined != null) out.joinedDays = (int) (LocalDate.now().toEpochDay() - joined.toEpochDay());
+				members.add(out);
+			}
+
+			executor.submit(() -> {
+				try {
+					var r = apiClient.syncClan(config.playerToken(), clanName, members);
+					rosterBackoff.onSuccess();
+					rosterPushAllowedAt = now() + ROSTER_PUSH_COOLDOWN_MS;
+					lastSyncSummary = "+" + r.added + " added · " + r.updated + " updated · " + r.markedLeft + " left";
+					// A sync nobody asked for reports itself only when the roster actually MOVED.
+					// Silence on the login where nothing changed; one line when somebody joined or
+					// left, because that's news whether or not you pressed anything.
+					autoRosterAnnounce = false;
+					var say = r.say != null ? r.say : new Say();
+					var firstThisLogin = !autoRosterReportedThisLogin;
+					if (automatic) {
+						autoRosterReportedThisLogin = true;
+						(say.auto.isEmpty() && firstThisLogin ? singletonList("Clan roster checked — nothing changed.") : say.auto).forEach(this::sendChatMessage);
+					} else say.manual.forEach(this::sendChatMessage);
+					say.warn.forEach(w -> sendChatMessage(WARN, w));
+					if (!empty(r.capNotice)) sendChatMessage(r.capNotice);
+					cb.onResult(true, lastSyncSummary);
+				} catch (AdminUnauthorizedException e) {
+					// Token isn't (or is no longer) an admin — hide the button until the next login probe.
+					isAdmin = false;
+					syncFailed(cb, true, null, "Your account token isn't an admin (or was revoked).");
+				} catch (ClanMismatchException e) {
+					syncFailed(cb, true, null, "Clan name doesn't match site config (" + Objects.toString(e.serverClanName, "(not set)") + ").");
+				} catch (RateLimitedException e) {
+					// The site said when. Hold exactly that long rather than guessing at it.
+					rosterPushAllowedAt = now() + Math.max(e.retryAfterMs, 1_000L);
+					syncFailed(cb, !automatic, "The site is limiting roster syncs — try again in "
+							+ secs(e.retryAfterMs) + "s.", "Rate limited by the site.");
+				} catch (IOException e) {
+					// Might clear on its own (site down, network gone), so wait longer each time
+					// instead of letting a button turn into a retry loop against a dead host.
+					rosterBackoff.onFailure(now());
+					log.warn("Clan sync failed: {}", e.getMessage());
+					syncFailed(cb, !automatic, "Clan sync failed: " + e.getMessage(), "Sync failed: " + e.getMessage());
+				} catch (RuntimeException e) {
+					// Anything unexpected still has to release the button, or it says "Already
+					// syncing" until the next login.
+					log.warn("Clan sync failed unexpectedly", e);
+					syncFailed(cb, !automatic, "Clan sync failed — try again in a moment.", "Sync failed unexpectedly.");
+				}
+			});
+		});
+	}
+
+	/**
+	 * A roster sync that didn't happen: say why in chat when {@code say} — by default "Clan sync
+	 * failed: " and the reason — and hand the reason to the button.
+	 */
+	void syncFailed(AdminActionCallback cb, boolean say, String chat, String why) {
+		if (say) sendChatMessage(WARN, chat != null ? chat : "Clan sync failed: " + Character.toLowerCase(why.charAt(0)) + why.substring(1));
+		cb.onResult(false, why);
+	}
+
+	static boolean empty(String s) {
+		return s == null || s.isEmpty();
+	}
+
+	static boolean empty(Collection<?> c) {
+		return c == null || c.isEmpty();
+	}
+
+	/** Whole seconds for a wait in chat — rounded up, never "0s". */
+	static long secs(long ms) {
+		return Math.max(1, (ms + 999) / 1000);
+	}
+
+	// Team-level tile completions (drops, stats, manual — any tile type, completed by any member) on
+	// every live board: tile ids are unique across boards, so one memory serves them all. Fire a banner
+	// once per newly-completed tile. Each board is seeded silently the first time it is seen, so tiles
+	// completed before this session (or on a board just joined) don't re-pop and no other board's do.
+	final Set<Integer> notifiedCompletedTiles = new HashSet<>();
+	/** The boards seeded so far. */
+	final Set<Integer> seededBoards = new HashSet<>();
+	// Tiles this client already showed a banner for via the player's own drop. Their completion is
+	// skipped here so the contributor doesn't see it twice; teammates still get the team banner.
+	final Set<Integer> locallyShownTiles = new HashSet<>();
+	// When each tile was last confirmed done. A config built before that (a push merged onto the held
+	// config, a fetch already in flight) still lists it open; only a later absence means a removal.
+	final Map<Integer, Long> confirmedDoneAt = new HashMap<>();
+
+	// Ladder missions board: mission tiles we've already alerted "new mission" for, and claim tiles
+	// we've already announced. Seeded on the first poll of an event (no backlog dump), cleared on change.
+	final Set<Integer> notifiedMissionTiles = new HashSet<>();
+	final Set<Integer> notifiedClaimTiles = new HashSet<>();
+	Integer ladderBaselineEventId;
+
+	/** Forget which tiles were seen done, so the next poll silently absorbs whatever already is. */
+	void resetCompletionBaseline() {
+		notifiedCompletedTiles.clear();
+		locallyShownTiles.clear();
+		confirmedDoneAt.clear();
+		seededBoards.clear();
+	}
+
+	/**
+	 * Note the live boards in {@code seeded}, forgetting ended ones (coming back seeds again), and return
+	 * those seen for the first time: their completions are absorbed silently.
+	 */
+	static Set<Integer> freshBoards(Set<Integer> seeded, PluginConfigResponse cfg) {
+		Set<Integer> live = new HashSet<>(), fresh = new HashSet<>();
+		cfg.boards.forEach(b -> live.add(b.eventId));
+		seeded.retainAll(live);
+		for (int b : live) if (seeded.add(b)) fresh.add(b);
+		return fresh;
+	}
+
+	/** The board a completion is on: its tag, else the addressed board's. */
+	static int boardOf(PluginConfigResponse cfg, CompletedTile t) {
+		return t.board != null ? t.board.eventId : cfg.event != null ? cfg.event.id : 0;
+	}
+
+	/**
+	 * Our own submission just completed its tile (the submit's answer said so): banner and chat line
+	 * now, under the same lock and memory as {@link #checkTileCompletions}, so the poll that follows
+	 * doesn't say it again.
+	 */
+	boolean announceCompletedNow(int tileId, String label) {
+		configFetchLock.lock();
+		try {
+			var cfg = pluginConfig;
+			if (cfg == null || seededBoards.isEmpty() || !notifiedCompletedTiles.add(tileId)) return false;
+			confirmedDoneAt.put(tileId, now());
+		} finally {
+			configFetchLock.unlock();
+		}
+		onTileConfirmedDone(tileId);
+		if (sidebarPanel != null) invokeLater(sidebarPanel::tileCompleted);
+		if (!config.teamCompletionBanner()) return false;
+		// A drop's own popup already showed it complete: no second popup, but the chat line still says so.
+		if (!locallyShownTiles.contains(tileId)) if (clogBanner.show("Soulrend Bingo", "Tile complete!", label)) playBannerSound();
+		return true;
+	}
+
+	/**
+	 * "Tile complete: <label> — by <name>!" ({@code line} is up to the label). A Supporter's name goes out plain, after their star: the
+	 * chatbox pass paints it in their colours for the chat surface and moves a Patron's (soulrendLine).
+	 */
+	void announceTileComplete(String line, String completedBy) {
+		var who = completedBy == null ? "" : clean(completedBy.trim());
+		var e = who.isEmpty() || !flairOn() ? null : chatFlair.entry(who);
+		// A tenure icon is added by the chatbox pass; a star here as well would show twice.
+		if (e != null) sendChatLine("Soulrend", line + " — by ", Tone.DONE, null, (e.t == null && Boolean.TRUE.equals(e.s) ? chatStar() : "") + who + "!");
+		else sendChatMessage(Tone.DONE, line + (who.isEmpty() ? "" : " — by " + who) + "!");
+	}
+
+	/** A chat line Soulrend wrote itself: "[Soulrend] …", after any timestamp (no player can write a non-sender line). */
+	static boolean soulrendLine(String raw) {
+		return SOULREND_LINE.matcher(ChatFlair.shown(raw).text).lookingAt();
+	}
+
+	static final Pattern SOULREND_LINE = Pattern.compile("^(?:\\s*\\[[^\\]]*\\])*?\\s*\\[Soulrend\\] ");
+
+	void checkTileCompletions(PluginConfigResponse cfg) {
+		if (cfg == null || !cfg.live() || cfg.completedTiles == null) return;
+		var fresh = freshBoards(seededBoards, cfg);
+		// Collect this poll's newly-completed tiles. add() still marks every tile seen even when the
+		// popup is toggled off, so flipping it on later won't dump a backlog.
+		List<CompletedTile> newlyDone = new ArrayList<>();
+		var anyDone = false;
+		// A tile no longer complete (its completion was deleted) is forgotten, so finishing it again
+		// announces it again instead of staying silent until the client restarts.
+		Set<Integer> doneNow = new HashSet<>();
+		for (var t : cfg.completedTiles) doneNow.add(t.tileId);
+		var now = now();
+		var reopened = false;
+		for (var it = notifiedCompletedTiles.iterator(); it.hasNext(); ) {
+			var was = it.next();
+			var at = confirmedDoneAt.get(was);
+			// Gone from a config asked for AFTER we said it was done: really undone (deleted, rolled back),
+			// so finishing it again announces again. Gone from an older one (a push merged onto the held
+			// config, a fetch already in flight) means nothing.
+			if (!doneNow.contains(was) && (at == null || cfg.asOf > at)) {
+				it.remove();
+				locallyShownTiles.remove(was);
+				confirmedDoneAt.remove(was);
+				reopened = true;
+			}
+		}
+		// The rule table dropped the tile when it finished, and pushes only raise counts: fetch it again.
+		if (reopened) submit(() -> safely("refreshConfig", this::refreshConfig));
+		for (var t : cfg.completedTiles) {
+			if (!notifiedCompletedTiles.add(t.tileId)) continue;
+			// The grace covers completions this client announced, not ones it found already done on
+			// its first look: a tile seen done at startup and then undone must announce again.
+			if (!fresh.contains(boardOf(cfg, t))) {
+				confirmedDoneAt.put(t.tileId, now);
+				anyDone = true;
+				onTileConfirmedDone(t.tileId);
+				if (t.partOf != null) {
+					// A combo's part: progress on the combo, not a tile complete (no banner).
+					onTileConfirmedDone(t.partOf);
+					// The combo finished with it: its own "Tile complete" line says so, once.
+					if (!doneNow.contains(t.partOf)) sendChatMessage(Tone.DONE, "Combo part done: " + t.label + "!");
+				} else if (!locallyShownTiles.contains(t.tileId)) newlyDone.add(t);
+			}
+		}
+		if (anyDone && sidebarPanel != null) invokeLater(sidebarPanel::tileCompleted);
+		if (newlyDone.isEmpty() || !config.teamCompletionBanner() || cfg.quiet) return;
+		// Banner only the hardest (most points) tile this poll to avoid a burst of banners.
+		// A combo whose part this client just bannered ("Tile complete!" on the drop) has had its popup.
+		Set<Integer> shown = new HashSet<>();
+		for (var t : cfg.completedTiles) if (t.partOf != null && locallyShownTiles.contains(t.tileId)) shown.add(t.partOf);
+		newlyDone.stream().filter(t -> !shown.contains(t.tileId)).max(Comparator.comparingInt(t -> t.points))
+			.ifPresent(t -> { if (clogBanner.show("Soulrend Bingo", "Tile complete!", t.label)) playBannerSound(); });
+		// A persistent chat line for EVERY newly-completed tile (including the bannered one) — the
+		// banner is easy to miss, so leave a record naming who finished it. Stat/manual completions
+		// carry no crediting player, so those just say "Tile complete: <label>!".
+		Map<String, List<String>> by = new LinkedHashMap<>();
+		for (var t : newlyDone) by.computeIfAbsent(Objects.toString(t.completedBy, ""), k -> new ArrayList<>()).add("Tile complete: " + t.label);
+		by.forEach(this::completeSoon);
+	}
+
+	/**
+	 * "Tile complete" lines wait a moment: one kill's tiles come back from the facts reply and again
+	 * from the next poll, board by board. One line per player closes the run ("on N boards" past one).
+	 */
+	final Map<String, List<String>> doneSoon = new LinkedHashMap<>();
+
+	void completeSoon(String who, List<String> lines) {
+		if (lines.isEmpty()) return;
+		boolean first;
+		synchronized (doneSoon) {
+			first = doneSoon.isEmpty();
+			doneSoon.computeIfAbsent(who == null ? "" : who, k -> new ArrayList<>()).addAll(lines);
+		}
+		var ex = executor;
+		if (ex == null || ex.isShutdown()) flushDone();
+		else if (first) ex.schedule(this::flushDone, 2, TimeUnit.SECONDS);
+	}
+
+	void flushDone() {
+		Map<String, List<String>> by;
+		synchronized (doneSoon) {
+			by = new LinkedHashMap<>(doneSoon);
+			doneSoon.clear();
+		}
+		by.forEach((who, l) -> RuleEngine.fold(l, 1).forEach(s -> announceTileComplete(s, who.isEmpty() ? null : who)));
+	}
+
+	/**
+	 * The site just confirmed a tile done. A pinned one shows "Done" now and comes down after its
+	 * linger, rather than waiting out two of the tracker's 30s polls.
+	 */
+	void onTileConfirmedDone(int tileId) {
+		if (!tileTracker.tracks(tileId)) return;
+		// Its "Done" goes up now; the tracker's doneSeen hook asks again after the linger to take it down.
+		submit(() -> safely("tileTracker", () -> tileTracker.refresh(tileId)));
+	}
+
+	/**
+	 * Missions board alerts, diffed across config polls like {@link #checkTileCompletions}: a banner +
+	 * chat when a NEW mission drops, and when ANOTHER player claims a lock-out one (own claims skipped).
+	 * Both pulse the sidebar card. Seeded on the first poll so opening the board doesn't dump the
+	 * backlog. Fires for a ladder OR a classic bingo carrying missions — NOT for a reveal-policy board
+	 * (showdown/rotating/bounty), whose reveals keep their existing sidebar-note behaviour.
+	 */
+	void checkMissionAlerts(PluginConfigResponse cfg) {
+		if (cfg == null || cfg.event == null) return;
+		var ladder = "ladder".equalsIgnoreCase(cfg.event.format);
+		if (!ladder && !empty(cfg.event.revealPolicy)) return;
+		var tag = ladder ? "Soulrend Ladder" : "Soulrend";
+		var seeding = ladderBaselineEventId == null || ladderBaselineEventId != cfg.event.id;
+		if (seeding) {
+			notifiedMissionTiles.clear();
+			notifiedClaimTiles.clear();
+			ladderBaselineEventId = cfg.event.id;
+		}
+
+		// --- new missions (revealed + open) ---
+		List<Mission> fresh = new ArrayList<>();
+		if (cfg.event.missions != null) for (var m : cfg.event.missions) if (m != null && notifiedMissionTiles.add(m.tileId) && !seeding) fresh.add(m);
+		if (!fresh.isEmpty()) {
+			var top = max(fresh, Comparator.comparingInt(m -> m.points));
+			if (clogBanner.show(tag, "New mission!", top.label)) playMissionSound(false);
+			for (var m : fresh) sendChatMessage(Tone.NEAR, "New mission: " + m.label + " - " + m.points + " pts!");
+		}
+
+		// --- lock-out claims by OTHER players: the banner for the latest, a line for each ---
+		var me = Rsn.normalize(getLocalPlayerName());
+		var first = true;
+		if (cfg.event.recentClaims != null) for (var c : cfg.event.recentClaims) {
+			if (c == null || !notifiedClaimTiles.add(c.tileId) || seeding || c.rsn != null && !me.isEmpty() && me.equals(Rsn.normalize(c.rsn))) continue;
+			var by = c.rsn != null && !c.rsn.trim().isEmpty() ? c.rsn.trim() : "Someone";
+			if (first && clogBanner.show(tag, "Mission claimed", by + ": " + c.label)) playMissionSound(true);
+			first = false;
+			sendChatMessage(Tone.DONE, by + " claimed " + c.label + " - " + c.points + " pts!");
+		}
+	}
+
+	/**
+	 * Take the clan the site says it answered for, so everything AFTER this call is addressed.
+	 *
+	 * On Auto the config poll deliberately names no clan, which lets the site keep deciding — a member
+	 * whose live board moves to their other clan follows it without touching anything. But the answer
+	 * names the clan it is about, and repeating that back on the next request is strictly better than
+	 * making the server guess again: it pins a member on two live boards to ONE of them for the whole
+	 * exchange, and it is what makes filing a submission work on an address that names no clan at all.
+	 *
+	 * A site too old to send the field leaves us exactly where we were.
+	 */
+	void adoptResolvedClan(PluginConfigResponse fresh) {
+		if (fresh == null) return;
+		var slug = fresh.activeClanSlug();
+		if (slug != null) apiClient.setResolvedClan(slug);
+		forgetAClanTheyAreNoLongerIn(fresh);
+		forgetAdminAnswerOnClanChange();
+	}
+
+	/**
+	 * Drop a cached "you are an admin" the moment we start addressing a different clan.
+	 *
+	 * The probe is answered once per session and a yes is never re-checked, which was right when a
+	 * deployment WAS a clan. It is not right now: the same token is an owner in one clan and a plain
+	 * member in the next, so an answer carried across a switch shows a button that cannot work.
+	 * Clearing it makes the ordinary re-probe ask again, against the clan we are actually addressing.
+	 */
+	void forgetAdminAnswerOnClanChange() {
+		var now = apiClient.getActiveClan();
+		if (now.equals(adminAnswerFor)) return;
+		adminAnswerFor = now;
+		isAdmin = false;
+		adminProbeAttempted = false;
+		lastAdminProbeAt = 0L; // ask immediately rather than waiting out the re-probe interval
+	}
+
+	/**
+	 * Drop a pick for a clan the member no longer has a seat in.
+	 *
+	 * Leaving a clan is the one way a stored choice becomes permanently wrong: the dropdown stops
+	 * offering it, so there is nothing to click to undo it, and the plugin would go on addressing a
+	 * clan that answers nothing while a live board runs somewhere they can still reach. Falling back
+	 * to Auto puts the decision back with the site, which is where it was before they chose.
+	 *
+	 * Only acts on a site that actually sends the list — an older one sends nothing, and "no clans" is
+	 * then a fact about the site rather than about the member.
+	 */
+	void forgetAClanTheyAreNoLongerIn(PluginConfigResponse fresh) {
+		var chosen = getChosenClan();
+		if (chosen.isEmpty() || empty(fresh.clans)) return;
+		for (var c : fresh.clans) if (c != null && chosen.equalsIgnoreCase(c.slug)) return;
+		log.info("No seat in {}", chosen);
+		cfgSet(CFG_ACTIVE_CLAN, "");
+		apiClient.setChosenClan("");
+	}
+
+	/**
+	 * The member picked a clan in the sidebar (or picked Auto, which is a blank slug).
+	 *
+	 * Persisted, because a pick that evaporated on restart would be worse than no pick at all — the
+	 * plugin would quietly go back to guessing and the member would have no reason to look.
+	 */
+	void setChosenClan(String slug) {
+		var clean = slug == null ? "" : slug.trim();
+		cfgSet(CFG_ACTIVE_CLAN, clean);
+		apiClient.setChosenClan(clean);
+		// Re-ask immediately rather than waiting out the poll: the member just told us they wanted a
+		// different board, and showing them the old one for another thirty seconds reads as a no-op.
+		//
+		// Order matters, and it is the whole reason this does not just call the panel's own refresh.
+		// The sidebar renders from the config THIS class holds, so refreshing it before the new clan's
+		// config has landed re-renders the clan they just switched away from — a click that visibly
+		// does nothing, then quietly works fifteen seconds later. Fetch first, repaint second.
+		forgetAdminAnswerOnClanChange();
+		if (executor != null) executor.execute(() -> {
+			refreshConfig();
+			repaintSidebar();
+		});
+		// No executor means startUp hasn't run, so there is no panel waiting on a fetch either.
+		else repaintSidebar();
+	}
+
+	/** Ask the sidebar to re-read, from the EDT — it is Swing, and callers here are on worker threads. */
+	void repaintSidebar() {
+		var panel = sidebarPanel;
+		if (panel != null) invokeLater(panel::refresh);
+	}
+
+	/** The member's clan pick, or "" when they are on Auto. */
+	String getChosenClan() {
+		return Objects.toString(cfgGet(CFG_ACTIVE_CLAN), "").trim();
+	}
+
+	/**
+	 * The sidebar's visible refresh cadence is tighter than the always-on tracker poll. A manual
+	 * click always re-reads; background sidebar paints only do so when the last config is genuinely
+	 * stale, avoiding two requests landing together around the regular 30-second poll.
+	 */
+	void refreshConfigForSidebar(boolean force) {
+		// The provider smoke test deliberately invokes the sidebar graph on an uninjected plugin;
+		// the source must remain usable in that state just as it was before this freshness hook.
+		if (apiClient == null) return;
+		if (!force) {
+			// NEVER WAIT FOR A FETCH TO DRAW. A background paint that finds one in flight (the 30s poll,
+			// the login greet) draws from the config already held and picks up the new one next tick —
+			// queueing behind it left "Loading…" up for as long as the site took, up to the read timeout.
+			// The plugin's own poll keeps the config fresh; this only covers a gap in it.
+			if (now() - lastConfigAttemptAt >= (pushLive() ? PUSH_FALLBACK_MS : 25_000L) && configFetchLock.tryLock()) fetchConfigAndUnlock();
+			return;
+		}
+		// A clicked Refresh wants the newest answer. If a fetch is already running, its answer is that —
+		// wait for it rather than sending a second one behind it.
+		var asked = now();
+		configFetchLock.lock();
+		if (lastConfigAttemptAt < asked) fetchConfigAndUnlock();
+		else configFetchLock.unlock();
+	}
+
+	/**
+	 * Serializes config fetches on a lock of their own. NOT the plugin monitor: the fetch is a
+	 * blocking HTTP call (90s read timeout), and the client thread takes the plugin monitor via
+	 * onConfigChanged → scheduleRefresh whenever it writes a config key — every banked play minute,
+	 * new biggest hit, death. Sharing it froze the game for as long as the site took to answer,
+	 * most visibly right after a proof upload.
+	 */
+	final ReentrantLock configFetchLock = new ReentrantLock();
+
+	/** When a config fetch last FINISHED, success or not — so a failing site isn't asked again on every paint. */
+	volatile long lastConfigAttemptAt;
+
+	/** Signed in, and no config fetch has finished yet — the sidebar shows "Loading", not "no clans". */
+	boolean awaitingFirstConfig() {
+		return apiClient != null && apiClient.isConfigured() && pluginConfig == null && lastConfigAttemptAt == 0;
+	}
+
+	// Site-served re-wordings of chat lines (see ChatPatterns). The last good answer is saved with the
+	// config, so a fix survives a restart before the site answers.
+	boolean chatPatternsSeeded;
+	long chatPatternsFetchedAt;
+	ChatPatterns.OverridesResponse chatPatternsApplied;
+	static final long CHAT_PATTERNS_EVERY_MS = 30 * 60_000L;
+
+	final ChatFlair chatFlair = new ChatFlair();
+	long chatFlairFetchedAt;
+	static final long CHAT_FLAIR_EVERY_MS = 10 * 60_000L;
+	/** Socket deltas and jittered catch-ups (ChatFlairSync); HTTP on OkHttp's pool, never the client thread. */
+	final ChatFlairSync chatFlairSync = new ChatFlairSync(chatFlair, new ChatFlairSync.Source() {
+		public ChatFlair.Since since(int v) {
+			return apiClient.fetchChatFlairSince(v);
+		}
+
+		public ChatFlair.Wire full(int v) {
+			return apiClient.fetchChatFlairList(v);
+		}
+	}, (r, ms) -> {
+		var ex = executor;
+		if (ex != null) ex.schedule(() -> apiClient.interactiveExecutor().execute(() -> safely("chat flair", r)), ms, TimeUnit.MILLISECONDS);
+	}, () -> ThreadLocalRandom.current().nextLong(ChatFlairSync.JITTER_MS), this::chatFlairChanged);
+	volatile boolean chatFlairSeeded;
+	ScheduledFuture<?> chatFlairSave;
+	// Broadcasts whose text starts with a player's name ("Nisbro HCM has completed a quest: …").
+	static final Set<ChatMessageType> FLAIR_BROADCASTS = EnumSet.of(
+			CLAN_CHAT,
+			CLAN_MESSAGE,
+			CLAN_GIM_CHAT,
+			CLAN_GIM_MESSAGE,
+			CLAN_GUEST_CHAT,
+			CLAN_GUEST_MESSAGE,
+			BROADCAST,
+			FRIENDSCHATNOTIFICATION,
+			FRIENDNOTIFICATION,
+			TRADEREQ,
+			TRADE_SENT,
+			TRADE,
+			// "Drenvox has logged in." — a friend coming on or going off.
+			LOGINLOGOUTNOTIFICATION);
+	/** Client thread: keys (ChatFlair.key) of recent broadcasts that start with a Supporter's name. */
+	final Set<String> flairBroadcasts = newSetFromMap(capped(64, false));
+	/** Client thread: split-PM line texts already looked at (painted, or nothing to paint). */
+	final Set<String> splitPmSeen = new HashSet<>();
+
+	/**
+	 * Config-poll thread, after every config attempt — answered or not: the list is public and in no
+	 * clan, so a login whose config is a 404 still gets it. The saved copy first, then the site's
+	 * version every 10 minutes (deltas between come over the socket).
+	 */
+	void maybeRefreshChatFlair() {
+		if (!flairOn() && !menusFlair() || !apiClient.isConfigured()) return;
+		var rc = responseCache;
+		if (!chatFlairSeeded && rc != null) {
+			chatFlairSeeded = true;
+			if (chatFlair.adopt(rc.loadShared(ResponseDiskCache.CHAT_FLAIR, ChatFlair.Wire.class))) repaintFlair();
+		}
+		var at = now();
+		if (at - chatFlairFetchedAt < CHAT_FLAIR_EVERY_MS) return;
+		chatFlairFetchedAt = at;
+		chatFlairSync.sync();
+	}
+
+	/** The list moved: repaint now, save a moment later (a burst is one write), off the client thread. */
+	void chatFlairChanged() {
+		repaintFlair();
+		var ex = executor;
+		var rc = responseCache;
+		if (ex == null || rc == null) return;
+		synchronized (chatFlairSync) {
+			if (chatFlairSave == null || chatFlairSave.isDone()) chatFlairSave = ex.schedule(() -> apiClient.interactiveExecutor().execute(
+					() -> rc.storeShared(ResponseDiskCache.CHAT_FLAIR, chatFlair.toWire())), 5, TimeUnit.SECONDS);
+		}
+	}
+
+	void repaintFlair() {
+		repaintFlair(false);
+	}
+
+	void repaintFlair(boolean chatOnly) {
+		// The chat input and the side lists were drawn before the list changed and are only redrawn
+		// on the game's next rebuild: paint them now. The panel's "Tracking" name too.
+		clientThread.invokeLater(() -> {
+			// Visible widgets may still contain our old tags/star. Ask the game for clean source rows
+			// first; painting the new style on top caused the transient double-star and bad widths.
+			if (chatOnly) unflairChat();
+			else unflairAll();
+			// Tenure icons register asynchronously: ask for every style's now, so lines don't go out bare.
+			// Every colour a moving gradient star can take (a Legend's glint frames register as they come),
+			// so lines don't go out without one.
+			for (var e : chatFlair.held.styles)
+				for (int q = 0; e.t != null && q <= (Boolean.TRUE.equals(e.s) && e.g != null && e.g.size() >= 2 ? 40 : 0); q++) {
+					tenureIcon(e, false, -1, q / 40.0);
+					tenureIcon(e, true, -1, q / 40.0);
+				}
+			// refreshChat rebuilds through client scripts. Paint on the following client turn, after those
+			// scripts have restored both the plain text and its original sender/message geometry.
+			clientThread.invokeLater(() -> {
+				flairChatInput();
+				flairChatbox();
+				if (chatOnly) return;
+				flairNameLists();
+				refreshClanTitleWidgets();
+				for (int r : FLAIR_ROOTS) flairInterface(r);
+			});
+		});
+		var panel = sidebarPanel;
+		if (panel != null) panel.flairChanged();
+	}
+
+	/** The panel's tracked name: its Supporter look, or null. */
+	boolean flairOn() {
+		return config.chatNames() != SoulrendConfig.Names.Off;
+	}
+
+	boolean menusFlair() {
+		return config.menuNames() != SoulrendConfig.Names.Off;
+	}
+
+	/**
+	 * The chat settings before they were merged (Soulrend chat, Supporter names): read once, mapped to the
+	 * new ones, then gone. The colour pickers moved to the site (Settings > In-game chat).
+	 */
+	void migrateChatSettings() {
+		var g = "soulrendbingo";
+		var show = cfgGet("relayShow");
+		var send = cfgGet("relaySend");
+		var pm = cfgGet("relayPm");
+		if (show != null || send != null || pm != null) configManager.setConfiguration(g, "soulrendChat", "false".equals(show) ? SoulrendConfig.Relay.Off : "true".equals(pm) ? SoulrendConfig.Relay.See_send_PMs
+				: "true".equals(send) ? SoulrendConfig.Relay.See_send : SoulrendConfig.Relay.See_others);
+		var chat = cfgGet("supporterChatFlair");
+		var menus = cfgGet("menuNameFlair");
+		var names = cfgGet("supporterNames");
+		if (names == null && (chat != null || menus != null)) names = "false".equals(chat) ? "Off" : "false".equals(menus) ? "Chat" : "Chat_menus";
+		if (names != null) {
+			configManager.setConfiguration(g, "chatNames", "Off".equals(names) ? SoulrendConfig.Names.Off : SoulrendConfig.Names.Animated);
+			configManager.setConfiguration(g, "menuNames", "Chat_menus".equals(names) ? SoulrendConfig.Names.Animated : SoulrendConfig.Names.Off);
+		}
+		for (var k : new String[]{"supporterNames", "relayShow", "relaySend", "relayPm", "supporterChatFlair", "menuNameFlair", "animatedNames", "menuFlairOverride", "chatPrefixColor", "chatTextColor"}) if (cfgGet(k) != null) configManager.unsetConfiguration(g, k);
+	}
+
+	/** Supporter names off in game menus and interfaces (friends list, channel member lists). */
+	boolean menusOff() {
+		return !menusFlair() || chatFlair.isEmpty();
+	}
+
+	boolean flairOff() {
+		return !flairOn() || chatFlair.isEmpty();
+	}
+
+	ChatFlair.Entry flairOf(String rsn) {
+		return chatFlair.entry(rsn);
+	}
+
+	/**
+	 * Client thread (onChatMessage). Supporter flair is painted on the chatbox WIDGETS after the game
+	 * draws them (flairChatbox), never on the message: the game builds the line's right-click options
+	 * and actions ("Message", "Add friend" / "Remove friend", reply, report) from the MessageNode's
+	 * name, and a name carrying colour tags fails its friend check and acts on the wrong name. Here only
+	 * a broadcast that starts with a Supporter's name is noted, so the walk knows its widget.
+	 */
+	void maybeKeepFlairBroadcast(ChatMessage event) {
+		if (!FLAIR_BROADCASTS.contains(event.getType()) || chatFlair.isEmpty() || !flairOn()) return;
+		var key = chatFlair.leadKey(event.getMessage());
+		if (key != null) flairBroadcasts.add(key);
+	}
+
+	/** Client thread: per chatbox line widget (by index), the text it had when last looked at. */
+	String[] chatboxSeen = new String[0];
+	/** Plain source for a visible Patron sender; null for every static/non-sender widget. */
+	String[] chatboxMoving = new String[0];
+	/** A changed offscreen row waits here until it intersects the scroll area's viewport. */
+	boolean[] chatboxDeferred = new boolean[0];
+	/** Smooth game-widget motion without rebuilding strings on every render frame. */
+	static final long CHAT_NAME_FRAME_MS = 40;
+	long chatNameFrame = Long.MIN_VALUE;
+	long currentChatNameFrame() {
+		// Unfocused, the shared clock stands still, so the frame holds and moving names stop repainting;
+		// the per-frame paint pass keeps running (painting only on change made names flash plain). Neither
+		// chat nor menus animating: one frame forever, so nothing repaints for motion.
+		return config.chatNames() != SoulrendConfig.Names.Animated && config.menuNames() != SoulrendConfig.Names.Animated ? -1
+				: GradientLabel.animationTimeMillis() / CHAT_NAME_FRAME_MS;
+	}
+	/** "Still colours": the gradient frozen at its start. */
+	double chatNameShift(long frame) {
+		return config.chatNames() == SoulrendConfig.Names.Animated ? nameShift(frame, GradientLabel.GAME_CYCLE_MS) : 0;
+	}
+	double interfaceNameShift(long frame) {
+		return config.menuNames() == SoulrendConfig.Names.Animated ? nameShift(frame, GradientLabel.PANEL_CYCLE_MS) : 0;
+	}
+	static double nameShift(long frame, long cycleMs) {
+		return frame < 0 ? 0 : (frame * CHAT_NAME_FRAME_MS % cycleMs) / (double) cycleMs * 2;
+	}
+	/** Client thread: per widget, the x (or, for a sender, the width) we last set making room for a star. */
+	int[] chatboxRoom = new int[0];
+	/** Client thread: per chatbox slot, the plain sender line {@link #chatboxRoom} was set for. */
+	String[] chatboxRoomFor = new String[0];
+	/**
+	 * Client thread: per message widget we narrowed into an extra wrapped line, the height it was grown
+	 * to and its text then. The game lays the rows out again (a new message, a scroll) without asking us,
+	 * so the rows below would slide back under that extra line; each pass puts them right again.
+	 */
+	int[] chatboxGrown = new int[0];
+	String[] chatboxGrownText = new String[0];
+
+	/**
+	 * Client thread, right before each frame: each sender column ("Name:", "[Clan] <icons>Name:", "From
+	 * Name:", "To Name:") and each noted broadcast's leading name in Supporter colours. The game redraws
+	 * these widgets through more than one path (a new line, a scroll, a tab or filter switch), and
+	 * painting only after BUILD_CHATBOX lost the colour until the next one — the chat input had the same
+	 * problem, fixed the same way. A widget whose text is still the very string seen last frame is
+	 * skipped by reference: no allocation unless the game wrote something new. Widget text only — the
+	 * line's menu options come from the message data, not from this text.
+	 */
+	void flairChatbox() {
+		if (flairOff()) return;
+		var area = client.getWidget(InterfaceID.Chatbox.SCROLLAREA);
+		var lines = area == null || area.isHidden() ? null : area.getDynamicChildren();
+		if (lines == null) return;
+		if (chatboxSeen.length < lines.length) {
+			int was = chatboxRoom.length;
+			chatboxSeen = Arrays.copyOf(chatboxSeen, lines.length);
+			chatboxMoving = Arrays.copyOf(chatboxMoving, lines.length);
+			chatboxDeferred = Arrays.copyOf(chatboxDeferred, lines.length);
+			chatboxRoom = Arrays.copyOf(chatboxRoom, lines.length);
+			chatboxRoomFor = Arrays.copyOf(chatboxRoomFor, lines.length);
+			chatboxGrown = Arrays.copyOf(chatboxGrown, lines.length);
+			chatboxGrownText = Arrays.copyOf(chatboxGrownText, lines.length);
+			Arrays.fill(chatboxRoom, was, lines.length, Integer.MIN_VALUE);
+		}
+		keepGrownRows(lines);
+		var frame = currentChatNameFrame();
+		var move = frame != chatNameFrame;
+		chatNameFrame = frame;
+		var shift = chatNameShift(frame);
+		String star = null;
+		var opaque = false;
+		// Shared by every changed row in this pass; do not allocate three closures per animated name.
+		IntUnaryOperator x = j -> lines[j].getOriginalX(), y = j -> lines[j].getOriginalY();
+		IntFunction<String> shown = j -> lines[j] == null || lines[j].isHidden() ? null : lines[j].getText();
+		Rectangle viewport = null;
+		for (int i = 0; i < lines.length; i++) {
+			var w = lines[i];
+			var text = w == null ? null : w.getText();
+			var same = text != null && text == chatboxSeen[i];
+			var moving = same && chatboxMoving[i] != null;
+			if (w == null || w.isHidden() || empty(text) || same && !(move && (moving || chatboxDeferred[i]))) continue;
+			// The game replaced this slot while it was offscreen; its previous owner no longer applies.
+			if (!same) chatboxMoving[i] = null;
+			if (viewport == null) viewport = area.getBounds();
+			var runway = new Rectangle(viewport);
+			runway.grow(0, 80);
+			if (!runway.intersects(w.getBounds())) {
+				chatboxSeen[i] = text;
+				chatboxDeferred[i] = true;
+				continue;
+			}
+			chatboxDeferred[i] = false;
+			// Repaint from the tag-free source, never by stripping or stacking our previous tags.
+			if (moving) text = chatboxMoving[i];
+			if (star == null) {
+				star = chatStar();
+				opaque = opaqueChatbox();
+			}
+			// Which widget is which comes from the layout, never from what the text says: a typed
+			// "[Clan] Bob:" or "Bob has completed a quest: …" is someone's message widget.
+			var sender = text.indexOf(':') >= 0 && ChatFlair.senderColumn(i, lines.length, x, y, shown);
+			var painted = sender ? chatFlair.paintSender(text, star, opaque, shift) : null;
+			var lead = false;
+			if (!sender && !flairBroadcasts.isEmpty() && flairBroadcasts.contains(ChatFlair.key(text))
+					&& !ChatFlair.typedBySomeone(i, x, y, shown)) {
+				painted = chatFlair.paintLead(text, star, opaque, shift);
+				lead = true;
+			}
+			// Our own lines naming someone ("Tile complete: … — by Bob!"): a player can't write a non-sender
+			// "[Soulrend]" line, so its names are painted, and move, like a sender's.
+			var ours = painted == null && !sender && soulrendLine(text);
+			if (ours) painted = chatFlair.paintNames(text, opaque, shift);
+			if (painted != null) {
+				w.setText(painted);
+				if (moving || (sender ? chatFlair.movingSender(text) : ours ? chatFlair.movingNames(text) : lead && chatFlair.movingLead(text))) chatboxMoving[i] = text;
+				if (sender) makeRoom(lines, i, text, painted);
+				text = w.getText();
+			}
+			chatboxSeen[i] = text;
+		}
+	}
+
+	/**
+	 * A sender column the game sized for the plain name now also draws the Patron star: widen it, and move
+	 * the line's text beside it (same row, to its right) over by the star's width, so the star doesn't
+	 * push the name into the message. Each move is remembered, so a widget the game didn't lay out
+	 * again is never moved twice.
+	 */
+	void makeRoom(Widget[] lines, int at, String plain, String painted) {
+		var s = lines[at];
+		var room = starRoom(plain, painted, s.getFont());
+		int d = room[0], need = room[1];
+		if (d <= 0) return;
+		// A position alone can't say "already moved": a longer name's plain layout can land exactly on the
+		// spot an earlier, shorter starred name in this slot was moved to, leaving its message overlapping.
+		if (!ChatFlair.alreadyRoomed(s.getOriginalWidth(), chatboxRoom[at], plain, chatboxRoomFor[at])) {
+			s.setOriginalWidth(s.getOriginalWidth() + d);
+			chatboxRoom[at] = s.getOriginalWidth();
+			chatboxRoomFor[at] = plain;
+			s.revalidate();
+		}
+		for (int j = 0; j < lines.length; j++) {
+			var o = lines[j];
+			if (j == at || o == null || o.isHidden() || o.getOriginalY() != s.getOriginalY()
+					|| o.getOriginalX() <= s.getOriginalX() || ChatFlair.alreadyRoomed(o.getOriginalX(), chatboxRoom[j], plain, chatboxRoomFor[j])) continue;
+			int by = ChatFlair.shift(d, need, o.getOriginalX() - s.getOriginalX());
+			o.setOriginalX(o.getOriginalX() + by);
+			int w = Math.max(1, o.getOriginalWidth() - by);
+			// Narrower can wrap onto an extra line, but the game laid the rows out for its own wrap: grow
+			// this one and push the rows below down by the same, or the extra line covers the next message.
+			var f = o.getFont();
+			int before = f == null ? 1 : wrapLines(o.getText(), o.getOriginalWidth(), f), after = f == null ? 1 : wrapLines(o.getText(), w, f);
+			o.setOriginalWidth(w);
+			if (after > before) {
+				pushRowsDown(lines, o, (after - before) * Math.max(1, o.getOriginalHeight() / before));
+				chatboxGrown[j] = o.getOriginalHeight();
+				chatboxGrownText[j] = o.getText();
+			}
+			chatboxRoom[j] = o.getOriginalX();
+			chatboxRoomFor[j] = plain;
+			o.revalidate();
+		}
+	}
+
+	/**
+	 * A message we grew into an extra line keeps it, and the rows below stay under it, however often the
+	 * game lays the chat out again. Its text or position changing means the game rebuilt that slot plain:
+	 * it is forgotten. Otherwise its height comes back and anything that slid up under it moves down.
+	 */
+	void keepGrownRows(Widget[] lines) {
+		for (int j = 0; j < Math.min(lines.length, chatboxGrown.length); j++) {
+			if (chatboxGrown[j] <= 0) continue;
+			var o = lines[j];
+			if (o == null || o.isHidden() || o.getText() != chatboxGrownText[j] || o.getOriginalX() != chatboxRoom[j]) {
+				chatboxGrown[j] = 0;
+				chatboxGrownText[j] = null;
+				continue;
+			}
+			if (o.getOriginalHeight() < chatboxGrown[j]) {
+				pushRowsDown(lines, o, chatboxGrown[j] - o.getOriginalHeight());
+				continue;
+			}
+			int y = o.getOriginalY(), next = Integer.MAX_VALUE;
+			for (var l : lines) if (l != null && l != o && !l.isHidden() && l.getOriginalY() > y) next = Math.min(next, l.getOriginalY());
+			int under = y + o.getOriginalHeight() - next;
+			if (next != Integer.MAX_VALUE && under > 0) pushRowsDown(lines, o, under, false);
+		}
+	}
+
+	/** How many lines {@code text} wraps to at {@code width}: greedy on spaces, as the chatbox wraps. */
+	static int wrapLines(String text, int width, FontTypeFace f) {
+		int lines = 1, at = 0;
+		for (var word : Text.removeTags(text).split(" ")) {
+			int ww = f.getTextWidth(word), sp = at == 0 ? 0 : f.getTextWidth(" ");
+			if (at > 0 && at + sp + ww > width) {
+				lines++;
+				at = ww;
+			} else at += sp + ww;
+		}
+		return lines;
+	}
+
+	/** Grow {@code o} by {@code extra} px and move every chatbox row below it down to match, keeping the view where it was. */
+	void pushRowsDown(Widget[] lines, Widget o, int extra) {
+		pushRowsDown(lines, o, extra, true);
+	}
+
+	void pushRowsDown(Widget[] lines, Widget o, int extra, boolean grow) {
+		int y = o.getOriginalY();
+		if (grow) {
+			o.setOriginalHeight(o.getOriginalHeight() + extra);
+			o.revalidate();
+		}
+		for (var l : lines) {
+			if (l == null || l == o || l.getOriginalY() <= y) continue;
+			l.setOriginalY(l.getOriginalY() + extra);
+			l.revalidate();
+		}
+		var area = o.getParent();
+		if (area == null) return;
+		area.setScrollHeight(area.getScrollHeight() + extra);
+		area.setScrollY(area.getScrollY() + extra);
+		area.revalidateScroll();
+	}
+
+	/**
+	 * Client thread, each frame: the split private chat ("From Name: …" / "To Name: …" over the game
+	 * view) is redrawn by its own scripts; its few lines are checked against the texts already seen, so a
+	 * frame with nothing new costs a handful of set lookups. Widget text only, like flairChatbox.
+	 */
+	// Client thread: the split-PM widgets of this frame and their layout, reused (no allocation per frame).
+	final List<Widget> pmLine = new ArrayList<>();
+	int[] pmAx = new int[16], pmAy = new int[16], pmX = new int[16], pmW = new int[16], pmRecX = new int[16], pmRecW = new int[16];
+	boolean[] pmShown = new boolean[16];
+	/** Client thread: per split-PM widget, the {x, width} last set making room for a star. */
+	final Map<Widget, int[]> pmRoom = new WeakHashMap<>();
+	/** Client thread: a painted split-PM sender's text, and the room its star needs. */
+	final Map<String, int[]> pmPainted = new HashMap<>();
+	/** Per moving PM widget: its tag-free source and the animated text currently installed. */
+	final Map<Widget, String[]> pmMoving = new WeakHashMap<>();
+	long pmNameFrame = Long.MIN_VALUE;
+
+	/**
+	 * The split private chat lays each line out as separate widgets — the sender ("From <icons>Name:",
+	 * "To Name:") and the message beside it, placed for the plain name — so a Patron's star ran the name
+	 * into the message and hid the colon. Like the chatbox: the sender column is widened and the message
+	 * moved over, re-done whenever the game lays the line out again. Layout, not text, says which widget
+	 * is which: a sender column has its message to the right; a whole "From Name: …" line in one widget
+	 * must have nothing to its left (a typed "From Bob: hi" is someone's message widget).
+	 */
+	void flairSplitPm() {
+		if (flairOff()) return;
+		var box = client.getWidget(InterfaceID.PmChat.CONTAINER);
+		if (box == null || box.isHidden()) return;
+		var frame = currentChatNameFrame();
+		var animate = frame != pmNameFrame;
+		pmNameFrame = frame;
+		var shift = chatNameShift(frame);
+		pmLine.clear();
+		collectPm(box.getStaticChildren(), 0, 0);
+		collectPm(box.getDynamicChildren(), 0, 0);
+		int n = pmLine.size();
+		if (n == 0) return;
+		if (pmX.length < pmAx.length) {
+			// collectPm grew the place arrays; the rest are refilled below.
+			int c = pmAx.length;
+			pmX = new int[c]; pmW = new int[c]; pmRecX = new int[c]; pmRecW = new int[c];
+			pmShown = new boolean[c];
+		}
+		for (int i = 0; i < n; i++) {
+			var w = pmLine.get(i);
+			var t = w.getText();
+			pmShown[i] = !w.isHidden() && !empty(t);
+			pmX[i] = w.getOriginalX();
+			pmW[i] = w.getOriginalWidth();
+			// A record counts only for the line it was made for: the widgets are reused line to line, and a
+			// "From" line's message can land exactly where a "To" line's was moved to (it then stayed under the name).
+			var rec = pmRoom.get(w);
+			if (rec != null && rec[2] != Text.removeTags(String.valueOf(t)).hashCode()) rec = null;
+			pmRecX[i] = rec == null ? Integer.MIN_VALUE : rec[0];
+			pmRecW[i] = rec == null ? Integer.MIN_VALUE : rec[1];
+		}
+		var moved = false;
+		for (int i = 0; i < n; i++) {
+			if (!pmShown[i]) continue;
+			var w = pmLine.get(i);
+			var text = w.getText();
+			var movingState = pmMoving.get(w);
+			var ours = movingState != null && text.equals(movingState[1]);
+			if (movingState != null && !ours) {
+				pmMoving.remove(w);
+				movingState = null;
+			}
+			var repaint = ours && animate;
+			if (repaint) text = movingState[0];
+			var d = repaint ? null : pmPainted.get(text);
+			if (d == null && !splitPmSeen.contains(text)) {
+				if (splitPmSeen.size() > 256 || pmPainted.size() > 256) {
+					splitPmSeen.clear();
+					pmPainted.clear();
+				}
+				var column = ChatFlair.column(text);
+				var sender = column ? ChatFlair.beside(i, n, pmAx, pmAy, pmShown, false) : !ChatFlair.beside(i, n, pmAx, pmAy, pmShown, true);
+				var painted = sender ? chatFlair.paintPmLine(text, chatStar(), false, shift) : null;
+				if (painted != null) {
+					w.setText(painted);
+					d = column ? starRoom(text, painted, w.getFont()) : new int[2];
+					pmPainted.put(painted, d);
+					if (repaint || chatFlair.movingSender(text)) pmMoving.put(w, new String[]{text, painted});
+					else pmMoving.remove(w);
+				} else if (column && sender && text.contains("<img=")) {
+					// Nothing of ours to paint, but the name carries an icon (the Soulrend chat mark): the game
+					// may have placed the message for the plain name, so the fit is still checked.
+					d = starRoom(text, text, w.getFont());
+					pmPainted.put(text, d);
+				} else splitPmSeen.add(text);
+			}
+			if (d != null && (d[0] > 0 || d[1] > 0)) moved |= ChatFlair.makeRoom(i, d[0], d[1], n, pmAx, pmAy, pmX, pmW, pmShown, pmRecX, pmRecW);
+		}
+		if (!moved) return;
+		for (int i = 0; i < n; i++) {
+			var w = pmLine.get(i);
+			if (pmX[i] != w.getOriginalX() || pmW[i] != w.getOriginalWidth()) {
+				w.setOriginalX(pmX[i]);
+				w.setOriginalWidth(pmW[i]);
+				w.revalidate();
+				pmRoom.put(w, new int[]{pmRecX[i], pmRecW[i], Text.removeTags(String.valueOf(w.getText())).hashCode()});
+			}
+		}
+	}
+
+	/** Each widget under the split-PM container with its on-screen place (parent offsets added). */
+	void collectPm(Widget[] ws, int px, int py) {
+		if (ws == null) return;
+		for (var w : ws) {
+			if (w == null) continue;
+			int at = pmLine.size();
+			pmLine.add(w);
+			if (pmAx.length <= at) {
+				pmAx = Arrays.copyOf(pmAx, at * 2 + 2);
+				pmAy = Arrays.copyOf(pmAy, at * 2 + 2);
+			}
+			pmAx[at] = px + w.getRelativeX();
+			pmAy[at] = py + w.getRelativeY();
+			collectPm(w.getDynamicChildren(), pmAx[at], pmAy[at]);
+		}
+	}
+
+	/** {star width, whole painted name's width}: the room a split-PM sender's star needs (colour tags take none). */
+	int[] starRoom(String plain, String painted, FontTypeFace font) {
+		ToIntFunction<String> text = t -> 0;
+		var tip = chatFlairTooltip;
+		IntUnaryOperator icon = tip != null ? tip::iconWidth : k -> 13;
+		return new int[]{ChatFlair.measure(painted, text, icon) - ChatFlair.measure(plain, text, icon), ChatFlair.need(painted, font, icon)};
+	}
+
+	/** Client thread: the opaque chatbox (fixed mode, or resizable with transparency off) is light parchment. */
+	boolean opaqueChatbox() {
+		return lastChatboxOpaque = !client.isResized() || client.getVarbitValue(VarbitID.CHATBOX_TRANSPARENCY) == 0;
+	}
+
+	/** The chat surface as last read on the client thread, for code running off it (push feed lines). */
+	volatile boolean lastChatboxOpaque;
+
+	/**
+	 * Client thread, after the game redraws the chat input line ("Name: *" — every keystroke): our own
+	 * name there in our Supporter colours. Display only — the typed text is never read or changed.
+	 */
+	String inputFlairName;
+	Pattern inputFlairPattern;
+
+	/**
+	 * Client thread, right before each frame is drawn: the game redraws the chat input ("Name: *")
+	 * through more than one path (a keystroke, arrow keys, closing the bank or a prompt, login), and
+	 * only one of them fires CHAT_TEXT_INPUT_REBUILD. Checking on ClientTick wasn't enough: that runs
+	 * at the start of the cycle, before those scripts, so the plain name was drawn for a frame and
+	 * flashed. BeforeRender runs after every script of the cycle. It only reads a short string unless
+	 * the name needs painting.
+	 */
+	@Subscribe
+	void onBeforeRender(BeforeRender event) {
+		if ((headerDue || clogSyncButton != null && clogSyncButton.unsure) && clanSyncButton != null) {
+			headerDue = false;
+			clogSyncButton.render();
+			clanSyncButton.render();
+		}
+		clogMenuRow();
+		// The game rebuilt a member list (a tab switch, a sort, a join): its rows are new and plain.
+		if (flairDue || !menusOff() && nameListsRebuilt()) flairNameLists();
+		if (flairDue) {
+			flairDue = false;
+			flairClanTitleGroup(InterfaceID.CLANS_SIDEPANEL);
+			flairClanTitleGroup(InterfaceID.CLANS_GUEST_SIDEPANEL);
+			for (int r : FLAIR_ROOTS) flairInterface(r);
+		}
+		flairChatInput();
+		flairChatbox();
+		flairSplitPm();
+		animateFlairNameLists();
+		animateFlairInterfaces();
+		animateClanTitles();
+		flairMenuTargets();
+		// A shot waiting for this frame: hide again. A chat line added the same tick (our own "counted" line)
+		// rebuilds the chatbox and shows every row, undoing the hide made when the shot was asked for.
+		if (shotsPending > 0) hideShotRows();
+	}
+
+	/** Client thread: a title-bar button, or a just-opened interface's names, to draw before the next frame. */
+	boolean headerDue, flairDue;
+
+	/**
+	 * Client thread, each frame the collection log is open: while the log is too narrow for the title-bar
+	 * button, the same action as a third row of the log's own dropdown ("View Log", "Overview", "Soulrend"),
+	 * shaped after the row above it. The game rebuilds the dropdown when it opens, so the row is put back
+	 * whenever it is missing; with room in the title bar again it is taken out.
+	 */
+	void clogMenuRow() {
+		var f = client.getWidget(InterfaceID.Collection.BURGER_MENU_FRAME);
+		var kids = f == null || f.isHidden() ? null : f.getDynamicChildren();
+		if (kids == null || kids.length < 2) return;
+		// Ours, if this build of the dropdown already has it (shown or put away), and the game's last row.
+		int mine = -1, base = -1;
+		for (int i = 0; i < kids.length; i++) {
+			if (kids[i] == null || kids[i].getType() != WidgetType.TEXT) continue;
+			if (HeaderButton.NAME.equals(kids[i].getName())) mine = i;
+			else base = i;
+		}
+		// Either the button or the row, never neither: the row answers to whether the button is actually
+		// on screen, not to a second reading of the same measurement.
+		var want = clogSyncButton != null && clogSyncButton.enabled.getAsBoolean() && !clogSyncButton.shown();
+		if (base < 1 || want == (mine > 0 && !kids[mine].isHidden())) return;
+		var last = kids[base];
+		int h = last.getOriginalHeight(), y = last.getOriginalY();
+		if (mine > 0) {
+			// Already built: shown while the title bar has no room for the button, put away when it does.
+			kids[mine].setHidden(!want);
+			kids[mine - 1].setHidden(!want);
+		} else {
+			var bg = kids[base - 1];
+			var r = f.createChild(-1, WidgetType.RECTANGLE);
+			var t = f.createChild(-1, WidgetType.TEXT);
+			for (var w : new Widget[]{r, t}) {
+				w.setOriginalX(last.getOriginalX());
+				w.setOriginalY(y + h);
+				w.setOriginalWidth(last.getOriginalWidth());
+				w.setOriginalHeight(h);
+			}
+			r.setFilled(bg.isFilled());
+			r.setOpacity(bg.getOpacity());
+			r.setTextColor(bg.getTextColor());
+			r.revalidate();
+			t.setText(HeaderButton.NAME);
+			t.setName(HeaderButton.NAME);
+			t.setFontId(last.getFontId());
+			t.setTextColor(0xffffff);
+			t.setTextShadowed(last.getTextShadowed());
+			t.setXTextAlignment(last.getXTextAlignment());
+			t.setYTextAlignment(last.getYTextAlignment());
+			t.setHasListener(true);
+			t.setAction(0, "Sync to"); // the game adds the name: "Sync to Soulrend"
+			t.setOnOpListener((JavaScriptCallback) e -> syncProfileNow());
+			t.setOnMouseOverListener((JavaScriptCallback) e -> t.setTextColor(0xff981f));
+			t.setOnMouseLeaveListener((JavaScriptCallback) e -> t.setTextColor(0xffffff));
+			t.revalidate();
+		}
+		// As tall as its rows: the game's own, plus ours while it shows. The margin under the last row
+		// is the one the game leaves beside them.
+		f.setOriginalHeight(y + (want ? 2 * h : h) + last.getOriginalX());
+		f.revalidate();
+		for (var k : f.getDynamicChildren()) k.revalidate();
+	}
+	/** Client thread: each FLAIR_LISTS list's first row when we last painted it. */
+	final Widget[] listSeen = new Widget[FLAIR_LISTS.length];
+
+	Widget firstRow(int i) {
+		var list = client.getWidget(FLAIR_LISTS[i]);
+		var kids = list == null ? null : list.getChildren();
+		return kids == null || kids.length == 0 ? null : kids[0];
+	}
+
+	/**
+	 * Each frame, four reads and compares: the game makes new row widgets whenever it rebuilds a list,
+	 * and not always through a script we hear by id (a tab switch draws it from the tab's own script).
+	 */
+	boolean nameListsRebuilt() {
+		for (int i = 0; i < listSeen.length; i++) if (firstRow(i) != listSeen[i]) return true;
+		return false;
+	}
+
+	static final List<String> CLAN_BOOST_STILL = List.of("ff9a5a", "e05ad0", "7a8cff");
+	static final List<String> CLAN_BOOST_MOVING = List.of("ffd27a", "ff7ab8", "7ae0ff");
+
+	/** A widget's text as the game wrote it and as we painted it; for a clan title also its name, suffix and boost. */
+	@AllArgsConstructor
+	static final class Painted {
+		String plain;
+		String painted;
+		boolean moving;
+		/** Drawn on parchment (dialogue), so the light look. */
+		boolean opaque;
+		final String name;
+		/** What follows the name (the live member count): re-read whenever the game rewrites the title. */
+		String suffix;
+		final int level;
+	}
+
+	final Map<Widget, Painted> clanTitleFlair = new WeakHashMap<>();
+	long clanTitleFrame = Long.MIN_VALUE;
+
+	/** Paint only the verified clan name in the channel header; its member count stays game-coloured. */
+	void flairClanTitleGroup(int group) {
+		var clan = pluginConfig == null ? null : pluginConfig.activeClan;
+		// A boosted clan's look outside chat follows "Supporter & clan looks in game" (Off: the game's own).
+		if (clan == null || clan.boostLevel < 1 || !menusFlair()) return;
+		var name = clan.gameName == null || clan.gameName.trim().isEmpty() ? clan.name : clan.gameName;
+		if (name == null || name.trim().isEmpty()) return;
+		var root = client.getWidget(group, 0);
+		if (root == null) return;
+		walk(root, w -> flairClanTitle(w, name.trim(), clan.boostLevel));
+	}
+
+	void flairClanTitle(Widget widget, String name, int level) {
+		var t = widget.getText();
+		var suffix = ChatFlair.clanTitleSuffix(t, name);
+		if (suffix != null) {
+			var painted = paintClanTitle(name, suffix, level, interfaceNameShift(currentChatNameFrame()));
+			widget.setText(painted);
+			clanTitleFlair.put(widget, new Painted(untagged(t), painted, false, false, name, suffix, level));
+		}
+	}
+
+	static String untagged(String t) {
+		return MARKUP_TAG.matcher(t == null ? "" : t).replaceAll("");
+	}
+
+	String paintClanTitle(String name, String suffix, int level, double shift) {
+		var clan = pluginConfig == null ? null : pluginConfig.activeClan;
+		// The clan tab is dark stone: the clan's own dark look as-is when it set one.
+		var own = clan != null && !empty(clan.boostNameDarkStops);
+		var source = own ? clan.boostNameDarkStops
+			: clan != null && !empty(clan.boostNameStops)
+			? clan.boostNameStops : level >= 2 ? CLAN_BOOST_MOVING : CLAN_BOOST_STILL;
+		List<String> stops = new ArrayList<>();
+		for (var color : source) {
+			var hex = ChatPalette.nameColor(color);
+			// Otherwise the title sits on dark stone in both chatbox modes: lighten, never darken toward
+			// the parchment path (that turned the default gradient muddy).
+			if (hex != null && stops.size() < 4) stops.add(own ? hex : ChatPalette.readableHex(hex, false));
+		}
+		if (stops.isEmpty()) stops = level >= 2 ? CLAN_BOOST_MOVING : CLAN_BOOST_STILL;
+		var painted = ChatPalette.paintName(clean(name), stops.get(0), stops, level >= 2 ? shift : 0);
+		return (painted == null ? name : painted) + suffix;
+	}
+
+	void animateClanTitles() {
+		if (clanTitleFlair.isEmpty()) return;
+		var frame = currentChatNameFrame();
+		if (frame == clanTitleFrame) return;
+		clanTitleFrame = frame;
+		var shift = interfaceNameShift(frame);
+		for (var it = clanTitleFlair.entrySet().iterator(); it.hasNext(); ) {
+			var row = it.next();
+			var widget = row.getKey();
+			var state = row.getValue();
+			if (widget == null) { it.remove(); continue; }
+			var text = widget.getText();
+			if (!state.painted.equals(text)) {
+				// The game rewrote the title (a member joined/left: the count changed). Take its new
+				// suffix rather than painting the stale one over the live number.
+				var suffix = ChatFlair.clanTitleSuffix(text, state.name);
+				if (suffix == null) { it.remove(); continue; }
+				state.plain = untagged(text);
+				state.suffix = suffix;
+			} else if (state.level < 2) continue;
+			state.painted = paintClanTitle(state.name, state.suffix, state.level, shift);
+			widget.setText(state.painted);
+		}
+	}
+
+	void refreshClanTitleWidgets() {
+		unflairClanTitleWidgets();
+		flairClanTitleGroup(InterfaceID.CLANS_SIDEPANEL);
+		flairClanTitleGroup(InterfaceID.CLANS_GUEST_SIDEPANEL);
+	}
+
+	void unflairClanTitleWidgets() {
+		unpaint(clanTitleFlair);
+		clanTitleFrame = Long.MIN_VALUE;
+	}
+
+	/** Put every remembered widget back exactly as the game supplied it, and forget them. */
+	static void unpaint(Map<Widget, Painted> m) {
+		for (var row : new ArrayList<>(m.entrySet())) {
+			var widget = row.getKey();
+			var state = row.getValue();
+			if (widget != null && state.painted.equals(widget.getText())) widget.setText(state.plain);
+		}
+		m.clear();
+	}
+
+	/**
+	 * The player-name interfaces Soulrend may decorate, by root; every root is a gameval component constant.
+	 * Dialogue: only the game-designated name/title component, never the body text. This covers
+	 * quest conversations and ordinary player dialogue without recolouring an RSN mentioned in prose.
+	 */
+	// A component id carries its interface group in the high 16 bits.
+	static final int[] FLAIR_ROOTS = {
+		InterfaceID.ChatLeft.NAME,
+		InterfaceID.ChatRight.NAME,
+		InterfaceID.ChatBoth.NAMES,
+		InterfaceID.MessageboxTitled.TITLE,
+		InterfaceID.Trademain.WHOLESCREEN,
+		InterfaceID.Tradeconfirm.ROOT_RECT0,
+		InterfaceID.BoardgamesChallenge.UNIVERSE,
+		InterfaceID.PvpArenaUnrankedduel.UNIVERSE,
+		InterfaceID.RaidsChallenge.UNIVERSE,
+		InterfaceID.RaidsLobbyPartylist.UNIVERSE,
+		InterfaceID.RaidsLobbyPartydetails.UNIVERSE,
+		InterfaceID.TobPartylist.UNIVERSE,
+		InterfaceID.TobPartydetails.UNIVERSE,
+		InterfaceID.TobScoreboard.UNIVERSE,
+		InterfaceID.TobInfoboard.UNIVERSE,
+		InterfaceID.ToaPartylist.UNIVERSE,
+		InterfaceID.ToaPartydetails.UNIVERSE,
+		InterfaceID.ToaScoreboard.UNIVERSE,
+		InterfaceID.TfaPartylist.UNIVERSE,
+		InterfaceID.TfaPartydetails.UNIVERSE
+	};
+
+	static int flairInterfaceRoot(int group) {
+		for (int r : FLAIR_ROOTS) if (r >>> 16 == group) return r;
+		return -1;
+	}
+
+	/** Dialogue and message boxes are drawn on parchment whatever the chatbox setting; the rest are dark stone. */
+	static boolean onParchment(int rootId) {
+		return rootId == InterfaceID.ChatLeft.NAME || rootId == InterfaceID.ChatRight.NAME
+			|| rootId == InterfaceID.ChatBoth.NAMES || rootId == InterfaceID.MessageboxTitled.TITLE;
+	}
+
+	/** Only widgets in the explicitly allowed interfaces above; weak keys disappear with the UI. */
+	final Map<Widget, Painted> interfaceNameFlair = new WeakHashMap<>();
+	long interfaceNameFrame = Long.MIN_VALUE;
+
+	void flairInterface(int rootId) {
+		if (menusOff()) return;
+		var root = client.getWidget(rootId);
+		if (root == null) return;
+		var frame = currentChatNameFrame();
+		interfaceNameFrame = frame;
+		var shift = interfaceNameShift(frame);
+		var opaque = onParchment(rootId);
+		walk(root, widget -> {
+			var text = widget.getText();
+			var had = interfaceNameFlair.get(widget);
+			var painted = had != null && had.painted.equals(text) ? null : chatFlair.paintNames(text, opaque, shift);
+			if (painted != null) {
+				widget.setText(painted);
+				interfaceNameFlair.put(widget, new Painted(text, painted, chatFlair.movingNames(text), opaque, null, null, 0));
+			}
+		});
+	}
+
+	/** Repaint remembered interface names only; never walk the whole client widget tree per frame. */
+	void animateFlairInterfaces() {
+		if (menusOff() || interfaceNameFlair.isEmpty()) return;
+		var frame = currentChatNameFrame();
+		var move = frame != interfaceNameFrame;
+		interfaceNameFrame = frame;
+		var shift = interfaceNameShift(frame);
+		for (var it = interfaceNameFlair.entrySet().iterator(); it.hasNext(); ) {
+			var row = it.next();
+			var widget = row.getKey();
+			var state = row.getValue();
+			if (widget == null) { it.remove(); continue; }
+			var current = widget.getText();
+			var plain = state.painted.equals(current) ? state.plain : current;
+			// Ours and not due a new animation frame: one compare. Rewritten by the game: repaint now.
+			if (plain != current && !(move && state.moving)) continue;
+			var painted = chatFlair.paintNames(plain, state.opaque, shift);
+			if (painted == null) { it.remove(); continue; }
+			state.plain = plain;
+			state.painted = painted;
+			state.moving = chatFlair.movingNames(plain);
+			widget.setText(painted);
+		}
+	}
+
+	/** Put every open whitelisted interface back exactly as the game supplied it. */
+	void unflairInterfaces() {
+		unpaint(interfaceNameFlair);
+		interfaceNameFrame = Long.MIN_VALUE;
+	}
+
+	/**
+	 * Client thread, each frame: players' right-click names back in their Supporter colours after other
+	 * plugins. onMenuEntryAdded paints them as entries arrive, but RuneLite's Player Indicators recolours
+	 * player targets on every client tick (dropping the first tag and putting its friend / clan colour in
+	 * front), which split a gradient into green-then-gradient. BeforeRender comes after that tick, so the
+	 * frame draws ours — only with "paint over other plugins" on; off, their colour stays. Never in PvP
+	 * areas. A menu is a handful of entries, and an entry already in our colours is a string compare.
+	 */
+	void flairMenuTargets() {
+		// Cheap checks first, and nothing that reads varbits before login: those aren't loaded yet and
+		// getVarbitValue threw every frame on the login screen.
+		if (!menusFlair() || chatFlair.isEmpty() || !client.isMenuOpen()
+				|| client.getGameState() != GameState.LOGGED_IN
+				|| inDangerousPvp() || client.getWorldType().contains(WorldType.DEADMAN)) return;
+		var frame = currentChatNameFrame();
+		var es = client.getMenuEntries();
+		// Once per animation frame (or a new menu), not every render frame.
+		if (frame == menuFlairFrame && es.length > 0 && es[es.length - 1] == menuFlairTop) return;
+		menuFlairFrame = frame;
+		menuFlairTop = es.length > 0 ? es[es.length - 1] : null;
+		var shift = interfaceNameShift(frame);
+		for (var e : es) {
+			var p = e.getPlayer();
+			var name = p == null ? null : p.getName();
+			var t = name == null ? null : chatFlair.paintMenuTarget(e.getTarget(), name, true, shift);
+			if (t != null) e.setTarget(t);
+		}
+	}
+
+	long menuFlairFrame = Long.MIN_VALUE;
+	MenuEntry menuFlairTop;
+
+	/** The chat input as the game wrote it, and as we painted it (unflairChat puts the first back). */
+	String inputPlain;
+	String inputPainted;
+	long inputNameFrame = Long.MIN_VALUE;
+
+	/**
+	 * Client thread: undo every name paint now. The chat input goes back to the game's text; the
+	 * chatbox and split private chat are rebuilt by the game (refreshChat), which writes them plain.
+	 */
+	void unflairChat() {
+		var input = client.getWidget(InterfaceID.Chatbox.INPUT);
+		if (input != null && inputPlain != null && inputPainted != null && inputPainted.equals(input.getText())) input.setText(inputPlain);
+		inputPlain = null;
+		inputPainted = null;
+		inputNameFrame = Long.MIN_VALUE;
+		Arrays.fill(chatboxSeen, null);
+		Arrays.fill(chatboxMoving, null);
+		Arrays.fill(chatboxDeferred, false);
+		Arrays.fill(chatboxRoom, Integer.MIN_VALUE);
+		Arrays.fill(chatboxRoomFor, null);
+		chatNameFrame = Long.MIN_VALUE;
+		splitPmSeen.clear();
+		pmPainted.clear();
+		pmRoom.clear();
+		pmMoving.clear();
+		try {
+			// The same call RuneLite's own chat filter uses to redraw the chatbox and split private chat.
+			client.refreshChat();
+		} catch (RuntimeException ignored) {
+			// Not logged in / no chat yet: nothing painted to undo.
+		}
+	}
+
+	/** Client thread: remove all Soulrend-owned name markup, including currently open game interfaces. */
+	void unflairAll() {
+		unflairChat();
+		unflairInterfaces();
+		// The side lists are only rebuilt by the game when they change: left alone, colours switched off
+		// stayed on the friends chat list until it was reopened. Back to the plain name, if it is still theirs.
+		for (var row : nameListPlain.entrySet()) {
+			var w = row.getKey();
+			if (w != null && Text.removeTags(String.valueOf(w.getText())).equals(Text.removeTags(row.getValue()))) w.setText(row.getValue());
+		}
+		nameListPlain.clear();
+		nameListMoving.clear();
+		// And forget which rows were painted: switched back on (the plugin, or the setting), the lists
+		// read as rebuilt and are painted before the next frame, not on the game's next redraw of them.
+		Arrays.fill(listSeen, null);
+		unflairClanTitleWidgets();
+	}
+
+	void flairChatInput() {
+		if (flairOff() || client.getLocalPlayer() == null) return;
+		var input = client.getWidget(InterfaceID.Chatbox.INPUT);
+		var me = client.getLocalPlayer().getName();
+		if (input == null || me == null) return;
+		var text = input.getText();
+		if (empty(text)) return;
+		if (!me.equals(inputFlairName)) {
+			inputFlairName = me;
+			inputFlairPattern = Pattern.compile("^((?:<img=\\d+>)*)" + Pattern.quote(me) + ":");
+		}
+		var frame = chatFlair.movingName(me) ? currentChatNameFrame() : -1;
+		var move = frame != inputNameFrame;
+		inputNameFrame = frame;
+		if (text.equals(inputPainted)) {
+			if (!move) return;
+			// The widget still has our last frame. Rebuild from the game's tag-free input, not our tags.
+			text = inputPlain;
+		}
+		var m = inputFlairPattern.matcher(text);
+		if (!m.find()) return;
+		var shift = chatNameShift(frame);
+		var opaque = opaqueChatbox();
+		var painted = chatFlair.decorateReadable(m.group(1) + me, chatStar(), shift, opaque);
+		if (painted != null) {
+			inputPlain = text;
+			inputPainted = painted + ":" + text.substring(m.end());
+			input.setText(inputPainted);
+		}
+	}
+
+	/** The side-panel lists whose names wear Supporter colours: friends chat, clan, guest clan, friends. */
+	static final int[] FLAIR_LISTS = {InterfaceID.ChatchannelCurrent.LIST, InterfaceID.ClansSidepanel.PLAYERLIST,
+			InterfaceID.ClansGuestSidepanel.PLAYERLIST, InterfaceID.Friends.LIST};
+	/** Per visible moving list row: its tag-free source and the animated text currently installed. */
+	final Map<Widget, String[]> nameListMoving = new WeakHashMap<>();
+	/** Every list row we painted, and the name the game wrote there. */
+	final Map<Widget, String> nameListPlain = new WeakHashMap<>();
+	long nameListFrame = Long.MIN_VALUE;
+
+	/**
+	 * Client thread, after the game redraws a member or friends list: Supporters' names in their
+	 * colours, like their chat lines. Display only, from the same public list as chat (nothing about
+	 * who is listed is sent), and only names the game itself shows as online: the channel lists hold
+	 * only online players, and a friend must be on a world, so a Private-mode friend shown offline
+	 * stays plain. A painted name no longer matches decorate()'s plain-name test, so a repaint is a no-op.
+	 */
+	void flairNameLists() {
+		if (menusOff()) return;
+		var frame = currentChatNameFrame();
+		nameListFrame = frame;
+		var shift = interfaceNameShift(frame);
+		// Who's online on the friends list, once: a lookup per row was rows x friends.
+		Set<String> online = new HashSet<>();
+		var fl = client.getFriendContainer();
+		if (fl != null) for (var f : fl.getMembers()) if (f.getWorld() > 0) online.add(Text.standardize(f.getName()));
+		for (int i = 0; i < FLAIR_LISTS.length; i++) {
+			int id = FLAIR_LISTS[i];
+			listSeen[i] = firstRow(i);
+			var list = client.getWidget(id);
+			var rows = list == null ? null : list.getDynamicChildren();
+			if (rows == null) continue;
+			var friends = id == InterfaceID.Friends.LIST;
+			for (var w : rows) {
+				var text = w.getText();
+				if (empty(text) || (friends && !online.contains(Text.standardize(text)))) continue;
+				var painted = chatFlair.decorateReadable(text, null, shift, false);
+				if (painted != null) {
+					w.setText(painted);
+					nameListPlain.put(w, text);
+					if (chatFlair.movingDecoratedName(text)) nameListMoving.put(w, new String[]{text, painted});
+				}
+			}
+		}
+	}
+
+	/** Repaint only the Patron rows already discovered by a list rebuild; no full list scan per frame. */
+	void animateFlairNameLists() {
+		if (menusOff() || nameListMoving.isEmpty()) return;
+		var frame = currentChatNameFrame();
+		if (frame == nameListFrame) return;
+		nameListFrame = frame;
+		var shift = interfaceNameShift(frame);
+		for (var it = nameListMoving.entrySet().iterator(); it.hasNext(); ) {
+			var row = it.next();
+			var w = row.getKey();
+			var state = row.getValue();
+			if (w == null || !state[1].equals(w.getText())) { it.remove(); continue; }
+			if (w.isHidden()) continue;
+			var painted = chatFlair.decorateReadable(state[0], null, shift, false);
+			if (painted == null) { it.remove(); continue; }
+			w.setText(state[1] = painted);
+		}
+	}
+
+	boolean friendOnline(String name) {
+		var friends = client.getFriendContainer();
+		var f = friends == null ? null : friends.findByName(name);
+		return f != null && f.getWorld() > 0;
+	}
+
+	/**
+	 * The connected status on right-click: 0 = no line (not asked for, or the site gave us no relay),
+	 * 1 = our own connection is down (it reopens by itself: every ten minutes, on a hop, on a deploy),
+	 * 2 = live, so we know who is here. The line used to vanish in state 1, which read as a bug.
+	 */
+	int relayPresence() {
+		var p = pushSocket;
+		if (!config.relayWho() || config.soulrendChat().compareTo(SoulrendConfig.Relay.See_send) < 0) return 0;
+		if (p == null) return 1;
+		return p.live() && p.relayOk ? 2 : 1;
+	}
+
+	long relayRetried;
+	int relayWorldSeen;
+	String relayRsnSeen;
+	/** How long before forcing another relay socket the site keeps refusing (doubles to 5 min). */
+	long relayRenewMs = 10_000;
+
+	/**
+	 * Client thread, each tick: logged in with Soulrend chat on, the socket must be a relay one on this
+	 * world. A log in or a hop changes the world, and a socket opened before we knew it has no relay
+	 * at all: either way, a new ticket (at most every 10s). Before, only a settings toggle fixed it.
+	 */
+	void relayHeal() {
+		var p = pushSocket;
+		var cfg = pluginConfig;
+		if (p == null || !loggedIn() || config.soulrendChat() == SoulrendConfig.Relay.Off || cfg == null || !cfg.serverSupports("chat-relay")) return;
+		var world = client.getWorld();
+		if (p.relayOk) relayRenewMs = 10_000;
+		var rsn = apiClient.getCurrentRsn();
+		if (world != relayWorldSeen || !Objects.equals(rsn, relayRsnSeen)) {
+			relayWorldSeen = world;
+			relayRsnSeen = rsn;
+			relayRetried = now();
+			pushSoon();
+			return;
+		}
+		// A live socket the site gave no relay: the same scope won't ask again, so start it afresh.
+		if (!p.live() || p.relayOk || now() - relayRetried < relayRenewMs) return;
+		relayRetried = now();
+		relayRenewMs = Math.min(relayRenewMs * 2, 300_000);
+		log.debug("relay renew: a socket without the relay");
+		p.renew();
+	}
+
+	/** The relay presence set uses the same loose RuneScape-name shape as chat dedupe. */
+	boolean relayConnected(String name) {
+		var who = Text.standardize(Text.removeTags(String.valueOf(name))).replaceAll("[ _-]+", " ");
+		return relayHere.contains(who) || who.equals(Text.standardize(String.valueOf(getLocalPlayerName())));
+	}
+
+	/** Config-poll thread only — never the client thread: it may hit disk and the network. */
+	void maybeRefreshChatPatterns(PluginConfigResponse cfg) {
+		if (cfg == null) return;
+		var rc = responseCache;
+		if (!chatPatternsSeeded && rc != null) {
+			chatPatternsSeeded = true;
+			adoptChatPatterns(apiClient.seedFromDisk(rc.load(ResponseDiskCache.CHAT_PATTERNS),
+					ChatPatterns.OverridesResponse.class));
+		}
+		var at = now();
+		if (at - chatPatternsFetchedAt < CHAT_PATTERNS_EVERY_MS) return;
+		chatPatternsFetchedAt = at;
+		adoptChatPatterns(apiClient.fetchChatPatterns());
+	}
+
+	/** Apply a fresh override set. A 304 hands back the same object, which is already live. */
+	void adoptChatPatterns(ChatPatterns.OverridesResponse res) {
+		if (res == null || res == chatPatternsApplied) return;
+		chatPatternsApplied = res;
+		for (var why : ChatPatterns.applyOverrides(res.overrides)) log.warn("Pattern override rejected: {}", why);
+	}
+
+	void refreshConfig() {
+		configFetchLock.lock();
+		fetchConfigAndUnlock();
+	}
+
+	boolean pushLive() {
+		var p = pushSocket;
+		return p != null && p.live();
+	}
+
+	/**
+	 * Live push on, off, or re-ticketed: it listens for the board (and team) this config answers for,
+	 * so a new one of either needs a new ticket. Off where the site doesn't run it.
+	 */
+	/** Keyboard back to the game: typing in the panel's chat box must not leave the game deaf to keys. */
+	void gameFocus() {
+		var canvas = client.getCanvas();
+		if (canvas != null) canvas.requestFocusInWindow();
+	}
+
+	/** The Feed tab is on screen (or was, within the last minute): only then does a player with no board listen. */
+	volatile boolean feedWatching;
+	ScheduledFuture<?> feedLinger;
+
+	/**
+	 * The side panel's Feed tab came on screen, or went. A player on a board already listens, so this
+	 * only opens (or, a minute after the tab goes, closes) the socket of one who isn't.
+	 */
+	void feedOnScreen(boolean on) {
+		var ex = executor;
+		if (ex == null) return;
+		synchronized (this) {
+			cancel(feedLinger);
+			feedLinger = null;
+			if (on) {
+				feedWatching = true;
+				ex.execute(() -> safely("push", this::syncPush));
+			} else if (feedWatching) {
+				feedLinger = ex.schedule(() -> safely("push", () -> {
+					feedWatching = false;
+					syncPush();
+				}), 60, TimeUnit.SECONDS);
+			}
+		}
+	}
+
+	void syncPush() {
+		var p = pushSocket;
+		var cfg = pluginConfig;
+		int eventId = cfg == null ? 0 : cfg.event != null ? cfg.event.id : cfg.homeBoard != null ? cfg.homeBoard.eventId : 0;
+		// The chat feed listens with no board too (":f" asks the ticket for feed lines).
+		var feed = config.chatFeed();
+		// One socket carries everything, rows included — but the site only sends panel rows (Feed and
+		// chat lines) to a socket whose ticket ASKED for them (?rows=1), so a socket held for a board or
+		// the chat feed must ask too: without it, a board player's chat and Feed only filled in when
+		// something else redrew the panel. A player with neither a board nor the chat feed opens a
+		// socket just for the Feed, and only while it's on screen.
+		// The chat relay (either half on) listens too, on the world it is on: a hop or another character
+		// re-tickets, since the ticket names both (docs/PLUGIN_WIRE.md chat-relay).
+		int world = config.soulrendChat() != SoulrendConfig.Relay.Off && loggedIn()
+				&& (cfg != null ? cfg.serverSupports("chat-relay") : apiClient.siteAdvertises("chat-relay")) ? client.getWorld() : 0;
+		var rows = eventId > 0 || feed || feedWatching || world > 0;
+		if (p != null) p.scope(rows && apiClient.isConfigured() && pushEnabled()
+				? eventId + ":" + (cfg != null && cfg.team != null ? cfg.team.id : 0) + (feed ? ":f" : "") + (rows ? ":r" : "")
+				// The seat too: the ticket's clan room is read when it's issued, and the clan can arrive after log in.
+				// The name too: the site grants the relay only to a request that names the character, and a
+				// ticket asked for in the second after log in (before it was stamped) had none, for good.
+				// Before the '@': PushSocket reads everything after it as the friends chat and guest clan.
+				+ (world > 0 ? ":c" + world + "#" + client.getAccountHash() + (Boolean.TRUE.equals(knownMember) ? "m" : "") + "/" + apiClient.getCurrentRsn() + "@" + fcOwner() : "") : null);
+	}
+
+	/** A view from the live push (docs/PLUGIN_WIRE.md), applied off the socket's thread. */
+	void onPush(JsonObject m) {
+		// A relayed line goes straight to the client thread: queued behind the executor's other work (a
+		// flush, a config merge), it could wait seconds.
+		if ("relay".equals(m.get("t").getAsString())) {
+			if (config.soulrendChat() != SoulrendConfig.Relay.Off) clientThread.invoke(() -> showRelay(m));
+		} else if (execLive()) executor.execute(() -> safely("push", () -> applyPush(m)));
+	}
+
+	/**
+	 * "tile": a pinned tile's numbers for every team. "team": our team's share of the config, its
+	 * board, and each member's own numbers — laid over the config we hold (PushMerge) and adopted the
+	 * way a fetched one is, so tile completions and missions announce exactly as they do on a poll.
+	 */
+	void applyPush(JsonObject m) {
+		var kind = m.get("t").getAsString();
+		switch (kind) {
+			case "feed":
+				feedLine(m);
+				// A tile opening or a mission dropping on one of our boards: the line, plus the mission chime.
+				if (config.chatFeed() && m.has("kind") && "reveal".equals(m.get("kind").getAsString())) playMissionSound(false);
+				return;
+			case "look":
+				refreshLook();
+				return;
+			// Presence (relay sockets only): who else beside us has the relay on.
+			case "here":
+				for (var n : m.getAsJsonArray("n")) relayHere.add(n.getAsString());
+				clientThread.invoke(this::relayMenuRefresh);
+				return;
+			case "gone":
+				var gone = m.get("n").getAsString();
+				relayHere.remove(gone);
+				// Gone may be a reconnect or a changed setting: the next menu asks again.
+				clientThread.invoke(() -> {
+					relayAsked.keySet().removeIf(k -> k.replaceAll("[ _-]+", " ").equals(gone));
+					relayMenuRefresh();
+				});
+				return;
+			// Someone asked whether we're connected while our private chat is on Friends: yes, only to a friend.
+			case "ask":
+				var asker = m.get("n").getAsString();
+				clientThread.invoke(() -> {
+					// Only where the game shows us to them anyway: on their screen (we're on each other's), in our group, or our
+					// friend while we're on Friends. Otherwise we stay offline to them, as the game keeps us.
+					if (inScene(asker) || inGroup(asker) || ("friends".equals(pmModeSent) && client.isFriended(asker, false))) relaySend("t", "ok", "n", asker);
+				});
+				return;
+			case "hello":
+				relayHere.clear();
+				clientThread.invoke(() -> {
+					pmModeSent = "";
+					relayAsked.clear();
+				});
+				fetchChatChans(null);
+			// The Supporter list: a delta, or (on connecting: one may have been missed) a version check.
+			case "flair":
+				if ((flairOn() || menusFlair()) && apiClient.isConfigured()) {
+					if ("hello".equals(kind)) chatFlairSync.soon();
+					else chatFlairSync.pushed(gson.fromJson(m, ChatFlair.Wire.class));
+				}
+				return;
+		}
+		if (kind.startsWith("rows")) {
+			// Panel rows (the Feed tab's lists): never the chatbox, never capped — the list batches them.
+			var panel = sidebarPanel;
+			if (panel != null) panel.feedPush(m);
+			if (m.has("cb")) eventChatLine(m);
+			return;
+		}
+		var cfg = pluginConfig;
+		int eventId = m.get("eventId").getAsInt();
+		int myTeam = cfg != null && cfg.team != null ? cfg.team.id : 0;
+		int me = cfg != null && cfg.player != null ? cfg.player.id : 0;
+		if ("tile".equals(kind)) {
+			tileTracker.pushed(eventId, m.get("tileId").getAsInt(),
+					gson.fromJson(m.get("progress"), TileTracker.Progress.class), myTeam, me);
+			return;
+		}
+		var ours = cfg != null && cfg.event != null && cfg.event.id == eventId && myTeam == m.get("teamId").getAsInt();
+		var panel = sidebarPanel;
+		var meKey = String.valueOf(me);
+		if ("counts".equals(kind)) {
+			// Only counts moved: the team's by tile in c, ours over them, laid on what we hold. The
+			// panel's live counts follow at once; the rest of it (who's on what) catches up lazily.
+			if (ours) {
+				var members = m.has("m") ? m.getAsJsonObject("m") : new JsonObject();
+				var own = members.has(meKey) ? members.getAsJsonObject(meKey) : new JsonObject();
+				var counts = m.has("c") ? m.getAsJsonObject("c").deepCopy() : new JsonObject();
+				if (own.has("c")) own.getAsJsonObject("c").entrySet().forEach(e -> counts.add(e.getKey(), e.getValue()));
+				var mine = new JsonObject();
+				mine.add("c", counts);
+				if (own.has("y")) mine.add("y", own.get("y"));
+				adoptPushed(cfg, PushMerge.merge(gson.toJsonTree(cfg).getAsJsonObject(), new JsonObject(), mine));
+			}
+			if (panel != null) panel.countsChanged();
+			return;
+		}
+		// A whole view for a different team of the event we hold: the site moved us (it re-scopes the
+		// socket on a team change). Fetch the config now instead of tracking the old team until the
+		// slow while-live poll.
+		if ("team".equals(kind) && cfg != null && cfg.event != null && cfg.event.id == eventId
+				&& m.get("teamId").getAsInt() != myTeam) {
+			refreshConfig();
+		}
+		// A team's view for a board our config doesn't hold: the site just seated us there (it re-tickets
+		// the socket on a new seat, and the ticket's first board is the seat's). Fetch the config now
+		// rather than at the next poll — once per board and team, so a config that settles elsewhere
+		// can't refetch on every view.
+		int pushedTeam = m.has("teamId") ? m.get("teamId").getAsInt() : 0;
+		if ("team".equals(kind) && pushedTeam != 0 && (cfg == null || cfg.event == null || cfg.event.id != eventId)) {
+			var seat = eventId + ":" + pushedTeam;
+			if (!seat.equals(seatRefetchedFor)) {
+				seatRefetchedFor = seat;
+				refreshConfig();
+			}
+		}
+		if (ours && m.has("config")) {
+			var members = m.has("members") ? m.getAsJsonObject("members") : new JsonObject();
+			var mine = members.has(meKey) ? members.getAsJsonObject(meKey) : null;
+			adoptPushed(cfg, PushMerge.merge(gson.toJsonTree(cfg).getAsJsonObject(), m.getAsJsonObject("config"), mine));
+		}
+		// A whole view (something other than counts changed) or "moved" (the board did, not our team).
+		if (panel != null) panel.boardChanged();
+	}
+
+	/** A config built from a push, taken up like a fetched one — unless a fetch landed meanwhile. */
+	void adoptPushed(PluginConfigResponse held, JsonObject merged) {
+		var fresh = gson.fromJson(merged, PluginConfigResponse.class);
+		// Built on the held config: its completions are as old as that fetch, whatever the push changed.
+		fresh.asOf = held.asOf;
+		configFetchLock.lock();
+		try {
+			// A fetch that landed meanwhile is at least as new: keep it.
+			if (pluginConfig == held) {
+				adoptTracking(fresh);
+				// A teammate's progress reaches the rule table too, so completion is spotted off it.
+				Map<Integer, Long> have = new HashMap<>();
+				if (fresh.tiles != null) fresh.tiles.forEach(r -> have.put(r.t, r.have));
+				rules.raise(have);
+				// A count went down (a proof deleted): the rule table can only rise, and a finished tile
+				// left it, so fetch it again or the next drop for that tile is never seen.
+				if (held.tiles != null && held.tiles.stream().anyMatch(r -> have.getOrDefault(r.t, r.have) < r.have))
+					submit(() -> safely("refreshConfig", this::refreshConfig));
+				if (apiClient.getCurrentRsn() != null) {
+					checkTileCompletions(fresh);
+					checkMissionAlerts(fresh);
+				}
+			}
+		} finally {
+			configFetchLock.unlock();
+		}
+	}
+
+	static boolean sameTeam(PluginConfigResponse a, PluginConfigResponse b) {
+		return a != null && b != null && a.event != null && b.event != null && a.event.id == b.event.id
+				&& (a.team == null ? 0 : a.team.id) == (b.team == null ? 0 : b.team.id);
+	}
+
+	/**
+	 * A newer config takes over tracking, fetched or pushed. Counts we've seen move but the site
+	 * hasn't yet live on as optimistic floors (gains and multi-run timed tiles build on them).
+	 */
+	void adoptTracking(PluginConfigResponse fresh) {
+		// Another team's (or event's) counts are no floor for this one: a team move, or an alt on the
+		// other side, would otherwise build on the old team's numbers.
+		if (!sameTeam(pluginConfig, fresh)) optimistic.reset();
+		pluginConfig = fresh;
+		clientThread.invokeLater(this::refreshClanTitleWidgets);
+		rebuildItemDropIndex();
+		liveCountsMoved();
+	}
+
+	/** The fetch, by a caller already holding {@link #configFetchLock}, which this releases. */
+	void fetchConfigAndUnlock() {
+		try {
+			refreshConfigLocked();
+			syncPush();
+			safely("chat flair", this::maybeRefreshChatFlair);
+		} finally {
+			lastConfigAttemptAt = now();
+			configFetchLock.unlock();
+		}
+	}
+
+	void refreshConfigLocked() {
+		if (!apiClient.isConfigured()) return;
+		try {
+			var askedAt = now();
+			var fresh = apiClient.fetchConfig();
+			if (fresh != null) fresh.asOf = askedAt;
+			liveConfigAnswered = true;
+			forgetSavedResponses();
+			if (siteUnreachable) {
+				siteUnreachable = false;
+				onSiteRecovered();
+			}
+			// A refresh that returned (HTTP 200/304, no throw) proves the token is good — clear any
+			// connection-failure streak and announce recovery if we'd nagged.
+			noteConnectionOk();
+			adoptResolvedClan(fresh);
+			maybeRefreshChatPatterns(fresh);
+			// Also without a board: the rule table carries the rare-drop screenshot gate. A failed fetch
+			// keeps the last table (a blip must not stop tracking); the site rejects any tile it no longer has.
+			var table = fresh != null ? apiClient.fetchRules() : null;
+			if (table != null || fresh == null) rules.set(table);
+			moveNotifyPrefs(fresh);
+
+			// No board in the addressed clan (event: null). Boards elsewhere still ride the tracked lists
+			// and `boards`, and are tracked like any other; with none, tracking reflects that.
+			if (fresh != null && fresh.event == null) {
+				pluginConfig = fresh;
+				clientThread.invokeLater(this::refreshClanTitleWidgets);
+				rebuildItemDropIndex();
+				if (apiClient.getCurrentRsn() != null) checkTileCompletions(fresh);
+				if (!empty(fresh.unlinkedActiveEvent)) {
+					// The diagnostic "money line" for debug exports: the token is valid AND this RSN
+					// IS a player in a live bingo — but the account/token isn't linked to it, so
+					// tracking is silently OFF. Distinct from a genuine "not enrolled anywhere" below.
+					log.warn("{} plays in {} unlinked; tracking off", getLocalPlayerName(), fresh.unlinkedActiveEvent);
+				} else log.info("No active event");
+				warnUnlinkedRsn(fresh.unlinkedActiveEvent);
+				return;
+			}
+			// If the linked event has ended, drop it so tracking stops for the stale event.
+			if (fresh != null && eventIsOver(fresh.event)) {
+				log.info("Event '{}' ended", fresh.event.name);
+				pluginConfig = null;
+				rebuildItemDropIndex();
+				return;
+			}
+			adoptTracking(fresh);
+			// One tracking-state summary, logged only when it CHANGES (the refresh runs every
+			// ~30s) — the first thing to read in a client.log when "nothing tracked": it says
+			// what the plugin believed it was tracking, and when that belief changed.
+			var summary = String.format(ROOT, "event='%s' team='%s' completed=%d",
+					pluginConfig.event.name, pluginConfig.team.name, sizeOf(pluginConfig.completedTiles));
+			if (!summary.equals(lastTrackingFingerprint)) {
+				lastTrackingFingerprint = summary;
+				log.info("Tracking: {}", summary);
+			}
+
+			// Before login stamps an RSN, the event can only have come off the launcher hint. Everything
+			// below speaks in chat or seeds the completion baseline, and each latches once per login —
+			// run now, the line would go nowhere and the latch would eat the real one. The refresh
+			// stampIdentityAndGreet makes after login does it for real.
+			if (apiClient.getCurrentRsn() == null) return;
+			checkTileCompletions(pluginConfig);
+			checkMissionAlerts(pluginConfig);
+			// Covers login (stampIdentityAndGreet calls refreshConfig) AND an event with CA
+			// tiles going live mid-session via the periodic refresh. No-ops once sent.
+			maybeNudgeCaRepeatSetting();
+			maybeNudgeLootNotifications();
+			maybeNudgeClogNotifications();
+			maybeNudgeStartProof();
+			maybeReprobeAdmin();
+
+		} catch (IOException e) {
+			log.warn("Config refresh failed: {}", e.getMessage());
+			// A definite refusal (no clan, bad token) is an answer too: the saved copy goes. A site
+			// that is down or slow is not — keep showing it until one does answer.
+			int code = e instanceof HttpStatusException ? ((HttpStatusException) e).code : 0;
+			if (code >= 400 && code < 500 && code != 408 && code != 429) {
+				liveConfigAnswered = true;
+				forgetSavedResponses();
+			} else siteUnreachable = true; // down, slow or 5xx: the next answer is a recovery
+			noteConnectionProblem(e);
+		}
+	}
+
+	/**
+	 * One chat nudge per login when this account still owes a STARTING SHOT — the event is live, the
+	 * location is drawn, and nothing has been filed. Says where to stand and that the panel button
+	 * does the rest; repeating it every 30s refresh would just be noise, so it latches.
+	 */
+	void maybeNudgeStartProof() {
+		if (startProofNudged || !needsStartProof()) return;
+		var sp = pluginConfig.startProof;
+		startProofNudged = true;
+		var left = StartProofRules.describeWindow(sp, now());
+		sendChatMessage(WARN, "Starting shot needed before you play"
+				+ (!empty(sp.location) ? " — go to " + sp.location : "")
+				+ (sp.spot != null && config.autoStartShot()
+						? ". Stand there and it's taken and sent for you (or press \"Take starting shot\" in the Soulrend side panel)."
+						: ". Open the Soulrend side panel and press \"Take starting shot\".")
+				+ (sp.maxSessionMinutes > 0
+						? " Take it within " + sp.maxSessionMinutes + " min of logging in — hiscores only save"
+						+ " on logout, so that's what sets your starting totals."
+						: "")
+				// The consequence, which the nudge never spelled out: a player told only that
+				// something is "needed" has no reason to do it before their next drop.
+				+ " Until it's filed your drops are held for review"
+				+ (left != null ? ", and it's only asked for another " + left : "")
+				+ ".");
+	}
+
+	/**
+	 * Say it once, at the moment it starts costing them something: a credit is going up while this
+	 * account still owes a STARTING SHOT, so the site will hold it for review.
+	 *
+	 * The login nudge fires before anyone has done anything, which is the easiest message in the
+	 * world to scroll past. This one lands on the drop itself. Once per login — the point is to be
+	 * noticed, and a line per kill is how a plugin gets turned off.
+	 */
+	void warnStartProofBeforeCredit() {
+		if (startProofCreditWarned || !needsStartProof()) return;
+		startProofCreditWarned = true;
+		sendChatMessage(WARN, "That's recorded, but your starting shot is still missing — it stays held for"
+				+ " review until you take it. Soulrend side panel → \"Take starting shot\".");
+	}
+
+	/**
+	 * Ask again whether this account is an admin, while the answer is still no.
+	 *
+	 * <p>The probe used to be strictly once per login, and it latched its "attempted" flag BEFORE the
+	 * request — so a site that was restarting at the three-second mark cost an admin their
+	 * "Sync clan roster" button for the entire session, with nothing in chat to say why. Re-asking
+	 * every few minutes costs one tiny request and heals that by itself. A yes is never re-checked;
+	 * losing admin mid-session is a logout-shaped problem, not a poll-shaped one.
+	 */
+	void maybeReprobeAdmin() {
+		if (isAdmin || !apiClient.isConfigured()) return;
+		var now = now();
+		if (now - lastAdminProbeAt < ADMIN_REPROBE_MS) return;
+		lastAdminProbeAt = now;
+		if (apiClient.fetchIsAdmin(config.playerToken())) {
+			isAdmin = true;
+			log.info("Admin confirmed on retry");
+		}
+	}
+
+	/**
+	 * Ask whether this account is an admin right now, skipping the re-probe interval — for the
+	 * sidebar's Refresh button. Off the EDT (the panel's worker calls it). Unlike the timed re-probe
+	 * it also takes a no: a member who clicks Refresh gets the site's current answer either way.
+	 */
+	void reprobeAdminNow() {
+		if (!apiClient.isConfigured()) return;
+		lastAdminProbeAt = now();
+		adminProbeAttempted = true;
+		var admin = apiClient.fetchIsAdmin(config.playerToken());
+		if (admin != isAdmin) log.info("Admin now {}", admin);
+		isAdmin = admin;
+	}
+
+	static boolean eventIsOver(EventInfo ev) {
+		if (ev == null) return false;
+		if (!empty(ev.forceEndedAt)) return true;
+		if (empty(ev.endDate)) return false;
+		try {
+			return Instant.parse(ev.endDate).isBefore(Instant.now());
+		} catch (Exception ignored) {
+			return false;
+		}
+	}
+
+	/**
+	 * Rebuild the per-config lookups (boards, gain items, allowlists) for O(1) matching.
+	 */
+	void rebuildItemDropIndex() {
+		var cfg = pluginConfig;
+		var has = cfg != null;
+		Set<Integer> notable = has && cfg.alwaysNotifyItemIds != null ? new HashSet<>(cfg.alwaysNotifyItemIds) : new HashSet<>();
+		notable.remove(null);
+		notableItemIds = notable;
+		// Lowercased NPC name → kill tiles, and itemId → gain tiles, for O(1) matching.
+		// Keyed by the in-game name: wiki variants ("Armoured zombie (Zemouregal's Fort)") report bare.
+		alwaysNotifyLower = names(has ? cfg.alwaysNotifyItems : null, n -> n.isEmpty() ? null : n.toLowerCase());
+		rebuildTrackedActivityKeys();
+	}
+
+	/**
+	 * Rebuild the set of activity keys to push counts for; refreshed with the drop index.
+	 *
+	 * <p>Filtered down to what {@link ActivityStats} can actually read, so a tile tracking an LMS or
+	 * Bounty Hunter RANK — which the client has no counter for — never enters the push path and
+	 * quietly keeps its hiscores-sweep behaviour.
+	 */
+	void rebuildTrackedActivityKeys() {
+		var cfg = pluginConfig;
+		trackedActivityKeys = names(cfg != null ? cfg.trackedActivityKeys : null,
+				k -> ActivityStats.isReadable(k.trim()) ? k.trim() : null);
+		if (trackedActivityKeys.isEmpty()) activityPush.reset();
+	}
+
+	/** {@code norm} of each name, skipping nulls and anything {@code norm} turns into null. */
+	static Set<String> names(List<String> raw, Function<String, String> norm) {
+		Set<String> out = new HashSet<>();
+		if (raw != null) for (var r : raw) {
+			var n = r == null ? null : norm.apply(r);
+			if (n != null) out.add(n);
+		}
+		return out;
+	}
+
+
+
+	/**
+	 * A KC / XP gain the rule table counted: print its lines, move its tiles here and on a pinned
+	 * tracker, and say whether one reached its goal (the stat push then goes now, not after the streak
+	 * settles, so the site completes the tile while the member is still looking at it).
+	 */
+	boolean statMoved(RuleEngine.Out o) {
+		say(o.say);
+		o.raised.forEach((t, have) -> {
+			raiseLocal(t, have, now());
+			noteLocalProgress(t);
+		});
+		return o.done;
+	}
+
+	/** This client just bumped a tile to {@code current}: hold that count and show it now. */
+	void raiseLocal(int tileId, long current, long at) {
+		optimistic.raise(tileId, current, at);
+		liveCountsMoved();
+	}
+
+	/** Per-config lookups for counts, the tracker's extra lines and part labels (see TileNotes). */
+	volatile PluginConfigResponse notesFor;
+	volatile Map<Integer, TrackedCombo> combos = emptyMap();
+	volatile Map<Integer, Integer> partCombo = emptyMap();
+	/** tileId → its count off the config ({@code tiles}). */
+	volatile Map<Integer, TileCount> tileRows = emptyMap();
+
+	void indexNotes(PluginConfigResponse cfg) {
+		if (cfg == notesFor) return;
+		Map<Integer, TrackedCombo> comboById = new HashMap<>();
+		Map<Integer, TileCount> rows = new HashMap<>();
+		if (cfg != null) {
+			if (cfg.trackedCombos != null) for (var c : cfg.trackedCombos) if (c != null) comboById.put(c.tileId, c);
+			if (cfg.tiles != null) for (var r : cfg.tiles) if (r != null) rows.put(r.t, r);
+		}
+		combos = comboById;
+		partCombo = TileNotes.partCombos(cfg == null ? null : cfg.trackedCombos);
+		tileRows = rows;
+		notesFor = cfg;
+	}
+
+	/**
+	 * A pinned tile's extra lines: "3/5 runs" on a multi-run timed tile, and a combo's parts ("1 of 2
+	 * done", then each part at this client's newest count). Empty for everything else. Read every frame
+	 * by the tracker, so it only looks up maps built once per config.
+	 */
+	List<String> tileNotes(int tileId) {
+		var cfg = pluginConfig;
+		if (cfg == null) return emptyList();
+		indexNotes(cfg);
+		var runs = rules.runs(tileId);
+		if (runs != null) return singletonList(TileNotes.runs(shownProgress(tileId, runs[0]), (int) runs[1]));
+		var combo = combos.get(tileId);
+		if (combo != null && !combo.completed) {
+			Map<Integer, long[]> counts = new HashMap<>();
+			if (combo.parts != null) for (var p : combo.parts) {
+				var g = p == null ? null : tileRows.get(p.tileId);
+				if (g != null) counts.put(p.tileId, new long[]{shownProgress(p.tileId, g.have), g.of});
+			}
+			return TileNotes.comboLines(combo, counts);
+		}
+		return emptyList();
+	}
+
+	/**
+	 * The newest count this client has for a tile: the held config's, or its own unconfirmed one when
+	 * higher; -1 when it tracks no such tile. What the panel's live counts move to (UiView.tickLive).
+	 */
+	long tileCount(int tileId) {
+		indexNotes(pluginConfig);
+		var r = tileRows.get(tileId);
+		// A set or collection tile counts pieces, but the panel shows the best set (10 pieces vs
+		// "2 / 4"): not the same number, so it doesn't move live.
+		if (r != null && r.set) return -1;
+		if (r != null) optimistic.seen(tileId, r.have);
+		var floor = optimistic.floor(tileId, now());
+		return r == null ? (floor > 0 ? floor : -1) : Math.max(r.have, floor);
+	}
+
+	/** Counts moved here (own progress, a pushed or fetched config): the panel redraws its live ones. */
+	void liveCountsMoved() {
+		var panel = sidebarPanel;
+		if (panel != null) panel.liveCountsMoved();
+	}
+
+	/** This client's unconfirmed count for a tile (0 when none) — read-only, see OptimisticProgress.floor. */
+	long optimisticFloor(int tileId) {
+		return optimistic.floor(tileId, now());
+	}
+
+	/** What to show for a tile the site last put at {@code siteCurrent}: that, or this client's newer count. */
+	long shownProgress(int tileId, long siteCurrent) {
+		return optimistic.apply(tileId, siteCurrent, now());
+	}
+
+	/**
+	 * THIS account just progressed {@code tileId} — any tile kind. A pinned tile then shows it a few
+	 * seconds later rather than on the next 30s poll — long enough for the push that carries it to land
+	 * on the site first.
+	 */
+	void noteLocalProgress(int tileId) {
+		if (tileId > 0 && tileTracker.tracks(tileId)) later(() -> safely("tileTracker", () -> tileTracker.refresh(tileId)), 4_000);
+	}
+
+	/**
+	 * Whether the real-time stat push paths (skill XP + boss KC) may send right now.
+	 *
+	 * Every gain is sent, whatever is watching, and with no active bingo too (a drafted-but-not-started
+	 * board once silenced the Boss of the Week): lib/completionGate refuses any completion before a
+	 * board starts, so a pre-event push cannot score.
+	 *
+	 * NO SETTING SITS IN FRONT OF THIS. It briefly had its own, and before that it rode on "Auto
+	 * Submit Drops" — a switch about screenshotting a drop, which said nothing about stats and yet
+	 * stopped SOTW and BOTW moving while you played. Both failed the same way: silently. The member
+	 * sees a leaderboard that never updates, and the site sees an account gaining XP with no client
+	 * attached, because the only trace a missing push leaves is an absence. Moving the board you are
+	 * on is what this plugin is FOR.
+	 */
+	static boolean statPushAllowed(PluginConfigResponse cfg) {
+		return cfg != null;
+	}
+
+	/**
+	 * Also when signed in with no clan: the site keeps a person's stats on their own account with or
+	 * without one (the stats route's account-only path), and it alone decides whether the character
+	 * is theirs — an unclaimed or someone else's character is simply not stored.
+	 */
+	static boolean statPushAllowed(PluginConfigResponse cfg, boolean signedInWithoutClan) {
+		return statPushAllowed(cfg) || signedInWithoutClan;
+	}
+
+	boolean statPushAllowed() {
+		return statPushAllowed(pluginConfig, apiClient != null && apiClient.signedInWithoutClan());
+	}
+
+	/**
+	 * Buffers a skill's absolute XP for a debounced push. Absolute XP is idempotent, so the latest
+	 * value overwrites and a training burst becomes one push. Runs on the client thread
+	 * (onStatChanged); the network send happens on the executor.
+	 *
+	 * EVERYTHING, NOT JUST WHAT IS BEING WATCHED. This once asked for tracked skills first, which made the
+	 * client's report a function of what happened to be running: a skill nobody had a tile for went
+	 * unreported, and the number only appeared when the hiscores sweep caught up — hours later, and
+	 * only if the account had logged out. The plugin is the one thing that sees a gain the moment it
+	 * happens, so it is the primary source and the sweep is the fallback that fills what it missed.
+	 * The server already keeps max(hiscores, pushed) per key, so an extra key costs one map entry
+	 * and can never lower anything.
+	 */
+	void maybeQueueSkillXpPush(String skillName, int xp, boolean finishes) {
+		if (skillName == null || !statPushAllowed()) return;
+		skillXpPush.queue(skillName, xp);
+		if (finishes) skillXpPush.sendNow();
+	}
+
+
+	/**
+	 * Normalize a boss name for matching: lowercase, non-alphanumeric → space, collapse. Mirrors the
+	 * server's lib/pluginStats so a KC line's boss name lines up with the config's watch-list
+	 * regardless of punctuation — e.g. "Tombs of Amascut: Expert Mode" ↔ "tombs of amascut expert mode".
+	 */
+	static String normalizeBossName(String s) {
+		return SearchAliases.fold(s);
+	}
+
+	/**
+	 * Push the killcount an unlock just happened at, bypassing the tracked-boss gate.
+	 *
+	 * {@link #maybeQueueKcPush} only pushes bosses some tile tracks, which is right for board
+	 * scoring and wrong here: a clog unlock is worth dating whatever the board happens to be about,
+	 * and the boss it came from usually isn't on it. The kill line always precedes the loot, so the
+	 * most recent one is the kill that produced this unlock — with a window on it, so an unlock that
+	 * arrives with no recent kill (a shop-bought minigame reward, a gamble pet) pushes nothing
+	 * rather than attributing itself to whatever was killed an hour ago.
+	 */
+	void pushKcForUnlock() {
+		if (!statPushAllowed() || lastKcName == null) return;
+		if (now() - lastKcAtMs > KC_ATTRIBUTION_WINDOW_MS) return;
+		kcPush.queue(lastKcName, lastKcValue);
+	}
+
+	/**
+	 * Buffers a boss's absolute kill count for a debounced push.
+	 *
+	 * Same reasoning as the skill push above: reported whether or not anything is watching, because
+	 * the client is the only place a kill is known immediately. A KC line is rare enough that the
+	 * volume is nothing, and the value is absolute, so a repeat is a no-op server-side.
+	 */
+	void maybeQueueKcPush(String bossName, int kc) {
+		// A KC line is one kill (one clear, one chest), so the first one after login still moves the
+		// tile by one; after that the absolute count says how many, in case a line was missed.
+		var prevKc = lastSeenKc.put(RuleEngine.key(bossName), kc);
+		var finishes = statMoved(rules.kc(bossName, prevKc == null ? 1 : kc - prevKc));
+		if (!statPushAllowed()) return;
+		kcPush.queue(bossName, kc);
+		if (finishes) kcPush.sendNow();
+	}
+
+	/**
+	 * Read the tracked activity counters and buffer any that have risen since the last push.
+	 *
+	 * <p>Runs on the client thread (varbit change / game tick), which is where the varps have to be
+	 * read; the network send happens on the executor. Diffing against what was last sent is what
+	 * keeps this quiet — these counters move a handful of times a session, so the common case is a
+	 * read, no change, and no request.
+	 */
+	void maybeQueueActivityPush() {
+		// EVERY COUNTER THIS CAN READ, not only the ones something is watching — the same rule the
+		// skill and KC pushes now follow, so one client report covers all three and the sweep is the
+		// fallback for whatever the client was not running to see. Reading them is a handful of
+		// varbit lookups against client memory; the send is debounced and carries absolute values,
+		// so an unchanged counter costs nothing.
+		var wanted = ActivityStats.readableKeys();
+		if (wanted.isEmpty() || !statPushAllowed() || !execLive()) return;
+		activityPush.queue(ActivityStats.read(wanted, client::getVarbitValue, client::getVarpValue));
+	}
+
+	/* -------------------------------------------------------------- */
+	/* Recap "fun stat" counters — deaths, total loot value, PvP     */
+	/* kills. Cosmetic superlatives only; never touch scoring.        */
+	/* -------------------------------------------------------------- */
+
+	/**
+	 * Make sure the in-memory counters belong to the CURRENT active event, loading the persisted values
+	 * on first use (so a restart mid-event resumes counting) and zeroing them when the active event
+	 * changes. Returns false — counting is skipped — when tracking is off (no config, or the event
+	 * isn't active), mirroring every other auto-tracking gate. Call under
+	 * {@link #counterLock}.
+	 */
+	boolean ensureCounterEvent() {
+		if (!countersLoaded) {
+			counterEventId = (int) cfgLong(CFG_COUNTER_EVENT);
+			eventDeaths = (int) cfgLong(CFG_COUNTER_DEATHS);
+			eventLootGp = cfgLong(CFG_COUNTER_LOOTGP);
+			eventPvpKills = (int) cfgLong(CFG_COUNTER_PVP);
+			eventBiggestHit = (int) cfgLong(CFG_COUNTER_BIGHIT);
+			eventMinutes = (int) cfgLong(CFG_COUNTER_MINUTES);
+			eventCaTasks = (int) cfgLong(CFG_COUNTER_CATASKS);
+			countersLoaded = true;
+		}
+		if (trackingGateReason() != null) return false;
+		int active = pluginConfig != null && pluginConfig.event != null ? pluginConfig.event.id : 0;
+		if (active <= 0) return false;
+		if (active != counterEventId) {
+			counterEventId = active;
+			eventDeaths = eventPvpKills = eventBiggestHit = eventCaTasks = eventMinutes = eventTickAccumulator = 0;
+			eventLootGp = 0;
+			persistCounters();
+		}
+		return true;
+	}
+
+	/**
+	 * A combat task the player just completed for the FIRST time (the caller has already checked the
+	 * points varbit rose, so a "Repeat completion" echo never reaches here).
+	 *
+	 * Two jobs, neither of them a notification: queue it for the highlight feed, and count it for
+	 * the event's Task Master award. The site decides which tiers are worth showing on which board —
+	 * a floor that lives here would need a release to change, and it can't know that the clan is
+	 * running a Zulrah week.
+	 */
+	void noteCombatTaskMoment(CombatAchievementTier tier, String task) {
+		if (empty(task)) return;
+		// The tier is never absent: the completion line names it, and the parse above stands down
+		// when that word isn't a tier we recognise — so nothing reaches here without one. The site
+		// relies on that (a `ca` moment with no rankable tier is rejected at its ingest route).
+		moments.record(Moment.combatTask(
+				task, tier.getDisplayName(), now()));
+		scheduleMomentPush();
+
+		// No live event of ours: the feed still took it, the counter has nowhere to go.
+		bumpEventCounter(() -> eventCaTasks++);
+	}
+
+	/** Bump a per-event counter (only during an event of ours), save it and push it soon. */
+	void bumpEventCounter(Runnable bump) {
+		synchronized (counterLock) {
+			if (!ensureCounterEvent()) return;
+			bump.run();
+			persistCounters();
+		}
+		scheduleCounterPush();
+	}
+
+	/** Our own death happened during an active event → bump the per-event death counter and push. */
+	void recordEventDeath() {
+		bumpEventCounter(() -> eventDeaths++);
+	}
+
+	/**
+	 * A hitsplat we landed → the per-event "hardest hit" high-water mark. Called from every one of
+	 * our hitsplats, so it stays a cheap compare-and-return in the common case: only a genuine new
+	 * record touches the lock, persists, or schedules a push.
+	 */
+	void recordEventHit(int damage) {
+		synchronized (counterLock) {
+			if (damage <= eventBiggestHit) return;
+		}
+		bumpEventCounter(() -> eventBiggestHit = Math.max(eventBiggestHit, damage));
+	}
+
+	/**
+	 * Bank a minute of play. Driven from the game tick, so it measures time actually logged in
+	 * during the event — the number that turns every other counter into a rate ("most kills" is
+	 * usually just "played most"). Ticks are ~600ms; 100 of them make a minute.
+	 */
+	void recordEventTick() {
+		boolean bankedMinute;
+		synchronized (counterLock) {
+			if (!ensureCounterEvent()) {
+				// Not in a tracked event — don't let stale ticks bank into the next one.
+				eventTickAccumulator = 0;
+				return;
+			}
+			if (++eventTickAccumulator < TICKS_PER_MINUTE) return;
+			eventTickAccumulator = 0;
+			eventMinutes++;
+			persistCounters();
+			// Push on a slow cadence: a minute ticking over isn't worth a request every time.
+			bankedMinute = eventMinutes % MINUTES_PER_PLAYTIME_PUSH == 0;
+		}
+		if (bankedMinute) scheduleCounterPush();
+	}
+
+	/** One attributed dangerous-PvP kill (see onActorDeath) → the per-event PKer counter. */
+	void recordEventPvpKill() {
+		bumpEventCounter(() -> eventPvpKills++);
+	}
+
+	/**
+	 * Price a whole loot haul and add its GE value to the per-event loot total. Called from the same
+	 * loot events as {@link #processValueTiles} (which price only when a value tile exists) so EVERY
+	 * haul counts, value tile or not. A short fingerprint dedup absorbs the known NpcLootReceived +
+	 * LootReceived double-fire for the same haul. Client thread only (itemManager.getItemPrice).
+	 */
+	void recordEventLoot(String source, Collection<ItemStack> items, String sourceKind) {
+		// Note the haul for the clog notifier BEFORE the event gate: a collection-log unlock is worth
+		// announcing whether or not a bingo is running, so its sprite/source lookup can't be gated on
+		// one. Cheap — a few map writes that expire on their own.
+		rememberLootForClog(source, sourceKind, items);
+		// For the clan's highlight feed: a competition week has no bingo to gate on, and a
+		// near-miss during one that DOES have a bingo is worth as much as a hit.
+		recordLootMoments(source, sourceKind, items);
+		if (empty(items) || trackingGateReason() != null) return;
+		long haulGp = haulValue(items);
+		long count = items.stream().filter(it -> it != null && it.getId() > 0).count();
+		if (haulGp <= 0) return;
+		// Dedup identical hauls arriving on two loot events back-to-back (source + value + item count).
+		var fp = sourceKind + "|" + source + "|" + haulGp + "|" + count;
+		var now = now();
+		synchronized (lastLootValueAt) {
+			lastLootValueAt.values().removeIf(t -> now - t > DEDUP_WINDOW_MS);
+		}
+		if (!claim(lastLootValueAt, fp, now, DEDUP_WINDOW_MS)) return;
+		synchronized (counterLock) {
+			if (!ensureCounterEvent()) return;
+			eventLootGp += haulGp;
+		}
+		scheduleCounterPush();
+	}
+
+	/** Debounce a counter push onto the executor — a burst of loot/deaths collapses to one absolute push. */
+	void scheduleCounterPush() {
+		synchronized (counterLock) {
+			counterPushTask = reschedule(counterPushTask, this::flushCounterPush, COUNTER_PUSH_COALESCE_MS);
+		}
+	}
+
+	/** Push the current absolute per-event counters. Absolute + server max-merge → a failure just retries. */
+	void flushCounterPush() {
+		int deaths, pvpKills, biggestHit, minutes, caTasks;
+		long lootGp;
+		synchronized (counterLock) {
+			persistCounters();
+			deaths = eventDeaths;
+			lootGp = eventLootGp;
+			pvpKills = eventPvpKills;
+			biggestHit = eventBiggestHit;
+			minutes = eventMinutes;
+			caTasks = eventCaTasks;
+		}
+		var cfg = pluginConfig;
+		if (cfg == null || cfg.event == null || !SoulrendOverlay.isEventActive(cfg.event)) return; // event ended between schedule and flush — drop; nothing feeds scoring off this.
+		try {
+			apiClient.submitEventCounters(deaths, lootGp, pvpKills, biggestHit, minutes, caTasks);
+		} catch (IOException e) {
+			log.warn("Counter push failed, retrying: {}", e.getMessage());
+			scheduleCounterPush();
+		}
+	}
+
+	// ── Highlight feed ────────────────────────────────────────────────────────────────────────────
+	//
+	// Everything below reports; nothing below decides. Which competition week or board a moment
+	// belongs to, whether an item counts as a unique, and which pets belong to which skill are all
+	// the site's business (src/lib/moments.ts) — so this sends generously and expects most of it to
+	// be discarded, and a clan changing any of those rules costs no plugin release.
+
+	/** True when this member wants a feed and the site has one to put it on. */
+	boolean momentsEnabled() {
+		return config.shareMoments() && apiClient.isConfigured() && pluginConfig != null;
+	}
+
+	/**
+	 * Note a drop worth a line on the feed.
+	 *
+	 * <p>The value floor is the client's only filter and it is deliberately loose — the site knows
+	 * what the board and the week care about, this only knows what would be silly to send (every
+	 * rune from every kill). An item the site can't place costs one discarded row.
+	 */
+	void recordDropMoment(String source, String sourceKind, Integer itemId, String itemName, int quantity, long valueGp) {
+		if (!momentsEnabled() || (itemId == null && empty(itemName))) return;
+		var now = now();
+		moments.record(new Moment("drop", itemId, itemName, quantity, valueGp,
+				source, sourceKind, killCountFor(source), now,
+				SoulrendMoments.keyFor("drop", source, itemId, now)));
+		scheduleMomentPush();
+	}
+
+	/**
+	 * Pick what to report out of one kill's loot.
+	 *
+	 * <p>Two ways in, because they catch different things. PRICE catches the drop everyone in the
+	 * clan would want to hear about, whatever dropped it. The BOARD's own item list catches the one
+	 * worth nothing on the GE and everything to the people playing — an untradeable unique, or the
+	 * piece a tile wanted that credited nothing because the tile was already finished or the source
+	 * was wrong. That near-miss is half of what a highlight feed is for.
+	 *
+	 * <p>Capped at a few per haul, dearest first: a raid chest is not a reason to send twenty rows.
+	 */
+	void recordLootMoments(String source, String sourceKind, Collection<ItemStack> items) {
+		if (empty(items) || !momentsEnabled()) return;
+		var boardItems = rules.dropItemIds();
+		var cfg = pluginConfig;
+		Set<Integer> luckItems = cfg != null && cfg.luckItemIds != null
+				? new HashSet<>(cfg.luckItemIds) : emptySet();
+		// Merge stacks first — a kill that drops coins twice is one line, not two.
+		Map<Integer, Integer> merged = new LinkedHashMap<>();
+		for (var item : items) {
+			if (item == null || item.getId() <= 0) continue;
+			merged.merge(item.getId(), Math.max(1, item.getQuantity()), Integer::sum);
+		}
+
+		List<int[]> candidates = new ArrayList<>(); // {itemId, quantity, value}
+		for (var entry : merged.entrySet()) {
+			int itemId = entry.getKey(), quantity = entry.getValue();
+			var value = (long) Math.max(0, itemManager.getItemPrice(itemId)) * quantity;
+			// A luck item goes up whatever it sells for: an untradeable vestige is worth 0 here.
+			var wanted = boardItems.contains(itemId) || luckItems.contains(itemId);
+			if (!wanted && value < SoulrendMoments.MIN_REPORTABLE_GP) continue;
+			candidates.add(new int[]{itemId, quantity, (int) Math.min(Integer.MAX_VALUE, value)});
+		}
+		// Luck items first, then by value: the three-per-kill cap must never cut the vestige for a
+		// stack of runes worth more on the GE.
+		candidates.sort((a, b) -> {
+			int luck = Boolean.compare(luckItems.contains(b[0]), luckItems.contains(a[0]));
+			return luck != 0 ? luck : Integer.compare(b[2], a[2]);
+		});
+
+		int sent = 0;
+		for (int[] c : candidates) {
+			if (sent++ >= 3) break;
+			recordDropMoment(source, sourceKind, c[0], itemName(c[0]), c[1], c[2]);
+		}
+	}
+
+	/**
+	 * Note a collection-log unlock for the feed.
+	 *
+	 * <p>This is the route for the unlocks the loot path can't see: an untradeable worth nothing on
+	 * the GE will never clear a price floor, and some rewards are handed over with no loot event at
+	 * all. It fires on the ungated chat line, so a member with every notification off still lands
+	 * on the clan's feed.
+	 *
+	 * <p>Skips anything a real loot event just reported — that is the SAME acquisition arriving
+	 * twice (the chest, then the pickup), and the loot copy already carries the price and stack.
+	 */
+	void recordClogUnlockMoment(String itemName) {
+		if (empty(itemName) || !momentsEnabled()) return;
+		var itemId = resolveItemIdByName(itemName);
+		var now = now();
+		if (itemId != null) {
+			synchronized (recentLootItemIds) {
+				recentLootItemIds.values().removeIf(t -> now - t > CLOG_LOOT_DEDUP_MS);
+				if (recentLootItemIds.containsKey(itemId)) return;
+			}
+		}
+		var src = lootSourceAt(now);
+		recordDropMoment(src[0], src[1], itemId, itemName, 1, itemId != null ? Math.max(0, itemManager.getItemPrice(itemId)) : 0);
+	}
+
+	/** {source, kind} of the last loot event when it is within the clog window of {@code now}, else {null, null}. */
+	String[] lootSourceAt(long now) {
+		synchronized (recentLootIds) {
+			return lastLootSource != null && now - lastLootSourceAt <= CLOG_LOOT_DEDUP_MS ? new String[]{lastLootSource, lastLootSourceKind} : new String[2];
+		}
+	}
+
+	/**
+	 * Note a pet. Called from the chat line itself, NOT from the notifier — a member with the drops
+	 * channel switched off still got the pet, and the clan's feed is a different thing from their
+	 * Discord settings.
+	 *
+	 * @return the queue key, so the collection-log line that names the pet can fill it in
+	 */
+	String recordPetMoment(String source, String sourceKind, Integer kc) {
+		if (!momentsEnabled()) return null;
+		var now = now();
+		// Keyed WITHOUT an item id, because at this point nobody knows which pet it was — the name
+		// lands a tick or two later and nameQueued() fills it into this same entry.
+		var key = SoulrendMoments.keyFor("pet", source, null, now);
+		moments.record(new Moment("pet", null, null, 1, null, source, sourceKind, kc, now, key));
+		scheduleMomentPush();
+		return key;
+	}
+
+	/** Name a pet already queued, once the collection-log line says which one it was. */
+	void namePetMoment(String key, String itemName, String source, Integer kc) {
+		if (key == null || !momentsEnabled()) return;
+		moments.nameQueued(key, itemName, resolveItemIdByName(itemName), source, kc);
+	}
+
+	/**
+	 * Note a death, and what killed us.
+	 *
+	 * <p>The killer is inferred from what had us TARGETED when we last took damage, not from what we
+	 * were hitting — see DeathAttribution for why the client cannot simply be asked, and for what
+	 * the difference looked like in the feed ("died to Jug"). What we were fighting is still used,
+	 * but only to break a tie between several things attacking us at once.
+	 *
+	 * <p>Null when nothing had us targeted, which is a mechanic or a fall, and the feed then says
+	 * only that someone died. A death with no killer is a smaller story than one with the wrong.
+	 */
+	@RequiredArgsConstructor
+	static final class AttributedDeath {
+		final String source;
+		final String sourceKind;
+		/** Players that had us targeted (the death post's pile-on). */
+		final int pile;
+	}
+
+	/** Resolve one death once, so the Feed and Discord cannot disagree about what killed us. */
+	AttributedDeath resolveDeathSource() {
+		var now = now();
+		var fighting = lastCombatTarget != null && now - lastCombatTargetAt <= DEATH_ATTRIBUTION_MS ? lastCombatTarget : null;
+		var killer = deathAttribution.killer(fighting, now);
+		// Breadcrumb so client.log can explain an attribution that looks odd: how many things had us
+		// and which one we picked, next to what we were hitting.
+		log.info("Death: {} ({} attackers, fighting {})",
+				killer, deathAttribution.attackerCount(), fighting);
+		// Nothing had us targeted, yet we were mid-fight: some bosses never show as targeting you
+		// (Alchemical Hydra), and a mechanic has nobody behind it. Send what we were fighting, marked as
+		// a guess; the site keeps it only when it's a boss, so "died to Jug" can't come back.
+		var sourceKind = deathAttribution.isPlayer(killer) ? "player" : "npc";
+		if (killer == null && fighting != null) {
+			killer = fighting;
+			sourceKind = "fought";
+		}
+		int pile = deathAttribution.players(now);
+		// The fight is over: whatever had us targeted has no claim on the next one. Cleared here
+		// rather than waiting for each attacker to drop us, which an instance tear-down never
+		// reports — a stale attacker would otherwise be the prime suspect for the next death.
+		deathAttribution.clear();
+		return new AttributedDeath(killer, sourceKind, pile);
+	}
+
+	void recordDeathMoment(AttributedDeath death) {
+		if (!momentsEnabled()) return;
+		var now = now();
+		moments.record(new Moment("death", null, null, 1, null, death.source, death.sourceKind,
+				killCountFor(death.source), now, SoulrendMoments.keyFor("death", death.source, null, now)));
+		scheduleMomentPush(DEATH_PUSH_DELAY_MS);
+	}
+
+	/**
+	 * Note a level worth remembering: a 99, a high total, or a max.
+	 *
+	 * <p>Called from the DETECTION, deliberately not from the announcer. Whether the clan has a
+	 * Discord channel for level posts is a question about Discord; whether a 99 belongs on the clan's
+	 * feed is a question about the feed, and answering the second with the first is how a member with
+	 * notifications off vanishes from their own clan's history.</p>
+	 *
+	 * <p>Sent generously, like everything else here: the site decides whether a running board or
+	 * competition week wants it, and drops it when nothing does.</p>
+	 */
+	void recordLevelMoment(String skill, int level, String scope) {
+		if (!momentsEnabled() || statsAreArtificial()) return;
+		moments.record(Moment.level(skill, level, scope, now()));
+		scheduleMomentPush();
+	}
+
+	/**
+	 * A moment only the chat feed reads: a new collection-log slot or a diary tier. Same queue and
+	 * push as the rest.
+	 */
+	void recordFeedMoment(Moment m) {
+		if (!momentsEnabled() || statsAreArtificial()) return;
+		moments.record(m);
+		scheduleMomentPush();
+	}
+
+	/** Debounce a moment push — a kill's two loot events and a pet's chat lines collapse into one request. */
+	void scheduleMomentPush() {
+		scheduleMomentPush(MOMENT_PUSH_COALESCE_MS);
+	}
+
+	/**
+	 * A death is one event with nothing to wait for (a pet is several chat lines that name it bit by
+	 * bit), so it goes out after a beat instead of the full coalescing window: the feed shows it while
+	 * the player is still looking at the death screen.
+	 */
+	static final long DEATH_PUSH_DELAY_MS = 1_000;
+
+	void scheduleMomentPush(long delayMs) {
+		synchronized (moments) {
+			// While backing off, a new moment rides the retry already waiting instead of pulling it forward.
+			if (momentFailures > 0 && momentPushTask != null && !momentPushTask.isDone()) return;
+			momentPushTask = reschedule(momentPushTask, this::flushMomentPush, delayMs);
+		}
+	}
+
+	/**
+	 * Send the queued moments.
+	 *
+	 * <p>The batch stays queued until the site confirms it, so a failed push retries with nothing
+	 * lost — and since every entry is keyed, a push that succeeded but whose reply we never saw
+	 * stores nothing the second time.
+	 */
+	void flushMomentPush() {
+		if (!momentsEnabled() || moments.isEmpty()) return;
+		var batch = moments.nextBatch();
+		if (batch.isEmpty()) return;
+		try {
+			apiClient.submitMoments(batch);
+		} catch (PermanentSubmissionException e) {
+			// The site will never take this batch; drop it rather than resend it forever.
+			log.warn("Moments refused: {}", e.getMessage());
+			moments.onSent(batch);
+			return;
+		} catch (IOException e) {
+			synchronized (moments) {
+				momentPushTask = reschedule(momentPushTask, this::flushMomentPush,
+						RetryPolicy.backoffMs(++momentFailures, MOMENT_PUSH_COALESCE_MS, CoalescedPush.RETRY_CAP_MS, Math.random()));
+			}
+			return;
+		}
+		synchronized (moments) {
+			momentFailures = 0;
+		}
+		moments.onSent(batch);
+		// More than one batch's worth waiting (a long offline stretch) — keep going.
+		if (!moments.isEmpty()) scheduleMomentPush();
+	}
+
+	/** Persist the per-event counters to the config store so a restart resumes them. Call under counterLock. */
+	void persistCounters() {
+		cfgSet(CFG_COUNTER_EVENT, "" + counterEventId);
+		cfgSet(CFG_COUNTER_DEATHS, "" + eventDeaths);
+		cfgSet(CFG_COUNTER_LOOTGP, "" + eventLootGp);
+		cfgSet(CFG_COUNTER_PVP, "" + eventPvpKills);
+		cfgSet(CFG_COUNTER_BIGHIT, "" + eventBiggestHit);
+		cfgSet(CFG_COUNTER_MINUTES, "" + eventMinutes);
+		cfgSet(CFG_COUNTER_CATASKS, "" + eventCaTasks);
+	}
+
+	/**
+	 * Fold a kill's loot into the vestige rotation of whichever boss dropped it, and say where the
+	 * player now stands. Independent of bingo: the cycle is account state, so it keeps counting with
+	 * no event running, and it never gates on tracking being enabled.
+	 */
+	void trackVestigeRolls(String source, Collection<ItemStack> items) {
+		if (pluginConfig == null || pluginConfig.rollTables == null || empty(items)) return;
+		var table = pluginConfig.rollTables.stream().filter(t -> t != null && t.boss != null && t.boss.equalsIgnoreCase(source)).findFirst().orElse(null);
+		if (table == null) return;
+		var rsn = getLocalPlayerName();
+		var rsnKey = rsn == null ? "" : rsn.trim().toLowerCase(ROOT);
+		if (vestigeRolls == null || !rsnKey.equals(vestigeRollsRsn)) {
+			vestigeRolls = VestigeRolls.parse(cfgGet(accountKey(CFG_VESTIGE_ROLLS, rsnKey)));
+			vestigeRollsRsn = rsnKey;
+		}
+		for (var item : items) {
+			// Each unique in the loot is its own roll — a kill that somehow hands you two advances
+			// the cycle twice, which is what the table did.
+			var r = vestigeRolls.record(table, item.getId());
+			if (r == null) continue;
+			cfgSet(accountKey(CFG_VESTIGE_ROLLS, rsnKey), vestigeRolls.serialise());
+			sendChatMessage(table.boss + ": " + r.line);
+			// Remembered for the drop post, which is built moments later off the same loot event.
+			lastVestigeLine = r.line;
+			lastVestigeLineAt = now();
+		}
+	}
+
+	/**
+	 * What this client can see of its company right now: roster teammates in the instance, and the
+	 * party headcount. Deliberately two signals — names are reliable for a single-arena boss and
+	 * useless inside a raid (the party splits across rooms), while the raid party varbits are
+	 * reliable exactly there. The server decides what to do with them; a client never suppresses
+	 * its own submission, because two clients that can't see each other would both stay quiet.
+	 */
+	CoopFingerprint coopFingerprint() {
+		List<String> teammates = new ArrayList<>();
+		var mine = myTeamRoster();
+		if (!mine.isEmpty()) {
+			var me = Rsn.normalize(getLocalPlayerName());
+			// Copy before iterating: the set is written from the game tick, and this runs off a
+			// kill credit on the same thread today — but a snapshot costs nothing and can't throw.
+			for (var seen : new ArrayList<>(instancePlayersSeen)) {
+				var n = Rsn.normalize(seen);
+				if (!n.isEmpty() && !n.equals(me) && mine.contains(n)) teammates.add(n);
+			}
+		}
+		var fp = new CoopFingerprint(teammates, partySize());
+		return fp.isEmpty() ? null : fp;
+	}
+
+	/** A number this plugin stored in config; 0 when it's missing or corrupt. */
+	long cfgLong(String key) {
+		try {
+			var v = cfgGet(key);
+			return empty(v) ? 0 : Long.parseLong(v.trim());
+		} catch (RuntimeException e) {
+			return 0;
+		}
+	}
+
+
+
+
+
+
+	/**
+	 * Logs a tracking-suppression reason once per session at INFO. The gates this guards run
+	 * for every loot/kill/chat signal, so unconditional logging would flood client.log —
+	 * once per reason keeps the log diagnostic ("send me your client.log") without the spam.
+	 */
+	void logTrackingSuppressed(String reason) {
+		if (loggedSuppressions.add(reason)) log.info("Tracking off: {}", reason);
+	}
+
+	static int sizeOf(Map<?, ?> map) {
+		return map == null ? 0 : map.size();
+	}
+
+	static int sizeOf(List<?> list) {
+		return list == null ? 0 : list.size();
+	}
+
+	/** True — with the reason logged, once a session — when tracking is off (see trackingGateReason). */
+	boolean trackingOff() {
+		var gate = trackingGateReason();
+		if (gate != null) logTrackingSuppressed(gate);
+		return gate != null;
+	}
+
+	/** The suppression reason for the shared config gates, or null when tracking is live. */
+	String trackingGateReason() {
+		var c = pluginConfig;
+		return c == null ? "no event config" : !c.live() ? "no live board" : c.quiet ? "world not counted" : null;
+	}
+
+	/* -------------------------------------------------------------- */
+ /* Clan notifications — deaths, rare drops, pets (posted to Discord */
+ /* via the site, independent of bingo state).                     */
+ /* -------------------------------------------------------------- */
+	/** When our own death was last handled, so the chat line below never counts the same one twice. */
+	long ownDeathAt;
+
+	/**
+	 * Our own death: LMS placement, the recap counter, the clan feed and the deaths channel. From
+	 * ActorDeath, or from "Oh dear, you are dead!" for a scripted death that fires none (the
+	 * Colosseum's doom).
+	 */
+	void ownDeath() {
+		ownDeathAt = now();
+		// LMS: dying while the BR HUD reads N survivors means we placed Nth. Record before
+		// the notification gates — placement tracking is independent of death notifications.
+		// A counter never read (0) is an unknown place, not 2nd: guessing 2nd credited top-2
+		// tiles for deaths that could have been anywhere in the game.
+		if (lmsInGame && !lmsPlacementRecorded && lmsSurvivors > 0) recordLmsPlacement(Math.max(lmsSurvivors, 2));
+		// Recap counter — count the death for the "Wipe Magnet" superlative even if death
+		// notifications are off (still gated on an active event inside).
+		recordEventDeath();
+		// Clan feed — WHAT killed us, which is the half the recap counter throws away. Dying to
+		// the boss everyone is racing that week is the story; dying in general is a number.
+		// Recorded here rather than beside the post below, so the drops channel being off can't
+		// erase it.
+		var death = resolveDeathSource();
+		recordDeathMoment(death);
+		var me = me();
+		if (me == null || !me.deaths) return;
+		// The site words the post (the person's death message, or now and then a fun one).
+		var facts = facts("death")
+				.put("source", death.source).put("sourceKind", death.sourceKind);
+		if (death.pile > 0) facts.put("pile", death.pile);
+		captureFrameAsync(png -> apiClient.postNotification("deaths", null, facts, png, "soulrend-death.png"));
+	}
+
+	@Subscribe
+	void onActorDeath(ActorDeath event) {
+		// Runs on the client thread — keep this cheap: a reference check + (optionally) a frame
+		// request. Encoding and the network send happen off-thread.
+		var actor = event.getActor();
+		var name = actor.getName();
+		var named = !empty(name);
+
+		// Remember the last NPC that died near us so a timed "Duration:" line can attribute itself
+		// to the boss we just killed without a hardcoded activity table.
+		if (actor instanceof NPC && named) {
+			lastNpcDeathName = name;
+			lastNpcDeathAt = now();
+		}
+
+		// Deathless raids: any player dying while we're inside an instance counts against the
+		// current run (raid instances are private, so any player here is a party member).
+		if (actor instanceof Player && wasInInstance) instancePlayerDeaths++;
+
+		// Our own death → deaths channel.
+		if (actor == client.getLocalPlayer()) {
+			ownDeath();
+			return;
+		}
+
+		// A player we damaged dying → our PvP kill. ActorDeath fires on the tick the death
+		// animation starts (target at 0 HP) — the moment we want the screenshot, and a reliable
+		// signal even for loot-key kills (which produce no ground loot and only a random taunt
+		// message). Damage attribution (a hitsplat we dealt within the window) says the kill is
+		// ours; the Player gives the victim name for the roster / RSN-bounty match. Consumed once
+		// so a single death credits once. Caveat: if two attackers both damaged the victim, both
+		// credit — the baked screenshot is the audit trail.
+		if (actor instanceof Player) {
+			var vname = name;
+			if (named) {
+				var now = now();
+				boolean ours;
+				synchronized (lastDamagedPlayerAt) {
+					lastDamagedPlayerAt.values().removeIf(t -> (now - t) > PVP_KILL_ATTRIBUTION_MS);
+					var last = lastDamagedPlayerAt.remove(vname.toLowerCase());
+					ours = last != null && (now - last) <= PVP_KILL_ATTRIBUTION_MS;
+				}
+				if (ours) {
+					// Recap counter first: ANY dangerous-PvP kill feeds the PKer superlative,
+					// pvp tiles on the board or not. Tile credit + notify keep their own gates.
+					if (inDangerousPvp()) recordEventPvpKill();
+					creditPvpKillTiles(vname);
+					var me = me();
+					if (me != null && me.pvp) notifyPvpKill(vname);
+				}
+			}
+		}
+	}
+
+	/** True when the current event config carries any PvP-kill tiles. */
+	boolean hasPvpTiles() {
+		return rules.has("pvp") || rules.has("pvpLoot");
+	}
+
+	/**
+	 * True when the recap PvP-kill counter alone wants damage→death attribution: an active event
+	 * with auto-tracking on. Kept to cheap reference checks — this runs per hitsplat; the full
+	 * tracking gate applies later inside ensureCounterEvent().
+	 */
+	boolean pvpCounterActive() {
+		var cfg = pluginConfig;
+		return cfg != null && cfg.event != null && SoulrendOverlay.isEventActive(cfg.event);
+	}
+
+	/** Is any board this character is on live? (Every one of them is tracked.) */
+	boolean live() {
+		var cfg = pluginConfig;
+		return cfg != null && cfg.live();
+	}
+
+	/** Dangerous PvP only — the Wilderness or a PvP world. Safe minigames (LMS, Soul Wars,
+	 *  Castle Wars, PvP Arena) and DMM never count as PKs. Client thread (varbit read). */
+	/**
+	 * Client thread, for every menu entry as it's added, after other plugins (priority -1): a
+	 * Supporter's name wears their colours on a player's right-click options ("Trade with Name"),
+	 * the same as in chat. Display only, from the public flair list; nothing about who's around is
+	 * sent. Never in PvP areas: there a colour must not single anyone out.
+	 */
+	@Subscribe(priority = -1)
+	void onMenuEntryAdded(MenuEntryAdded event) {
+		if (!menusFlair() || chatFlair.isEmpty()) return;
+		var entry = event.getMenuEntry();
+		var p = entry.getPlayer();
+		var name = p == null ? null : p.getName();
+		if (name == null || inDangerousPvp() || client.getWorldType().contains(WorldType.DEADMAN)) return;
+		var target = entry.getTarget();
+		var m = menuNamePattern(name).matcher(target == null ? "" : target);
+		if (!m.find()) return;
+		var painted = chatFlair.decorateReadable(name, null, 0, false);
+		if (painted != null) entry.setTarget(target.substring(0, m.start()) + painted + target.substring(m.end()));
+	}
+
+	String menuFlairName;
+	Pattern menuFlairPattern;
+
+	/** "<col=ffffff>Name" in a menu target (spaces may be the game's nbsp); cached for the last name. */
+	Pattern menuNamePattern(String name) {
+		if (!name.equals(menuFlairName)) {
+			var body = Pattern.quote(name.replace('\u00a0', ' ')).replace(" ", "\\E[ \u00a0]\\Q");
+			menuFlairPattern = Pattern.compile("(?:<col=([0-9a-fA-F]{6})>)?" + body);
+			menuFlairName = name;
+		}
+		return menuFlairPattern;
+	}
+
+	boolean inDangerousPvp() {
+		// Varbits aren't loaded before login; reading one there throws.
+		return client.getGameState() == GameState.LOGGED_IN && client.getVarbitValue(VarbitID.INSIDE_WILDERNESS) == 1
+				|| client.getWorldType().contains(WorldType.PVP);
+	}
+
+	/**
+	 * Posts a PvP kill to the kills channel. Called from onActorDeath once the kill is already
+	 * attributed to us (damage within the window), so this just applies the channel toggle and
+	 * posts. Runs on the client thread; screenshot + network send are deferred.
+	 */
+	void notifyPvpKill(String name) {
+		var message = buildKillMessage(getLocalPlayerName(), name);
+		captureFrameAsync(png -> apiClient.postNotification("pvpKills", message, null, png, "soulrend-pvp-kill.png"));
+	}
+
+	/**
+	 * Credits PvP-kill bingo tiles for a kill attributed to us — called from onActorDeath when a
+	 * player we damaged (within the attribution window) dies. Using the death (not a chat line)
+	 * makes it work for loot-key kills, which produce only a random taunt message and no ground
+	 * loot. Only dangerous PvP counts — the Wilderness or a PvP world — so safe minigames (LMS,
+	 * Soul Wars, Castle Wars, PvP Arena) and DMM can't farm the tile. Selector semantics:
+	 * "team:other" matches any event participant on a different team (via the pvpRoster index —
+	 * so the victim must be enrolled on a team with a matching RSN); "rsn:&lt;name&gt;" matches
+	 * that exact player, enrolled or not. Amount 1 per kill through the shared proof pipeline (the
+	 * death fires on the kill tick — the frame still shows the fight).
+	 */
+	void creditPvpKillTiles(String victimName) {
+		if (trackingOff() || !hasPvpTiles()) return;
+		if (!inDangerousPvp()) {
+			logTrackingSuppressed("PvP kill outside dangerous PvP (Wilderness / PvP world) — not counted");
+			return;
+		}
+		var victim = Rsn.normalize(victimName);
+		emit(rules.event("pvp", RuleEngine.named(victim), 0, null, null, "what", victimName));
+		// A min-loot floor is checked against the kill's LOOT, which only arrives in a later
+		// PlayerLootReceived — park the kill and let that event credit it.
+		if (rules.has("pvpLoot")) {
+			var now = now();
+			synchronized (pendingMinLootKillAt) {
+				pendingMinLootKillAt.values().removeIf(t -> (now - t) > PVP_MINLOOT_LOOT_WINDOW_MS);
+				pendingMinLootKillAt.put(victim, now);
+			}
+		}
+	}
+
+	/**
+	 * Credits PvP min-loot tiles from a kill's loot — called from onPlayerLootReceived. If we parked a
+	 * kill on this victim at death (pendingMinLootKillAt), the loot is priced once and every tile whose
+	 * floor it reaches is credited; the parked entry is consumed so one kill credits at most once per tile.
+	 */
+	void creditPvpMinLootKillTiles(String victimName, Collection<ItemStack> items) {
+		if (!rules.has("pvpLoot") || empty(items) || victimName == null) return;
+		var victim = Rsn.normalize(victimName);
+		var now = now();
+		synchronized (pendingMinLootKillAt) {
+			var parkedAt = pendingMinLootKillAt.remove(victim); // consume — one credit per parked kill
+			if (parkedAt == null || (now - parkedAt) > PVP_MINLOOT_LOOT_WINDOW_MS) return;
+		}
+		if (trackingGateReason() != null) return;
+		emit(rules.event("pvpLoot", RuleEngine.named(victim), haulValue(items), null, null, "what", victimName));
+	}
+
+	String buildKillMessage(String killer, String victim) {
+		var who = empty(killer) ? "Someone" : killer;
+		return "**" + who + "** just killed **" + victim + "**!";
+	}
+
+	/**
+	 * Reports loot that might post to the rare-drops channel; the site judges it (lib/notifyDrops) against
+	 * the person's floors, which live there now. Here only the screenshot gate: worth the value floor, or
+	 * on the site's rare table for this source. A loot key (the "Loot Chest" open) is ONE unit, gated by
+	 * its contents' total; the key item itself is skipped everywhere (its contents fire their own
+	 * LootReceived on open). Client thread (loot fires there), so item lookups are safe; screenshots and
+	 * network sends are deferred off-thread.
+	 */
+	void maybeNotifyRareDrop(String source, Collection<ItemStack> items, String sourceKind) {
+		var me = me();
+		if (me == null || !me.drops || empty(items)) return;
+		var now = now();
+		var key = isLootKeyEvent(source);
+		var f = dropPost(source, sourceKind, killCountFor(source)).flag("judge", true).flag("key", key);
+		long total = 0;
+		int n = 0;
+		for (var item : items) {
+			int itemId = item.getId();
+			var iname = itemName(itemId);
+			if (isLootKey(iname)) continue;
+			int qty = Math.max(1, item.getQuantity());
+			var value = itemUnitValue(itemId) * qty;
+			total += value;
+			if (!key) {
+				// Prestige items always post, on their own, so an untradeable like an Infernal cape never
+				// shows a misleading "0 gp" alongside others. An allowlist item NEVER also takes the regular
+				// path — even when its own dedup suppresses this fire — or a second loot event for the same
+				// kill (NpcLootReceived + LootReceived) would post a duplicate "Rare drop" for it. By item id
+				// first (reliable for untradeables), then the name allowlist.
+				if (notableItemIds.contains(itemId) || isAlwaysNotifyItem(iname)) {
+					if (claimAllowlistNotify(iname, now)) postNotable(iname, "loot", source, sourceKind, itemId, qty, value, killCountFor(source));
+					continue;
+				}
+				// Per-item dedup also drops the duplicate fire of a kill and a follow-up loot event.
+				if (!(me.dropMin > 0 && value >= me.dropMin || rules.rare(sourceKind, source, itemManager.canonicalize(itemId)))
+					|| !claim(lastRareNotifyAt, itemId, now, RARE_DEDUP_WINDOW_MS)) continue;
+			}
+			f.item(itemId, iname, qty, value);
+			n++;
+		}
+		if (n == 0 || key && (me.keyMin <= 0 || total < me.keyMin
+			|| !claim(lastAggregateNotifyAt, source == null ? "" : source, now, RARE_DEDUP_WINDOW_MS))) return;
+		// Where this leaves their vestige rotation, when the drop was a roll of one (set moments ago by
+		// trackVestigeRolls off the same loot event). The site keeps it on a single-item post.
+		var rollLine = lastVestigeLine;
+		if (rollLine != null && now - lastVestigeLineAt < VESTIGE_LINE_WINDOW_MS) {
+			f.put("note", rollLine);
+			lastVestigeLine = null;
+		}
+		postDrop(f);
+	}
+
+	/**
+	 * True when the item is on the clan's always-notify list. The site sends the whole list (its
+	 * defaults included, so a clan can remove one); the baked-in copy is only for no config yet.
+	 */
+	boolean isAlwaysNotifyItem(String name) {
+		if (empty(name)) return false;
+		var n = name.toLowerCase();
+		var cfg = pluginConfig;
+		for (var pattern : cfg == null || cfg.alwaysNotifyItems == null ? text.alwaysNotify : alwaysNotifyLower) if (n.contains(pattern)) return true;
+		return false;
+	}
+
+	/**
+	 * Reserves the right to post a prestige item, returning false if it was
+	 * already posted within the dedup window. Keyed by name so the loot event
+	 * and the collection-log unlock message can't both fire for the same item.
+	 */
+	boolean claimAllowlistNotify(String name, long now) {
+		return claim(lastAllowlistNotifyAt, name.toLowerCase(), now, RARE_DEDUP_WINDOW_MS);
+	}
+
+	/**
+	 * Record {@code key} as seen at {@code now} — unless it was already seen within {@code windowMs},
+	 * in which case this is the duplicate and nothing changes. True when this one counts.
+	 */
+	static <K> boolean claim(Map<K, Long> seen, K key, long now, long windowMs) {
+		synchronized (seen) {
+			var last = seen.get(key);
+			if (last != null && now - last < windowMs) return false;
+			seen.put(key, now);
+			return true;
+		}
+	}
+
+	/**
+	 * Posts a prestige item unlocked via the collection log — the reliable
+	 * signal for awarded items (Infernal cape, Dizana's quiver, …) that don't
+	 * fire a loot event. Only allowlisted items post; shared name-dedup with
+	 * the loot path stops a double post.
+	 */
+	void maybeNotifyCollectionUnlock(String itemName) {
+		var me = me();
+		if (me == null || !me.drops || empty(itemName) || !isAlwaysNotifyItem(itemName)
+				|| !claimAllowlistNotify(itemName, now())) return;
+		// No source came with this line — the collection log says what, never from where — so only a
+		// clan override that named no sources ("guaranteed wherever it drops") can answer the
+		// guaranteed question. No item id either (the message gives only a name), so no value.
+		postNotable(itemName, "unlock", null, null, -1, 1, 0, null);
+	}
+
+	/** A notable item's drop post; the site sets its earned / guaranteed / lucky-drop flags (lib/notifyDrops). */
+	void postNotable(String name, String via, String source, String sourceKind, int itemId, int qty,
+			long value, Integer kc) {
+		postDrop(dropPost(source, sourceKind, kc).item(itemId, name, qty, value).put("notable", via).flag("judge", true));
+	}
+
+	/**
+	 * Posts a NEW collection-log slot to the clan achievements channel.
+	 *
+	 * The unlock line is already parsed here to credit bingo tiles; this turns the same signal into
+	 * the post other notifiers have had for years. Deliberately separate from
+	 * {@link #maybeNotifyCollectionUnlock}: that one is the prestige allowlist shouting at the drops
+	 * channel, this is every other slot filling in quietly next to diaries and combat tasks. An
+	 * allowlisted item is skipped here so the two never double-post the same unlock.
+	 *
+	 * Carries the log's own completion count ("548/1712 (32.0%)") when the client can answer for it,
+	 * which it can't until the collection log has synced this session — the field is dropped in that
+	 * case rather than guessed at.
+	 */
+	void maybeNotifyClogSlot(String itemName) {
+		var me = me();
+		if (me == null || !me.clog || empty(itemName)) return;
+		// The prestige path already posted this one to the drops channel. And the unlock line can echo
+		// on more than one chat channel; the shared name dedup keeps this to one post per item.
+		if (isAlwaysNotifyItem(itemName)
+				|| !claimAllowlistNotify(itemName, now())) return;
+
+		// How much of the log this fills in (0 until the log has synced this session; the site then
+		// leaves the count and rank out rather than guessing).
+		var f = facts("clogSlot").put("item", itemName)
+				.put("itemId", resolveItemIdByName(itemName))
+				.put("slots", ActivityStats.clogSlots(client::getVarpValue))
+				.put("slotsMax", ActivityStats.clogSlotsMax(client::getVarpValue));
+		// This item's own source first. The fallback still answers for an unlock with no loot event
+		// behind it at all — a skilling pet, a quest reward — where "the last thing that dropped"
+		// is the only signal there is.
+		var source = sourceForLootedItem(itemName);
+		if (source == null) source = freshLootSource();
+		// The kill count when it finally dropped. Absent when the source keeps none we can read.
+		if (source != null) f.put("source", source).put("kc", killCountFor(source));
+		postWithScreenshot("collectionLog", f, "soulrend-clog.png");
+	}
+
+	/**
+	 * Item id for a name we only know as text (the collection-log line gives no id). Prefers ids seen
+	 * in a recent loot event — that covers untradeables the GE search will never return — and falls
+	 * back to an exact-name GE lookup. Null when neither knows it; the post simply loses its sprite.
+	 */
+	Integer resolveItemIdByName(String name) {
+		var key = name.toLowerCase(ROOT);
+		var now = now();
+		synchronized (recentLootIds) {
+			pruneLoot(now);
+			var hit = recentLootIds.get(key);
+			if (hit != null) return hit.itemId;
+		}
+		return findTradeableItemId(name);
+	}
+
+	/**
+	 * What this specific item fell out of.
+	 *
+	 * THE BUG THIS FIXES. The source used to be "whatever loot event happened most recently", which
+	 * is right for a drop announced the instant it lands and wrong for anything that arrives on its
+	 * own schedule. A clue reward is the clean example: kill a Saradomin wizard, open the casket it
+	 * eventually led to, and the collection-log line for Enchanted top was stamped `Saradomin
+	 * wizard` — the thing the player last hit, not the thing the item came out of.
+	 *
+	 * The per-item memory was already being kept for the sprite lookup; it simply did not record
+	 * where each item came from. Now it does, so the answer is about the item rather than the clock.
+	 */
+	String sourceForLootedItem(String itemName) {
+		if (empty(itemName)) return null;
+		var now = now();
+		synchronized (recentLootIds) {
+			pruneLoot(now);
+			return sourceOf(recentLootIds, itemName, now, CLOG_LOOT_DEDUP_MS);
+		}
+	}
+
+	/** The lookup itself, free of plugin state so the attribution can be tested directly. */
+	static String sourceOf(
+			Map<String, RecentItem> seen, String itemName, long now, long windowMs) {
+		if (empty(itemName)) return null;
+		var hit = seen.get(itemName.toLowerCase(ROOT));
+		if (hit == null || now - hit.at > windowMs) return null;
+		return !empty(hit.source) ? hit.source : null;
+	}
+
+	/**
+	 * Remember the items (and where they came from) in a loot event, so a collection-log line landing
+	 * moments later can name the source and draw the right sprite. Bounded by the same window the
+	 * clog/loot dedup already uses; entries expire rather than accumulating.
+	 */
+	void rememberLootForClog(String source, String sourceKind, Collection<ItemStack> items) {
+		if (empty(items)) return;
+		var now = now();
+		synchronized (recentLootIds) {
+			pruneLoot(now);
+			for (var it : items) {
+				if (it == null || it.getId() <= 0) continue;
+				var name = itemName(it.getId());
+				if (!empty(name)) recentLootIds.put(
+						name.toLowerCase(ROOT),
+						new RecentItem(it.getId(), now, source));
+			}
+			if (!empty(source)) {
+				lastLootSource = source;
+				lastLootSourceKind = sourceKind;
+				lastLootSourceAt = now;
+			}
+		}
+	}
+
+	/** Under the recentLootIds lock: forget loot older than the clog window. */
+	void pruneLoot(long now) {
+		recentLootIds.values().removeIf(e -> now - e.at > CLOG_LOOT_DEDUP_MS);
+	}
+
+	/** An item id seen in a recent loot event, with the time it landed and what it fell out of. */
+	@RequiredArgsConstructor
+	static final class RecentItem {
+
+		final int itemId;
+		final long at;
+		/** The loot event this item was actually in — not merely the latest one. */
+		final String source;
+	}
+
+	/**
+	 * True when this loot event is an opened loot key ("Loot Chest"), not a
+	 * regular drop.
+	 */
+	boolean isLootKeyEvent(String source) {
+		if (source == null) return false;
+		var s = source.toLowerCase();
+		return s.equals("loot chest") || s.contains("loot key");
+	}
+
+	/**
+	 * True when the item (by name) is a loot key — its contents fire a separate
+	 * LootReceived when opened.
+	 */
+	static boolean isLootKey(String name) {
+		return name != null && name.toLowerCase().contains("loot key");
+	}
+
+	/**
+	 * Item display name, or "Item {id}" as a fallback. Safe on the client
+	 * thread.
+	 */
+	String itemName(int itemId) {
+		try {
+			var comp = itemManager.getItemComposition(itemId);
+			if (comp != null && comp.getName() != null) return comp.getName();
+		} catch (Exception ignored) {
+		}
+		return "Item " + itemId;
+	}
+
+	/**
+	 * The raid modes the game appends to a base name. A CLOSED SET, deliberately.
+	 *
+	 * The first attempt at this accepted any extra words after the base, on the reasoning that "a
+	 * mode always adds words". It does — but so does a longer unrelated name once punctuation is
+	 * stripped for matching: "Kree'Arra" normalises to "kree arra", so the apostrophe manufactures
+	 * exactly the word boundary the check was leaning on, and "Kree" would have matched it. There
+	 * are four of these in the game and they never change without a raid release, so naming them is
+	 * both safer and more honest than a shape test.
+	 */
+	static final Set<String> RAID_MODE_SUFFIXES = Set.of("challenge mode", "entry mode", "expert mode", "hard mode");
+
+	/**
+	 * Does a kill-count line for {@code kcName} describe a kill of {@code source}?
+	 *
+	 * True for the same activity, and for any MODE of it — "Tombs of Amascut" is credited by
+	 * "Tombs of Amascut: Expert Mode", because RuneLite's loot event and the game's chat line are
+	 * naming the same raid.
+	 */
+	static boolean kcLineBelongsTo(String source, String kcName) {
+		if (source == null || kcName == null) return false;
+		var want = normalizeBossName(source);
+		var seen = normalizeBossName(kcName);
+		if (want.isEmpty() || seen.isEmpty()) return false;
+		if (seen.equals(want)) return true;
+		return seen.startsWith(want + " ") && RAID_MODE_SUFFIXES.contains(seen.substring(want.length() + 1));
+	}
+
+	/**
+	 * The server's drop knowledge, or null before a config. Read through a method rather than the
+	 * field so every caller sees the same null-safety.
+	 */
+	DropFacts dropFacts() {
+		var cfg = pluginConfig;
+		return cfg != null ? cfg.dropFacts : null;
+	}
+
+	/**
+	 * The kill count to stamp on a drop from {@code source}.
+	 *
+	 * A RAID REPORTS ITS LOOT UNDER THE BASE NAME. RuneLite's loot event says "Tombs of Amascut"
+	 * whichever mode you ran, while the game's kill-count line names the mode — "Your completed Tombs
+	 * of Amascut: Expert Mode count is: 220". Those are different keys, so looking the base name up
+	 * answered with whatever the NORMAL-mode count happened to be, and an Expert drop at 220 was
+	 * posted to Discord as "KC 54". Same shape for CoX Challenge Mode and ToB Hard Mode.
+	 *
+	 * The kill line always precedes the loot, so a recent line naming this source — or any mode of it
+	 * — is the one this drop belongs to. Outside that window nothing recent is claimed and the
+	 * per-name map answers as before, which is what a drop with no kill line (a clue casket, an
+	 * impling) still wants.
+	 */
+	Integer killCountFor(String source) {
+		var cfg = pluginConfig;
+		if (cfg != null && !cfg.showKillCount || source == null) return null;
+		if (lastKcName != null
+				&& now() - lastKcAtMs <= KC_ATTRIBUTION_WINDOW_MS
+				&& kcLineBelongsTo(source, lastKcName)) return lastKcValue;
+		return killCounts.get(source.toLowerCase());
+	}
+
+	/**
+	 * A pet drop waiting on its name before it posts.
+	 *
+	 * <p>The chat line that announces a pet doesn't say WHICH pet — it's the same sentence for a
+	 * Baby mole and a Tangleroot. The only line that names it is the collection-log unlock, which
+	 * follows a tick or two later, so the post waits for it rather than going out as "a pet".
+	 *
+	 * <p>This assumes the pet line lands FIRST, which is the order the game sends them. If it ever
+	 * arrived second the pet would post unnamed and the unlock would post separately — the same two
+	 * posts this code replaces, so the failure mode is the old behaviour rather than a broken one.
+	 */
+	@RequiredArgsConstructor
+	static final class PendingPet {
+
+		final boolean duplicate;
+		/** When the pet line landed — the name is only looked for inside {@link #PET_NAME_WINDOW_MS}. */
+		final long at = now();
+		/** Captured on the client thread when the pet line arrives. */
+		final String rsn;
+		final String source;
+		final String sourceKind;
+		final Integer killCount;
+		/**
+		 * Whether this pet will actually be POSTED. The wait for the name happens either way — the
+		 * clan's site feed wants it too — so this is what tells the collection-log line whether
+		 * standing down would leave the pet unannounced.
+		 */
+		final boolean announce;
+		/** The queued feed entry waiting for the same name, if any. */
+		final String momentKey;
+		String name;
+		/**
+		 * Where it really came from, and the count there — resolvable only once the name is known
+		 * (see DropSource.resolvePetSource). Null until then, and null afterwards for a pet nothing
+		 * can place, which is what makes the post fall back to {@link #source}.
+		 */
+		String resolvedSource;
+		Integer resolvedKc;
+		/** Resolved on the client thread with the collection-log name. */
+		Integer itemId;
+	}
+
+	final Object petLock = new Object();
+	PendingPet pendingPet;
+	/**
+	 * How long the pet post waits for its collection-log line. Long enough to cover the unlock
+	 * landing a tick or two later, short enough that the post still reads as immediate — and short
+	 * enough that it can't swallow an unrelated unlock from the next kill.
+	 *
+	 * <p>Six seconds, not two: with the player's own collection-log line switched off, the clan's copy is
+	 * the one that names it, and it can land a few ticks after the pet line — after a two-second wait
+	 * the pet had already posted as just "pet" and the name went out as a separate unlock.
+	 */
+	static final long PET_NAME_WINDOW_MS = 6_000;
+	/** How long a named pet still claims a line repeating its name (see claimPetName). */
+	static final long PET_RECLAIM_MS = 60_000;
+	PendingPet lastNamedPet;
+
+	// ---- Naming a pet with no chat line to say which ------------------------------------------
+	// The game also shows WHICH pet the moment it lands: a new follower ("being followed"), or a new
+	// pet item in the pack ("sneaking into your backpack"). What was there BEFORE the line is noted, so
+	// a pet already out or already in the bag is never taken for the new one. With a pet out AND a full
+	// pack the new one goes to Probita instead — nothing appears, and the name has to come from a line.
+	int petFollowerBefore = -1;
+	Set<Integer> petPackBefore = emptySet();
+
+	/** Client thread, at the pet line. */
+	void notePetSurroundings() {
+		var follower = client.getFollower();
+		petFollowerBefore = follower == null ? -1 : follower.getIndex();
+		Set<Integer> pack = new HashSet<>();
+		var inv = client.getItemContainer(InventoryID.INV);
+		if (inv != null) for (var it : inv.getItems()) if (it != null && it.getId() > 0) pack.add(it.getId());
+		petPackBefore = pack;
+	}
+
+	/** Client thread, each tick while a pet waits unnamed: name it off a new follower or a new pet item. */
+	void namePetFromSurroundings() {
+		PendingPet pet;
+		synchronized (petLock) {
+			pet = pendingPet;
+		}
+		if (pet == null || pet.name != null || now() - pet.at > PET_NAME_WINDOW_MS) return;
+		var follower = client.getFollower();
+		if (follower != null && follower.getIndex() != petFollowerBefore && follower.getName() != null) {
+			claimPetName(follower.getName());
+			return;
+		}
+		var inv = client.getItemContainer(InventoryID.INV);
+		if (inv == null) return;
+		for (var it : inv.getItems()) {
+			if (it == null || it.getId() <= 0 || petPackBefore.contains(it.getId())) continue;
+			var name = itemManager.getItemComposition(it.getId()).getName();
+			// The pack takes all sorts mid-fight; only a name the pet catalogue knows is the pet.
+			if (name != null && DropSource.petEntry(dropFacts(), name) != null) {
+				claimPetName(name);
+				return;
+			}
+		}
+	}
+
+	/**
+	 * Claim a collection-log unlock as the name of the pet we just noticed.
+	 *
+	 * <p>Returns the pet when this line was its name — which tells the caller two different things
+	 * it must not confuse: the unlock is already accounted for (so it is not ALSO a drop), and, if
+	 * that pet is going to be posted, the ordinary collection-log posts should stand down or the
+	 * same pet lands twice, once as 🐾 and once as 📕. A member who only wanted the site feed still
+	 * gets their normal clog post, because for them nothing else is going to mention it.
+	 */
+	PendingPet claimPetName(String itemName) {
+		if (empty(itemName)) return null;
+		PendingPet pet;
+		synchronized (petLock) {
+			// Already named — by the clan's broadcast, a follower, or the other copy of the log line —
+			// or posted a moment ago: a later line naming the SAME pet is that pet, not a new unlock
+			// to post again (the "Pet drop!" + separate "Dom" pair this used to produce).
+			var named = pendingPet != null && pendingPet.name != null ? pendingPet : lastNamedPet;
+			if (named != null && itemName.equalsIgnoreCase(named.name)
+					&& now() - named.at <= PET_RECLAIM_MS) return named;
+			if (pendingPet == null || pendingPet.name != null) return null;
+			pendingPet.name = itemName;
+			pet = pendingPet;
+			lastNamedPet = pet;
+		}
+		// Naming it is also what makes its SOURCE knowable: until now the only candidate was the
+		// last loot the client saw. Resolve once, here, so the clan feed and the Discord post can
+		// never disagree about which boss it came from.
+		var resolved = DropSource.resolvePetSource(dropFacts(), itemName, pet.source, killCounts);
+		synchronized (petLock) {
+			pet.resolvedSource = resolved;
+			pet.resolvedKc = resolved == null ? null
+					: (resolved.equalsIgnoreCase(pet.source) ? pet.killCount : killCountFor(resolved));
+			// ItemManager reads game/cache state: resolve it here, on the chat-event client thread,
+			// rather than two seconds later on our executor.
+			pet.itemId = resolveItemIdByName(itemName);
+		}
+		namePetMoment(pet.momentKey, itemName, resolved, pet.resolvedKc);
+		return pet;
+	}
+
+	/**
+	 * Note a pet drop. The source and kill count are captured NOW — by the time anything is sent the
+	 * player may have moved on, and "from Callisto at 1,204 KC" is the whole story of the drop.
+	 *
+	 * <p>The clan's feed is recorded unconditionally; only the Discord post is gated. They are
+	 * different things: switching off the drops channel is a statement about a channel, not about
+	 * whether the pet happened.
+	 */
+	void handlePetDrop(boolean duplicate) {
+		var src = lootSourceAt(now());
+		var source = src[0];
+		var kc = killCountFor(source);
+		var momentKey = recordPetMoment(source, src[1], kc);
+		// The server is the authority on whether a clan or personal destination exists. The cached
+		// notify flag can be stale (or only describe clan hooks while the player has a personal
+		// hook), and a pet is far too rare to discard because that snapshot said "none". Keep the
+		// player's own switch, then let /api/plugin/notify make the live routing decision.
+		var me = me();
+		var announce = me != null && me.pets && apiClient.isConfigured();
+
+		// Nothing is waiting on the name — no post to make and no feed entry to fill in — so don't
+		// park a pet nothing will ever collect: the next collection-log line would claim it.
+		if (!announce && momentKey == null) return;
+		var pet = new PendingPet(duplicate, getLocalPlayerName(), source, src[1], kc,
+				announce, momentKey);
+		notePetSurroundings();
+		synchronized (petLock) {
+			pendingPet = pet;
+		}
+		Runnable flush = () -> safely("petNotification", () -> flushPetNotification(pet));
+		if (later(flush, PET_NAME_WINDOW_MS) == null) flush.run();
+	}
+
+	/**
+	 * Post the pet, with whatever the wait turned up.
+	 *
+	 * <p>Every field here is omitted rather than guessed when it isn't known: a skilling pet fires no
+	 * loot event, so it has no source, no KC and no drop rate, and inventing any of those for a clan
+	 * channel would be worse than a shorter post.
+	 */
+	void flushPetNotification(PendingPet pet) {
+		synchronized (petLock) {
+			if (pendingPet == pet) pendingPet = null;
+		}
+		// The wait may have been for the site feed alone (drops channel off) — the name has been
+		// filled in by now either way, and there is nothing here to post.
+		if (!pet.announce) return;
+		// Where it ACTUALLY came from, settled in claimPetName the moment the name arrived (the feed
+		// took the same answer). A pet that never got named, or one nothing can place, falls back to
+		// the observed loot source — which is all this ever had.
+		var petName = pet.name;
+		var f = new NotifyFacts("pet", pet.rsn).put("name", petName).flag("duplicate", pet.duplicate);
+		synchronized (petLock) {
+			f.put("source", petName == null ? pet.source : pet.resolvedSource)
+					.put("kc", petName == null ? pet.killCount : pet.resolvedKc);
+		}
+		if (petName != null) {
+			// The site prices its rarity off the same tables the rare-drop posts use (lib/notifyDrops).
+			f.put("itemId", pet.itemId).put("sourceKind", pet.sourceKind);
+			// A skilling pet has no monster; its skill is the only true thing to say about where from.
+			var entry = DropSource.petEntry(dropFacts(), petName);
+			if (entry != null) f.put("skill", entry.skill);
+		}
+		postWithScreenshot("pets", f, "soulrend-pet.png");
+	}
+
+	/**
+	 * Handles a parsed combat-task completion (run a tick after the chat line
+	 * so the CA points varbit has settled). Posts the individual task if it
+	 * clears the configured min tier, and a separate tier-clear post when this
+	 * task pushed total points across a tier threshold.
+	 */
+	void handleCombatAchievements(List<PendingCaTask> batch) {
+		// Off in the dropdown silences every CA post, tier clears too; tile credit happened upstream.
+		var me = me();
+		List<String> tiers = me == null ? emptyList() : me.ca;
+
+		int total = client.getVarbitValue(VarbitID.CA_POINTS);
+		// Points before this batch — only used to detect a tier-threshold crossing. With no baseline
+		// yet, fall back to the current total so we never post a phantom tier clear.
+		int before = caPointsInitialized ? lastCaPoints : total;
+
+		// Tier clear: did the cumulative total cross any tier threshold across this batch?
+		CombatAchievementTier cleared = null;
+		for (var t : CombatAchievementTier.values()) {
+			int threshold = client.getVarbitValue(t.getThresholdVarbitId());
+			if (threshold > 0 && before < threshold && threshold <= total) cleared = t; // values() ascend, so the last match is the highest tier crossed
+		}
+		if (cleared != null && !tiers.isEmpty()) postCaTierClear(cleared);
+
+		// Individual tasks: post each FIRST-seen task at/above the configured floor, but only when
+		// this tick's completions actually raised the CA point total. Already-owned tasks re-fire the
+		// same chat line via the in-game "Repeat completion" setting — which we rely on so CA *tiles*
+		// can count tasks cleared before the event — without changing points, so gating on the delta
+		// keeps those recompletions out of the achievements channel. (A mixed tick containing both a
+		// genuine new task and a recompletion still posts the recompletion; the aggregate varbit can't
+		// attribute a per-task delta. That's rare — real spam is pure-recompletion ticks.) Dedup by
+		// task NAME so every genuinely new task in a multi-task tick still posts exactly once.
+
+		for (var pending : batch) {
+			var key = pending.task == null ? "" : pending.task.toLowerCase();
+			if (key.isEmpty() || !notifiedCaTasks.add(key)) continue; // unparseable, or already announced this session
+			if (total <= before) continue; // a recompletion: it changed nothing, so it is not news
+			// The feed and the counter take every genuinely new task and let the SITE decide which
+			// are worth showing — a tier floor belongs where the clan can change it without a
+			// plugin release. The chat announcement keeps its own local floor.
+			noteCombatTaskMoment(pending.tier, pending.task);
+			if (tiers.contains(pending.tier.name())) postCombatTask(pending.tier, pending.task, total);
+		}
+
+		lastCaPoints = total;
+	}
+
+	/**
+	 * Posts one completed combat task with what it was worth, the running total, and the next tier
+	 * unlock threshold — read from the same varbits the tier-clear check uses.
+	 *
+	 * Client thread (varbit reads happen here); the screenshot + send are deferred.
+	 */
+	void postCombatTask(CombatAchievementTier tier, String task, int totalPoints) {
+		// The next unlock is the lowest cumulative threshold still above the total; 0 once all are.
+		int next = 0;
+		for (var t : CombatAchievementTier.values()) {
+			int threshold = client.getVarbitValue(t.getThresholdVarbitId());
+			if (threshold > totalPoints && (next == 0 || threshold < next)) next = threshold;
+		}
+		postWithScreenshot("combatAchievements", facts("caTask").put("task", task)
+				.put("tier", tier.getDisplayName()).put("totalPoints", totalPoints).put("nextThreshold", next),
+				"soulrend-ca.png");
+	}
+
+	void postCaTierClear(CombatAchievementTier tier) {
+		postWithScreenshot("combatAchievements", facts("caTier").put("tier", tier.getDisplayName()),
+				"soulrend-ca-tier.png");
+	}
+
+	/**
+	 * Posts an achievement-diary tier completion to the clan achievements
+	 * channel with a screenshot of the moment, like a combat task.
+	 */
+	void maybeNotifyDiaryCompletion(String area, String tier) {
+		var me = me();
+		if (me == null || !me.diaries) return;
+		postWithScreenshot("diaries", facts("diary").put("area", area)
+				.put("tier", tier), "soulrend-diary.png");
+	}
+
+	/** Diary tiles: the site sent each tile's selectors as "area tier" keys, "*" for Any on either side. */
+	void creditDiaryTiles(String area, String tier) {
+		if (trackingOff()) return;
+		String a = RuleEngine.key(area), t = RuleEngine.key(tier);
+		emit(rules.event("diary", RuleEngine.named(a + " " + t, "* " + t, a + " *", "* *"), 0, null, null, "what", area + " " + tier));
+	}
+
+	/**
+	 * Combat Achievement tiles: the task's name or "any &lt;tier&gt;". The site counts a task once per tile
+	 * off its live proofs, so a "Repeat completion" re-fire can't farm a wildcard tile.
+	 */
+	void creditCombatTaskTiles(CombatAchievementTier tier, String task) {
+		if (trackingOff()) return;
+		emit(rules.event("ca", RuleEngine.named(RuleEngine.key(task), "any" + RuleEngine.key(tier.getDisplayName())), 0, null, null,
+				"what", task, "tier", tier.getDisplayName()));
+	}
+
+	/**
+	 * Does this board have tiles that can only credit off the in-game drop-notification line?
+	 *
+	 * <p>Drop and value tiles both do, for the corpse-looted bosses whose loot bypasses every loot
+	 * event the client raises (see {@link #creditDropFromChat}). The rest of the board does not care,
+	 * but the plugin cannot tell in advance which boss a tile's drop will come from, and the cost of
+	 * asking is one chat line against a silent 50m fang.</p>
+	 */
+	static boolean eventNeedsDropLines(PluginConfigResponse cfg, RuleEngine rules) {
+		return cfg != null && cfg.live() && rules.dropLines();
+	}
+
+	/** On the client thread, and only while logged in — the nudges read settings varbits. */
+	void whenLoggedIn(Runnable r) {
+		clientThread.invokeLater(() -> {
+			if (loggedIn()) r.run();
+		});
+	}
+
+	/**
+	 * One-time (per session) reminder to enable the in-game "Repeat completion" Combat
+	 * Achievement setting when the active event has incomplete CA tiles — without it, tasks
+	 * the player already owns never re-fire the completion line, so those tiles can never
+	 * track for them. Reads the setting's varbit, so the check runs on the client thread.
+	 */
+	void maybeNudgeCaRepeatSetting() {
+		if (caRepeatNudgeSent || !rules.has("ca") || !live()) return;
+		whenLoggedIn(() -> {
+			if (client.getVarbitValue(VarbitID.CA_TASK_RECOMPLETION_NOTIFICATIONS) == 1) return; // setting already on — nothing to remind about
+			caRepeatNudgeSent = true;
+			sendChatMessage("This event has Combat Achievement tiles — enable Settings > Combat Achievements"
+					+ " > \"Repeat completion\" so tasks you've already done can still count.");
+		});
+	}
+
+	/**
+	 * The in-game collection-log notification, which is what prints the line the plugin reads.
+	 *
+	 * <p>With it off, an unlock is invisible here: no achievements post, no tile credit, no
+	 * kill-count stamp. The clan broadcast covers it for anyone in a clan that announces slots —
+	 * that is the fallback in {@link #handleClogUnlock} — but a solo player, or a clan that doesn't
+	 * broadcast them, has nothing at all. Worth one line per account, since the cost of not saying
+	 * it is a log that silently never fills in.</p>
+	 *
+	 * <p>Only when the setting is OFF outright. The option has more than two values and the others
+	 * are not worth guessing at: a nudge that fires for a correctly-configured client is the kind
+	 * that teaches people to ignore the next one.</p>
+	 */
+	void maybeNudgeClogNotifications() {
+		var me = me();
+		if (clogNotifyNudgeSent || me == null || !me.clog) return;
+		whenLoggedIn(() -> {
+			if (client.getVarbitValue(VarbitID.OPTION_COLLECTION_NEW_ITEM) != 0) return;
+			clogNotifyNudgeSent = true;
+			sendChatMessage("Your collection log notifications are off in game (Settings > All settings > Chat"
+					+ " > \"Collection log - New addition notification\") — new slots won't post to the clan"
+					+ " unless your clan broadcasts them.");
+		});
+	}
+
+	/**
+	 * One-time (per session) reminder to enable the in-game loot drop notifications when clan
+	 * rare-drop posts are on. The "&lt;player&gt; received a drop: …" chat line those posts key
+	 * off for corpse-boss spill loot (Maggot King uniques — see creditDropFromChat) is Jagex's
+	 * opt-in loot notification: with the setting off, or its value threshold above the drop's
+	 * price, the line never prints and the plugin has nothing to parse — a 50m fang can pass
+	 * completely silently. Varbit read requires the client thread.
+	 */
+	void maybeNudgeLootNotifications() {
+		if (lootNotifyNudgeSent) return;
+		// TWO REASONS TO CARE, and only one of them used to be asked about. Clan rare-drop posts
+		// need the line, and so does a BOARD with drop or value tiles on it: the same corpse-boss
+		// loot that never posts also never credits (creditDropFromChat is what feeds both). Gating
+		// the reminder on the clan-post toggle meant a member who had turned posts off — or whose
+		// clan doesn't run them — played a bingo whose spill-loot tiles could not fire, and was
+		// never told why.
+		var me = me();
+		var forPosts = me != null && me.drops;
+		var forTiles = eventNeedsDropLines(pluginConfig, rules);
+		if (!forPosts && !forTiles) return;
+		whenLoggedIn(() -> {
+			var settingOn = client.getVarbitValue(VarbitID.OPTION_LOOTNOTIFICATION_ON) == 1;
+			// The plugin's own posting floor (enforced minimum 1m) — an in-game threshold above
+			// it would swallow lines for drops the clan channel wants to see.
+			long gameThreshold = client.getVarbitValue(VarbitID.OPTION_LOOTNOTIFICATION_VALUE);
+			// The threshold half is a CLAN-POST concern only: it is measured against the posting
+			// floor, and there is no equivalent number for a tile — a tile wants whatever the drop
+			// happens to be worth. So a board-driven reminder ends at "the setting is off".
+			if (settingOn && (!forPosts || gameThreshold <= me.dropMin)) return; // configured fine — the attribution line will fire for qualifying drops
+			lootNotifyNudgeSent = true;
+			sendChatMessage(!settingOn ? "Enable Settings > Chat > \"Loot drop notifications\" — " + (forTiles
+					? "this board has drop tiles, and bosses that spill their loot (Maggot King, Araxxor) only announce it on that line."
+					: "clan rare-drop posts for corpse-boss loot (Maggot King uniques) rely on that chat line.")
+					: "Your in-game loot notification threshold is above the clan rare-drop floor — lower it"
+					+ " (Settings > Chat > Loot drop notifications) or drops like Maggot King uniques won't post.");
+		});
+	}
+
+	/**
+	 * Reads the quest-completed scroll and posts the completion, gated by the
+	 * configured difficulty threshold (default Master &amp; up). Runs a tick
+	 * after the widget loads so the text child is populated; retries a couple
+	 * of ticks if the text lands late.
+	 */
+	void scheduleQuestScrollRead(int attemptsLeft) {
+		clientThread.invokeLater(() -> {
+			var text = client.getWidget(InterfaceID.Questscroll.QUEST_TITLE);
+			var raw = text != null ? text.getText() : null;
+			if (empty(raw)) {
+				if (attemptsLeft > 0) scheduleQuestScrollRead(attemptsLeft - 1);
+				return;
+			}
+			// A widget, so the angle-bracket form is what appears here — but it costs nothing to
+			// take the @ codes too, and the quest scroll is styled by the same game.
+			var plain = CHAT_TAG.matcher(raw).replaceAll(" ").replaceAll("\\s+", " ").trim();
+			var quest = parseQuestScroll(plain);
+			if (quest == null || quest.contains("partial completion")) return; // unparseable, or Hazeel Cult's "kind of completed" — not a completion
+			if (!announcedQuests.add(quest.toLowerCase())) return; // widget re-loaded for a quest already posted this session
+			postQuestCompletion(quest);
+			// The clan's achievements (the panel's Feed) and the chat feed, whatever the Discord setting:
+			// the site keys it by quest name, so a re-read scroll never lands twice.
+			recordFeedMoment(new Moment("quest", null, quest, 1, null, null, null, null, now(),
+					("quest|" + quest).toLowerCase(ROOT)));
+		});
+	}
+
+	/**
+	 * Parses the quest-completed scroll text into the quest name. Ported from
+	 * RuneLite's ScreenshotPlugin (BSD-2) so all the scroll's text variants
+	 * resolve correctly — RFD subquests become "Recipe for Disaster - X",
+	 * "completely completed Rag and Bone Man" becomes "Rag and Bone Man II",
+	 * and names genuinely containing "Quest" (Legends' Quest, Doric's Quest)
+	 * keep the word. Returns null when nothing matches. Package-private for
+	 * the unit test.
+	 */
+	static String parseQuestScroll(String text) {
+		var m1 = QUEST_PATTERN_1.matcher(text);
+		var m2 = QUEST_PATTERN_2.matcher(text);
+		var m = m1.matches() ? m1 : m2;
+		if (!m.matches()) return null;
+		var quest = m.group("quest");
+		var verb = m.group("verb") != null ? m.group("verb") : "";
+		if (verb.contains("kind of")) quest += " partial completion";
+		else if (verb.contains("completely")) quest += " II";
+		var questAndVerb = quest + verb;
+		if (RFD_TAGS.stream().anyMatch(questAndVerb::contains)) quest = "Recipe for Disaster - " + quest;
+		var questName = quest;
+		if (WORD_QUEST_IN_NAME_TAGS.stream().anyMatch(questName::contains)) quest += " Quest";
+		return quest;
+	}
+
+	/**
+	 * Posts a quest completion to the clan achievements channel when its difficulty (questTiers in
+	 * soulrend_text.json) clears the setting; an unlisted quest only posts on "All". Message-only.
+	 */
+	void postQuestCompletion(String questName) {
+		var me = me();
+		var difficulty = text.questTiers.get(questName.toLowerCase());
+		if (me == null || !me.quests.contains("*") && !me.quests.contains(difficulty)) return;
+		// Message-only, like a tier clear. Difficulty goes as its display form ("Experienced").
+		postWithScreenshot("quests", facts("quest")
+				.put("quest", questName).put("difficulty", difficulty == null ? null
+						: difficulty.charAt(0) + difficulty.substring(1).toLowerCase()), "soulrend-quest.png");
+	}
+
+	/**
+	 * True when the current world's stats aren't the player's real main-game progression, so level-up
+	 * and total-level milestones must be suppressed. PvP Arena hands out a preset max-stat account;
+	 * Leagues (SEASONAL) / Deadman / hardcore / Tournament / Beta / Fresh Start / Quest Speedrunning / LMS / no-save
+	 * worlds are separate saves or preset loadouts. Hopping onto one otherwise spams "level 99!" for
+	 * stats the player never trained.
+	 */
+	boolean statsAreArtificial() {
+		var w = client.getWorldType();
+		return w != null && !disjoint(w, ARTIFICIAL_WORLDS);
+	}
+
+	static final Set<WorldType> ARTIFICIAL_WORLDS;
+	static {
+		// Every separate-save mode (WorldInfo) plus the preset-loadout minigame worlds.
+		var w = EnumSet.copyOf(WorldInfo.SEPARATE_SAVE);
+		w.addAll(WorldInfo.PRESET);
+		ARTIFICIAL_WORLDS = unmodifiableSet(w);
+	}
+
+	/** Which level-ups the clan and the player's own webhooks want; the clan's dropped without a channel. */
+	LevelRules.Sets levelRules() {
+		var me = me();
+		return LevelRules.resolve(pluginConfig, me != null && me.levelsClan, modeThresholds());
+	}
+
+	/** The site's thresholds for this game-mode world, or null on the main game / an older site. */
+	ModeThresholds modeThresholds() {
+		var cfg = pluginConfig;
+		return cfg != null && WorldInfo.separateSave(client.getWorldType()) ? cfg.modeThresholds : null;
+	}
+
+	/** Level-ups may post here: the main game, or a mode its clan gave level rules (never a preset world). */
+	boolean levelsPost() {
+		var m = modeThresholds();
+		return WorldInfo.levelsPost(client.getWorldType(), m != null && m.levelRules != null);
+	}
+
+	void handleLevelMilestone(String skill, int prev, int level) {
+		// A 99 happens once per skill per account, so when one does not reach Discord there has to be
+		// something in the log saying which step dropped it. postNotification's own failure paths are
+		// log.debug — invisible at RuneLite's default level.
+		if (skill == null) return;
+		if (!levelsPost()) {
+			if (level >= 99 && prev < 99) log.info("99 {} not announced: world", skill);
+			return;
+		}
+		int at = LevelRules.skillMilestone(prev, level, levelRules());
+		if (at == 0) {
+			if (level >= 99 && prev < 99) log.info("99 {} not announced: no destination", skill);
+			return;
+		}
+		// Post a given skill's level once per session — the same level can arrive from StatChanged
+		// and the level-up chat line, and levels already held at login are pre-seeded.
+		var key = skill.toLowerCase();
+		if (at <= announcedLevel.getOrDefault(key, 0)) return;
+		announcedLevel.put(key, at);
+		log.info("Announcing {} {}.", skill, at);
+		// How far along they are. A level post is about skills rather than total, so it counts those —
+		// and a build not chasing max still gets it, because "12 of 23 skills at 99" is a fact about
+		// what they have done rather than a distance from somebody else's goal.
+		// Skill.OVERALL is a null tombstone, never in values().
+		int at99 = 0;
+		for (var sk : Skill.values()) at99 += client.getRealSkillLevel(sk) >= 99 ? 1 : 0;
+		postAchievement(facts("level").put("skill", skill)
+				.put("level", at).put("at99", at99).put("skills", Skill.values().length));
+	}
+
+	/**
+	 * Called on every skill level-up. Announces the highest round total this gain crossed that the
+	 * level rules want, or maxing. Uses the baselined total so we only fire on genuine crossings,
+	 * and skips the round post when this gain maxed.
+	 */
+	void handleTotalMilestone() {
+		// NOT gated on the Discord channel here. The gate moved down to the post itself, because this
+		// method also advances lastTotalLevel and feeds the clan's highlight feed — returning early
+		// for want of a webhook froze the baseline and lost the milestone from both.
+		if (!levelsPost() || statsUnsettled) return;
+		int total = client.getTotalLevel();
+		if (!totalLevelInitialized) {
+			// Login baseline missed (e.g. levelled before the first tick settled) — seed and skip.
+			lastTotalLevel = total;
+			totalLevelInitialized = true;
+			return;
+		}
+		if (total <= lastTotalLevel) return;
+		int prev = lastTotalLevel;
+		lastTotalLevel = total;
+
+		var rules = levelRules();
+		int max = maxTotalLevel();
+		if (prev < max && max <= total) {
+			recordLevelMoment(null, total, "max");
+			if (LevelRules.wantsMax(rules)) postTotalMilestone(total, true);
+			return; // maxing is the headline — don't also post the round total it passed
+		}
+		// The highlight feed keeps the fixed 1800, 1900, … whatever the Discord rules say.
+		int feed = LevelRules.totalMilestone(prev, total, new LevelRules.Sets(LevelRules.LEGACY_CLAN, null));
+		if (feed > 0) recordLevelMoment(null, feed, "total");
+		int milestone = LevelRules.totalMilestone(prev, total, rules);
+		if (milestone > 0) postTotalMilestone(milestone, false);
+	}
+
+	/**
+	 * Maximum possible total level, summed from the live Skill enum (adapts as
+	 * skills are added).
+	 */
+	int maxTotalLevel() {
+		return 99 * Skill.values().length;
+	}
+
+	/**
+	 * Is this account plainly not chasing 2277?
+	 *
+	 * THERE IS NO "PURE" ACCOUNT TYPE. RuneLite's AccountType knows Normal and the Ironman variants
+	 * and nothing else, because a pure is a BUILD rather than a flag — the game does not record the
+	 * intention, only the stats it produced. So this asks the one question the stats answer without
+	 * ambiguity: Defence 1. Nobody arrives at 99 Strength with Defence 1 by accident, and a level-3
+	 * skiller is the same answer for the same reason.
+	 *
+	 * It is used only to SUPPRESS a line, never to claim anything. Telling somebody who has chosen a
+	 * build that they are "435 levels from max" measures them against a goal they rejected, and the
+	 * cost of guessing wrong is a missing line rather than a wrong one.
+	 */
+	boolean buildIsNotChasingMax() {
+		return client.getRealSkillLevel(Skill.DEFENCE) == 1;
+	}
+
+
+	void postTotalMilestone(int total, boolean maxed) {
+		var f = facts("totalLevel").put("total", total).flag("maxed", maxed)
+				.put("milestone", maxed ? null : (Integer) total);
+		// Where this leaves them — from the LIVE total, not the milestone above: somebody who crossed
+		// 1800 on a level that took them to 1803 is 474 from max, not 477. Left out on a build not
+		// chasing max (the site also drops it on a max, where "0 to go" is noise).
+		if (!maxed && !buildIsNotChasingMax()) f.put("current", client.getTotalLevel()).put("max", maxTotalLevel());
+		postAchievement(f);
+	}
+
+	/** A post's facts about this character. */
+	NotifyFacts facts(String kind) {
+		return new NotifyFacts(kind, getLocalPlayerName());
+	}
+
+	/** A drop's facts, before its items. */
+	NotifyFacts dropPost(String source, String sourceKind, Integer kc) {
+		return facts("drop").put("source", source).put("sourceKind", sourceKind)
+				.put("kc", kc);
+	}
+
+	/** A drop post to the drops channel, with its screenshot. */
+	void postDrop(NotifyFacts f) {
+		postWithScreenshot("rareDrops", f, DROP_SHOT);
+	}
+
+	/**
+	 * Higher of GE price and high-alch value for a single item. Safe to call on
+	 * the client thread.
+	 */
+	long itemUnitValue(int itemId) {
+		long ge = 0, ha = 0;
+		try {
+			ge = Math.max(0, itemManager.getItemPrice(itemId));
+		} catch (Exception ignored) {
+		}
+		try {
+			var comp = itemManager.getItemComposition(itemId);
+			if (comp != null) ha = Math.max(0, comp.getHaPrice());
+		} catch (Exception ignored) {
+		}
+		return Math.max(ge, ha);
+	}
+
+	/**
+	 * What this person's posts do (lib/notifyPrefs, resolved by the site), or null before a config: nothing
+	 * posts. "Share clan posts" off silences the main game; seasonal worlds keep their own switch.
+	 */
+	/** Posts left this minute for watched lines, GE offers and other plugins' requests. */
+	int announceLeft;
+	long announceMinute;
+
+	synchronized boolean announceBudget() {
+		var m = now() / 60_000;
+		if (m != announceMinute) {
+			announceMinute = m;
+			announceLeft = 6;
+		}
+		return announceLeft-- > 0;
+	}
+
+	/** A game line one of the site's watches matches: the site parses, words and routes it. */
+	void watchLine(String line) {
+		var me = me();
+		if (me == null || me.watch == null) return;
+		for (var w : me.watch) {
+			var n = NotifyFacts.glob(w.g, line);
+			if (n < 0 || n < w.min || w.every > 0 && n % w.every != 0) continue;
+			if (announceBudget()) announce(facts("line").put("k", w.k).put("line", line), w.shot);
+			return;
+		}
+	}
+
+	void announce(NotifyFacts f, boolean shot) {
+		if (shot) postWithScreenshot("milestones", f, "soulrend-post.png");
+		else apiClient.postNotification("milestones", null, f, null, null);
+	}
+
+	final GrandExchangeOfferState[] geSlots = new GrandExchangeOfferState[8];
+
+	/** A finished Grand Exchange offer, when the player turned these on. A slot's first sighting is its baseline. */
+	@Subscribe
+	void onGrandExchangeOfferChanged(GrandExchangeOfferChanged e) {
+		var o = e.getOffer();
+		int slot = e.getSlot();
+		if (o == null || slot < 0 || slot >= geSlots.length) return;
+		GrandExchangeOfferState was = geSlots[slot], s = o.getState();
+		geSlots[slot] = s;
+		var me = me();
+		var min = me == null || me.on == null ? null : me.on.get("ge");
+		if (min == null || was == null || was == s || s != GrandExchangeOfferState.BOUGHT && s != GrandExchangeOfferState.SOLD
+			|| o.getSpent() < min || !announceBudget()) return;
+		announce(facts("ge").put("item", itemManager.getItemComposition(o.getItemId()).getName())
+			.put("itemId", o.getItemId()).put("qty", o.getQuantitySold()).put("value", o.getSpent())
+			.flag("sold", s == GrandExchangeOfferState.SOLD), true);
+	}
+
+	/** Another plugin asking for a post: namespace "soulrend", name "announce", data {source, text}. The site keeps the player's allow-list. */
+	@Subscribe
+	void onPluginMessage(PluginMessage m) {
+		var me = me();
+		Object src = m.getData().get("source"), text = m.getData().get("text");
+		if (!"soulrend".equals(m.getNamespace()) || !"announce".equals(m.getName()) || me == null || me.on == null
+			|| !me.on.containsKey("ext") || !(src instanceof String) || !(text instanceof String) || !announceBudget()) return;
+		apiClient.postNotification("milestones", null, facts("ext")
+			.put("source", (String) src).put("text", (String) text), null, null);
+	}
+
+	Me me() {
+		var cfg = pluginConfig;
+		return cfg == null || !seasonalWorld && !config.shareActivity() ? null : cfg.me;
+	}
+
+	/**
+	 * Once per install: hand the notify settings RuneLite still holds to the site, which keeps them now
+	 * The site only fills a person who never saved any.
+	 */
+	void moveNotifyPrefs(PluginConfigResponse cfg) {
+		if (notifyPrefsMoved || cfg == null) return;
+		notifyPrefsMoved = true;
+		// Once per install: say where the settings went, or nobody finds them.
+		if (!"1".equals(cfgGet("settingsMovedNoted"))) {
+			cfgSet("settingsMovedNoted", "1");
+			whenLoggedIn(() -> sendChatMessage(Tone.INFO, "Your Discord post and screenshot privacy settings are on the Soulrend website now: Settings > Announcements. There's a link in the Soulrend panel's settings tab."));
+		}
+		if (String.valueOf(CURRENT_DEFAULTS_VERSION).equals(cfgGet(CFG_DEFAULTS_VERSION))) return;
+		var o = new JsonObject();
+		for (var k : new String[]{"notifyRareDrops", "rareDropMinValue", "rareDropMinRarity", "lootKeyMinValue", "notifyPets",
+			"notifyDeaths", "deathMessage", "notifyPvpKills", "notifyClogSlots", "notifyLevelUps", "notifyDiaries", "caMinTaskTier",
+			"questAnnounce", CFG_DEFAULTS_VERSION}) {
+			var val = cfgGet(k);
+			if (val != null) o.addProperty(k, val);
+		}
+		try {
+			apiClient.postNotifyPrefs(o);
+			configManager.setConfiguration("soulrendbingo", CFG_DEFAULTS_VERSION, CURRENT_DEFAULTS_VERSION);
+		} catch (IOException e) {
+			notifyPrefsMoved = false; // the next config refresh tries again
+		}
+	}
+
+	// A stalled capture must not stall the notification: frames normally arrive within ~50ms,
+	// so a few seconds of grace is already generous before posting without the screenshot.
+	static final long FRAME_CAPTURE_TIMEOUT_MS = 4000;
+
+	/**
+	 * Captures the next rendered frame and hands the PNG bytes to
+	 * {@code consumer} OFF the client thread. The frame listener fires on the
+	 * client/AWT thread, so we immediately defer encoding to the executor; the
+	 * consumer then sends via OkHttp async. The game loop never waits on
+	 * either.
+	 *
+	 * <p>The consumer is guaranteed to run exactly once — with {@code null} when no frame
+	 * arrives in time (a minimized client can stop rendering, and the next-frame listener
+	 * then never fires) or the PNG encode fails. Callers post without the screenshot in
+	 * that case; before this guarantee, a stalled capture silently dropped the whole
+	 * notification (a Maggot King fang post vanished this way).
+	 */
+	void captureFrameAsync(Consumer<byte[]> consumer) {
+		var delivered = new AtomicBoolean(false);
+		onNextFrame(image -> {
+			byte[] png = null;
+			try {
+				png = png(image);
+			} catch (Exception e) {
+			}
+			if (delivered.compareAndSet(false, true)) consumer.accept(png);
+		}, null);
+		later(() -> {
+			if (delivered.compareAndSet(false, true)) {
+				log.info("No frame; posting without a screenshot");
+				consumer.accept(null);
+			}
+		}, FRAME_CAPTURE_TIMEOUT_MS);
+	}
+
+	/**
+	 * The next frame drawn with our overlays hidden (they skip drawing while {@link #capturing}). Asked
+	 * for from the client thread, between frames: from the executor the request could land mid-draw and
+	 * return a frame our overlays were already painted into. The flag is cleared however the request
+	 * ends, so a plugin stopped in between can't leave every overlay hidden.
+	 */
+	void onCleanFrame(Consumer<BufferedImage> work) {
+		clientThread.invokeLater(() -> {
+			capturing = true;
+			onNextFrame(work, null);
+		});
+	}
+
+	/**
+	 * Client thread: the chat this person's screenshot privacy leaves out (site, me.hide; PMs alone
+	 * until it answers) hidden for the next frame: the split-PM box, and each chatbox row whose sender
+	 * column is of a hidden kind. Game messages and broadcasts have no sender column, so they stay.
+	 * Returns how to show them again, or null.
+	 */
+	Runnable hideChatForShot() {
+		var cfg = pluginConfig;
+		int mask = ChatFlair.hideMask(cfg == null || cfg.me == null ? null : cfg.me.hide);
+		if (mask == 0 || !client.isClientThread()) return null;
+		shotMask = mask;
+		hideShotRows();
+		// Shared across overlapping shots: rows come back only when the last pending shot has its frame, so
+		// one shot's restore can't un-hide a row another shot still needs hidden.
+		shotsPending++;
+		return () -> {
+			if (--shotsPending > 0) return;
+			shotsPending = 0;
+			// Only a widget still on its line: one the game re-laid out since would show a stale rank icon on another row.
+			shotHidden.forEach((w, t) -> w.setHidden(w.getText() != t && w.isHidden()));
+			shotHidden.clear();
+		};
+	}
+
+	/** Client thread: hide the rows (and split-PM box) the current shot mask covers; remembered for the restore. */
+	void hideShotRows() {
+		int mask = shotMask;
+		List<Widget> hid = new ArrayList<>();
+		var pm = (mask & ChatFlair.PM) != 0;
+		var split = pm ? client.getWidget(InterfaceID.PmChat.CONTAINER) : null;
+		if (split != null && !split.isHidden()) hid.add(split);
+		// A PM being typed: "Enter message to send to Name" and the text so far.
+		var ask = pm ? client.getWidget(InterfaceID.Chatbox.MES_TEXT) : null;
+		if (ask != null && !ask.isHidden() && ask.getText() != null && ask.getText().startsWith("Enter message to send to")) {
+			// The whole prompt layer: the typed text isn't one fixed child.
+			var layer = client.getWidget(InterfaceID.Chatbox.MES_LAYER);
+			hid.add(layer != null && !layer.isHidden() ? layer : ask);
+		}
+		var area = client.getWidget(InterfaceID.Chatbox.SCROLLAREA);
+		var lines = area == null || area.isHidden() ? null : area.getDynamicChildren();
+		if (lines != null) {
+			ClanChannel c = client.getClanChannel(), g = client.getClanChannel(ClanID.GROUP_IRONMAN);
+			var fc = client.getFriendsChatManager();
+			String clan = c == null ? null : c.getName(), group = g == null ? null : g.getName();
+			String channel = fc == null ? null : fc.getName(), me = getLocalPlayerName();
+			IntUnaryOperator x = j -> lines[j].getOriginalX(), y = j -> lines[j].getOriginalY();
+			IntFunction<String> shown = j -> lines[j] == null || lines[j].isHidden() ? null : lines[j].getText();
+			Set<Integer> rows = new HashSet<>();
+			for (int i = 0; i < lines.length; i++) {
+				var t = shown.apply(i);
+				if (t != null && t.indexOf(':') >= 0 && (ChatFlair.chatKind(t, clan, group, channel, me) & mask) != 0
+						&& ChatFlair.senderColumn(i, lines.length, x, y, shown)) rows.add(lines[i].getOriginalY());
+			}
+			if (!rows.isEmpty()) for (var w : lines) if (w != null && !w.isHidden() && rows.contains(w.getOriginalY())) hid.add(w);
+		}
+		for (var w : hid) {
+			w.setHidden(true);
+			shotHidden.put(w, w.getText());
+		}
+	}
+
+	int shotMask;
+
+	/** Client thread: the chat rows hidden for screenshots still waiting for their frame, and how many wait. */
+	final Map<Widget, String> shotHidden = new HashMap<>();
+	int shotsPending;
+
+	/**
+	 * The next frame, with this person's hidden chat left out (hideChatForShot), handed to {@code work}
+	 * on the executor. Asked for on the client thread, so the hide and the request land between frames.
+	 */
+	void onNextFrame(Consumer<BufferedImage> work, Runnable dead) {
+		clientThread.invoke(() -> {
+			var show = hideChatForShot();
+			drawManager.requestNextFrameListener(image -> {
+				capturing = false;
+				if (show != null) clientThread.invokeLater(show);
+				if (!execLive()) {
+					if (dead != null) dead.run();
+					return;
+				}
+				try {
+					executor.submit(() -> work.accept((BufferedImage) image));
+				} catch (RejectedExecutionException e) {
+				}
+			});
+		});
+	}
+
+	/** Wider than this (a big or HiDPI window), a proof is scaled down: the stamp and the detail read the same. */
+	static final int PROOF_MAX_WIDTH = 1920;
+
+	/** A proof frame as a JPEG (no alpha: JPEG has none), at most {@link #PROOF_MAX_WIDTH} wide. */
+	static byte[] jpeg(BufferedImage img) throws IOException {
+		var rgb = img;
+		int w = Math.min(img.getWidth(), PROOF_MAX_WIDTH);
+		int h = (int) Math.round(img.getHeight() * (w / (double) img.getWidth()));
+		if (img.getType() != BufferedImage.TYPE_INT_RGB || w != img.getWidth()) rgb = scaled(img, w, h, RenderingHints.VALUE_INTERPOLATION_BILINEAR, BufferedImage.TYPE_INT_RGB);
+		var writer = ImageIO.getImageWritersByFormatName("jpg").next();
+		var param = writer.getDefaultWriteParam();
+		param.setCompressionMode(javax.imageio.ImageWriteParam.MODE_EXPLICIT);
+		param.setCompressionQuality(0.8f);
+		var baos = new ByteArrayOutputStream();
+		try (var out = ImageIO.createImageOutputStream(baos)) {
+			writer.setOutput(out);
+			writer.write(null, new javax.imageio.IIOImage(rgb, null, null), param);
+		} finally {
+			writer.dispose();
+		}
+		return baos.toByteArray();
+	}
+
+	static byte[] png(BufferedImage img) throws IOException {
+		var baos = new ByteArrayOutputStream();
+		ImageIO.write(img, "png", baos);
+		return baos.toByteArray();
+	}
+
+	static BufferedImage copyFrame(BufferedImage src) {
+		var copy = new BufferedImage(src.getWidth(), src.getHeight(), BufferedImage.TYPE_INT_RGB);
+		var g = copy.createGraphics();
+		g.drawImage(src, 0, 0, null);
+		g.dispose();
+		return copy;
+	}
+
+	/** Copy the shared frame — never mutate the draw manager's buffer — burn the proof banner on, encode. */
+	byte[] bakeCopy(BufferedImage src, String title, String detail, String rsn) throws IOException {
+		var copy = copyFrame(src);
+		annotateProofBanner(copy, title, detail, rsn);
+		return png(copy);
+	}
+
+	/** Post a 99 / total-level milestone with a screenshot, a beat after the moment. */
+	void postAchievement(NotifyFacts f) {
+		Runnable capture = () -> postWithScreenshot("levels", f, "soulrend-achievement.png");
+
+		// Let the room react before the shutter.
+		//
+		// The instant a 99 lands the screen holds the fireworks and nothing else; the congratulations
+		// that make the screenshot worth keeping are still being typed. A beat's pause catches the
+		// clan chat with the moment instead of an empty chatbox beneath it.
+		//
+		// Scheduled, never slept: a sleep here would park a shared RuneLite worker for a second and a
+		// half, and the hub rejects Thread.sleep on sight. Without a usable executor -- shutting down
+		// mid-level-up -- we capture now, because a slightly emptier screenshot beats none.
+		if (later(capture, ACHIEVEMENT_SHOT_DELAY_MS) == null) capture.run();
+	}
+
+	/** Pause between the achievement and its screenshot, long enough for clanmates' replies. */
+	static final long ACHIEVEMENT_SHOT_DELAY_MS = 1500;
+
+	/**
+	 * Capture, then post to {@code channel}; a failed capture posts without the image (the site only
+	 * references a screenshot that was actually attached).
+	 */
+	void postWithScreenshot(String channel, NotifyFacts f, String shotName) {
+		captureFrameAsync(png -> apiClient.postNotification(channel, null, f, png, shotName));
+	}
+
+	// Gold prefix flags the line as Soulrend; white body stays readable on any background (OSRS text
+	// has a built-in shadow). Both are the player's to change (Chat messages in the config).
+	static String clean(String s) {
+		return s.replace('|', '\u00A6').replace('<', '\u2039').replace('>', '\u203A');
+	}
+
+
+	void sendChatMessage(String message) {
+		sendChatLine("Soulrend", message, Tone.INFO, null);
+	}
+
+	void sendChatMessage(ChatPalette.Tone tone, String message) {
+		sendChatLine("Soulrend", message, tone, null);
+	}
+
+	/** How Soulrend lines are coloured; replaced by the site's look with each login brief. */
+	volatile ChatPalette chatPalette = ChatPalette.SOULREND;
+	/** The Patron star's chat icon, registered once; -1 until then. */
+	int chatStarIcon = -1;
+
+	/** Registered tenure icons by shape, colour and glint frame. */
+	final Map<String, Integer> tenureIcons = new HashMap<>();
+
+	String tenureIcon(ChatFlair.Entry e, boolean opaque, int glint) {
+		return tenureIcon(e, opaque, glint, 0);
+	}
+
+	/**
+	 * The tenure icon in the name's own look. With a gradient it is coloured like one more letter in
+	 * front of the name: {@code p} is that letter's place along the gradient (and its motion), so the
+	 * star moves in step with the name. Cached by colour (rounded a little), shared by every name.
+	 */
+	String tenureIcon(ChatFlair.Entry e, boolean opaque, int glint, double p) {
+		var c = ChatPalette.nameColor(ChatFlair.readableColor(e, opaque));
+		if (c == null || e.t < 1 || e.t > TENURE_STEPS) return "";
+		var rgb = ChatPalette.rgbOf(ChatFlair.readableGradient(e, opaque));
+		int ink = rgb.size() < 2 ? Integer.parseInt(c, 16) : ChatPalette.sample(rgb, p) & 0xf8f8f8;
+		var key = e.t + ":" + ink + ":" + glint;
+		var id = tenureIcons.get(key);
+		if (id == null && tenureIcons.size() >= 512) return tenureReady.getOrDefault(e.t + ":" + glint + ":" + opaque, "");
+		if (id == null) tenureIcons.put(key, id = chatIconManager.registerChatIcon(tenureSprite(e.t, ink, glint)));
+		int index = chatIconManager.chatIconIndex(id);
+		var tag = dropIcon(index);
+		// A colour still loading shows the last one this shape had ready, never a blank: a gap made the
+		// moving star blink while its frames loaded.
+		var shape = e.t + ":" + glint + ":" + opaque;
+		if (index >= 0) tenureReady.put(shape, tag);
+		return tenureReady.getOrDefault(shape, "");
+	}
+
+	/**
+	 * Chat icon {@code index}'s tag, or "" until it loads. The game sits an icon's bottom on the text line;
+	 * drawn TENURE_DROP px lower, the badge is level with the name.
+	 */
+	String dropIcon(int index) {
+		var icons = index >= 0 ? client.getModIcons() : null;
+		if (icons != null && index < icons.length && icons[index] != null && icons[index].getOffsetY() != TENURE_DROP) icons[index].setOffsetY(TENURE_DROP);
+		return index < 0 ? "" : "<img=" + index + ">";
+	}
+
+	/** Tenure steps (Apprentice … Legend); their chat sprites sit side by side in tenure.png, 13px each. */
+	static final int TENURE_STEPS = 6, TENURE_PX = 13;
+	/** Pixel art as tone keys (red / 16, made by Soulrend/tenure-sheet.py); chat icons keep only solid pixels. */
+	static final BufferedImage TENURE_SHEET = ImageUtil.loadImageResource(SoulrendPlugin.class, "/com/soulrend/tenure.png");
+	/** Per tone key 1..13: mix the name's colour towards white (> 0) or black (< 0) by this much. */
+	static final double[] TENURE_TONE = {-0.72, 0, 0.5, -0.2, -0.45, -0.28, -0.58, -0.25, 0.15, -0.42, 0.6, 0.8, 0.4};
+
+	/** How far below its usual place the chat icon is drawn (the sprite's own offset, so every step moves alike). */
+	static final int TENURE_DROP = 2;
+
+	/** The chat icon: the 13px art and a 2px gap before the name. */
+	static BufferedImage tenureSprite(int t, int ink, int glint) {
+		return tenureArt(t, ink, glint, 0);
+	}
+
+	/** The art in tones of the name's colour, {@code top} clear rows above, a 2px gap after. A Legend's glint brightens a sweeping band. */
+	static BufferedImage tenureArt(int t, int ink, int glint, int top) {
+		ink = tenureInk(ink);
+		var img = new BufferedImage(TENURE_PX + 2, TENURE_PX + top, BufferedImage.TYPE_INT_ARGB);
+		for (int y = 0; y < TENURE_PX; y++)
+			for (int x = 0; x < TENURE_PX; x++) {
+				int p = TENURE_SHEET.getRGB((t - 1) * TENURE_PX + x, y), key = (p >> 16 & 255) / 16;
+				if (p >>> 24 == 0 || key < 1 || key > TENURE_TONE.length) continue;
+				double f = TENURE_TONE[key - 1];
+				if (glint >= 0 && key > 1 && Math.abs(x + y - glint * 7 - 3) <= 1) f = Math.min(0.85, Math.max(f, 0) + 0.5);
+				int c = f >= 0 ? ChatPalette.mix(ink, 0xffffff, f) : ChatPalette.mix(ink, 0, -f);
+				// Pure black can read as see-through in the game's icon palette: a hole that blinks.
+				img.setRGB(x, y + top, 0xff000000 | (c == 0 ? 0x010101 : c));
+			}
+		return img;
+	}
+
+	/**
+	 * The badge colour from the name's, never a Jagex mod's: yellows lean amber, light greys/silver/
+	 * white turn icy blue at the same brightness (dark greys and black are no mod's, so they stay). All
+	 * smooth, never stepped: a moving gradient sweeps through these colours, and a step flickered.
+	 */
+	static int tenureInk(int rgb) {
+		float[] h = Color.RGBtoHSB(rgb >> 16 & 255, rgb >> 8 & 255, rgb & 255, null);
+		if (h[0] > 0.075f && h[0] < 0.22f) {
+			double u = (h[0] - 0.075) / 0.145;
+			rgb = Color.HSBtoRGB((float) (0.075 + 0.145 * u * u * u), h[1], h[2]);
+		}
+		double w = Math.max(0, 1 - h[1] / 0.3) * Math.max(0, Math.min(1, (h[2] - 0.35) / 0.3));
+		if (w > 0) rgb = ChatPalette.mix(rgb, Color.HSBtoRGB(0.58f, 0.55f, h[2]), w);
+		return rgb & 0xffffff;
+	}
+
+	/** The sprite {@code size} px tall for the panel, where we choose the size: crisp at whole multiples, smooth between. */
+	static BufferedImage tenureSprite(int t, int ink, int glint, int size) {
+		var one = tenureArt(t, ink, glint, 0);
+		int k = Math.max(1, (size + TENURE_PX - 1) / TENURE_PX);
+		var img = scaled(one, one.getWidth() * k, one.getHeight() * k, RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR, BufferedImage.TYPE_INT_ARGB);
+		return size == img.getHeight() ? img : scaled(img, img.getWidth() * size / img.getHeight(), size, RenderingHints.VALUE_INTERPOLATION_BICUBIC, BufferedImage.TYPE_INT_ARGB);
+	}
+
+	private static BufferedImage scaled(BufferedImage src, int w, int h, Object how, int type) {
+		var img = new BufferedImage(w, h, type);
+		var g = img.createGraphics();
+		g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, how);
+		g.drawImage(src, 0, 0, w, h, null);
+		g.dispose();
+		return img;
+	}
+
+	/** Per shape, glint and surface: the last tenure icon tag that had finished loading. */
+	final Map<String, String> tenureReady = new HashMap<>();
+
+	String chatStar() {
+		if (chatStarIcon < 0) {
+			var img = new BufferedImage(11, 11, BufferedImage.TYPE_INT_ARGB);
+			var g = img.createGraphics();
+			try {
+				new GlyphIcon(GlyphIcon.Shape.STAR, 11, new Color(0xff, 0xd2, 0x7a)).paintIcon(null, g, 0, 0);
+			} finally {
+				g.dispose();
+			}
+			chatStarIcon = chatIconManager.registerChatIcon(img);
+		}
+		int index = chatIconManager.chatIconIndex(chatStarIcon);
+		return index >= 0 ? "<img=" + index + ">" : "";
+	}
+
+	/**
+	 * Re-read the chat colours alone (no lines): the player changed them on the site (a {"t":"look"}
+	 * push), or pressed Refresh. Without this they only took effect at the next login.
+	 */
+	/** The site's chat look: line colours, the [Soulrend] tag's colour, and boards kept out of the chatbox. */
+	void adoptLook(BingoApiClient.Look l) {
+		chatPalette = ChatPalette.from(l.palette, l.colors);
+		chatTag = l.tag != null && ChatPalette.HEX.matcher(l.tag).matches() ? l.tag : null;
+		chatboxOff = l.off != null ? l.off : List.of();
+	}
+
+	volatile String chatTag;
+	volatile List<String> chatboxOff = List.of();
+
+	void refreshLook() {
+		var b = apiClient.fetchBrief();
+		if (b != null && b.look != null) adoptLook(b.look);
+	}
+
+	/** Manual panel Refresh: bypass the ten-minute cadence so changed public name styles appear now. */
+	void refreshChatFlairNow() {
+		chatFlairFetchedAt = now();
+		chatFlairSync.sync();
+	}
+
+	/** The login brief (site lib/chatBrief): where this character stands, in a line or two. */
+	void sendBrief() {
+		var b = apiClient.fetchBrief();
+		if (b == null) return;
+		if (b.look != null) adoptLook(b.look);
+		if (b.lines != null) for (var l : b.lines) if (l != null && l.text != null) sendChatMessage(Tone.of(l.tone), l.text);
+	}
+
+	/** At most this many chat-feed lines a minute; the rest are counted and summed up in one line. */
+	static final int FEED_PER_MINUTE = 6;
+	final ArrayDeque<Long> feedShownAt = new ArrayDeque<>();
+	int feedHeld;
+	ScheduledFuture<?> feedHeldFlush;
+
+	/**
+	 * A chat-feed line from the live push ({"t":"feed", tag, who, text}): another player's drop or
+	 * achievement, or another team's tile. The site already decided this player wants it; the cap here
+	 * only keeps a busy minute from burying the chatbox.
+	 */
+	// -- Chat relay + event chat in the chatbox (docs/PLUGIN_WIRE.md chat-relay) ----------------------
+	//
+	// Outgoing chat is never touched: the relay READS the local player's own line as the client shows it
+	// (the local player's own line, as the client shows it) and sends a copy. Others' lines arrive pre-built by the site and
+	// are only printed: one the game didn't show is added at once as normal chat of its type (so tab
+	// filters, chat plugins and timestamps treat it as one); if the game's own copy turns up after all,
+	// ours is removed and the game's kept. Either way the line carries the Soulrend icon at the start of its
+	// text — never in the name, which the game's own menu options and clan rank icon read. Nothing about
+	// who is around is ever sent.
+
+	// Lines are remembered by MESSAGE ID, never by MessageNode: the game keeps 100 lines per chat type
+	// and reuses the oldest node for the next line (with a new id), so a node held here would later be
+	// some stranger's line wearing our icon.
+	/** Client thread: others' public/clan lines the game showed in the last 10 s, by relayKey: {id, seconds}. */
+	final Map<String, int[]> relaySeen = new HashMap<>();
+	/** Client thread: ids of lines the relay added, by relayKey: dropped if the game's own copy arrives later. */
+	final Map<String, Integer> relayNodes = capped(50, false);
+	static final Set<ChatMessageType> RELAYED = EnumSet.of(PUBLICCHAT, MODCHAT, CLAN_CHAT, CLAN_GUEST_CHAT, FRIENDSCHAT, PRIVATECHAT, PRIVATECHATOUT);
+
+	/** Client thread: we are adding a relayed line (its own ChatMessage must not count as the game's). */
+	boolean injecting;
+	/** Event chat lines printed in the chatbox, by their shown text: the board and channel to reply in. */
+	final Map<String, String> eventLines = capped(50, false);
+	static final Pattern LEVEL = Pattern.compile("\\s*\\(level.*$");
+
+	/** Characters beside us (our world, clan, friends chat) with Soulrend chat on, as the site names them. */
+	final Set<String> relayHere = ConcurrentHashMap.newKeySet();
+	/** Where the chatbox event chat input may post, in its key's order; null until fetched. */
+	volatile JsonArray chatChans;
+	volatile boolean chatOne = true;
+	int eventChatAt;
+	net.runelite.client.game.chatbox.ChatboxTextInput eventChatInput;
+	int relayIcon = -1;
+
+	final HotkeyListener eventChatKey = new HotkeyListener(() -> config.eventChatKey()) {
+		public void hotkeyPressed() {
+			clientThread.invoke(() -> {
+				// Pressed again with our input open: the next channel, keeping what was typed.
+				var open = eventChatInput != null && chatboxPanelManager.getCurrentInput() == eventChatInput;
+				if (open) {
+					openEventChat(eventChatAt + 1, eventChatInput.getValue());
+				} else if (loggedIn() && apiClient.isConfigured()) {
+					if (chatChans != null) openEventChat(eventChatAt, "");
+					fetchChatChans(chatChans == null ? () -> openEventChat(eventChatAt, "") : null);
+				}
+			});
+		}
+	};
+
+	static String relayKey(String name, String text) {
+		return Text.standardize(name).replaceAll("[ _-]+", " ") + "\n" + Text.standardize(text).replaceAll("\\s+", " ");
+	}
+
+	/** The friends chat owner and guest clan we sit in ("owner~clan", either may be empty): their relay rooms. */
+	String fcOwner() {
+		var fc = client.getFriendsChatManager();
+		var g = client.getGuestClanChannel();
+		return (fc == null || fc.getOwner() == null ? "" : Text.standardize(fc.getOwner())) + "~" + (g == null ? "" : Text.standardize(g.getName()));
+	}
+
+	/** The friends chat owner the push scope was last built with: a change re-tickets (onGameTick). */
+	String fcSeen = "";
+
+	/** Our own line out; true when it went (the line then wears the icon: you can see you're connected). */
+	boolean relaySay(String c, String text, String to) {
+		var p = pushSocket;
+		var on = config.soulrendChat();
+		if (!("pm".equals(c) ? on == SoulrendConfig.Relay.See_send_PMs : on.compareTo(SoulrendConfig.Relay.See_send) >= 0) || p == null || text.startsWith("::")) return false;
+		return p.say(gson.toJson(BingoApiClient.obj("t", "say", "c", c, "x", text, "to", to)));
+	}
+
+	/** A relay control message (not a chat line): our private chat setting, a who, a friend's yes. */
+	void relaySend(Object... kv) {
+		var p = pushSocket;
+		if (p != null && config.soulrendChat() != SoulrendConfig.Relay.Off) p.say(gson.toJson(BingoApiClient.obj(kv)));
+	}
+
+	/** The private chat setting last told to the relay ("" after a reconnect: tell it again). */
+	String pmModeSent = "";
+
+	/**
+	 * Client thread, each tick: our private chat setting, told to the relay when it changes. It decides
+	 * who past our shared channels may see us connected and PM us: On anyone, Friends our friends, Off nobody.
+	 */
+	void relayPmMode() {
+		var f = client.getWidget(InterfaceID.Chatbox.CHAT_PRIVATE_FILTER);
+		if (f == null || pushSocket == null || !pushSocket.relayOk) return;
+		var t = Text.removeTags(f.getText());
+		var mode = t.contains("Off") ? "off" : t.contains("Friends") ? "friends" : t.contains("On") ? "on" : null;
+		if (mode == null || mode.equals(pmModeSent)) return;
+		pmModeSent = mode;
+		relaySend("t", "pm", "m", mode);
+	}
+
+	/** Names we asked the relay about, and when (ms): once every 10s each at most. */
+	final Map<String, Long> relayAsked = capped(200, false);
+
+	/** Whether a player of that name is in our group ironman group (the game lists them to us). */
+	boolean inGroup(String name) {
+		var g = client.getClanChannel(ClanID.GROUP_IRONMAN);
+		return g != null && g.findMember(name) != null;
+	}
+
+	/** Whether a player of that name is in our scene (the game shows them to us). */
+	boolean inScene(String name) {
+		var k = relayKey(name, "");
+		for (var q : client.getPlayers()) if (q != null && q.getName() != null && k.equals(relayKey(q.getName(), ""))) return true;
+		return false;
+	}
+
+	/** Players the game shows us (on screen, or online friends) not known as connected: ask; their own client decides. */
+	void relayWho(Collection<String> names) {
+		var ask = new ArrayList<String>();
+		long t = now();
+		for (var n : names) {
+			var k = Text.standardize(n);
+			var was = relayAsked.get(k);
+			if (relayConnected(n) || !(friendOnline(n) || inScene(n) || inGroup(n)) || (was != null && t - was < 10_000)) continue;
+			relayAsked.put(k, t);
+			ask.add(n);
+		}
+		if (!ask.isEmpty()) relaySend("t", "who", "n", gson.toJsonTree(ask));
+	}
+
+	/** Client thread (onChatMessage): our own line goes out; someone else's is remembered for dedupe. */
+	void relayHeard(ChatMessage e) {
+		var ct = e.getType();
+		// A line we added ourselves is never "the game's copy" of anything.
+		if (!RELAYED.contains(ct) || e.getName() == null || injecting) return;
+		var name = Text.removeTags(e.getName());
+		var text = Text.removeTags(e.getMessage());
+		var c = ct == CLAN_CHAT ? "clan" : ct == CLAN_GUEST_CHAT ? "guest" : ct == FRIENDSCHAT ? "fc" : ct == PRIVATECHAT || ct == PRIVATECHATOUT ? "pm" : "public";
+		// Our own line (a PM we sent names its recipient instead).
+		if (ct == PRIVATECHATOUT || Text.standardize(name).equals(Text.standardize(String.valueOf(getLocalPlayerName())))) {
+			// A PM only to someone the relay says is connected: otherwise nothing leaves the client.
+			if (ct != PRIVATECHATOUT || relayConnected(name)) if (relaySay(c, text, ct == PRIVATECHATOUT ? name : null)) relayMark(e.getMessageNode(), "");
+			return;
+		}
+		var key = c + relayKey(name, text);
+		var id = relayNodes.remove(key);
+		var ours = id == null ? null : client.getMessages().get(id);
+		var now = (int) (now() / 1000);
+		// The game's copy came just after ours after all: one line, the game's, with the icon. (Ours from
+		// longer ago was another line: the same words said again.)
+		if (ours != null && now - ours.getTimestamp() <= 10) {
+			client.getChatLineMap().get(ours.getType().getType()).removeMessageNode(ours);
+			relayMark(e.getMessageNode(), "");
+			return;
+		}
+		relaySeen.values().removeIf(n -> now - n[1] > 10);
+		relaySeen.put(key, new int[]{e.getMessageNode().getId(), now});
+	}
+
+	/** Client thread: game lines the relay also brought; their name gets the icon as the chatbox is built. */
+	final Map<Integer, String> relayMarked = capped(100, false);
+
+	/** Mark a line for the Soulrend icon after its name, and {@code icon} (an account type) before it. */
+	void relayMark(MessageNode n, String icon) {
+		if (n == null) return;
+		relayMarked.put(n.getId(), icon);
+		client.refreshChat();
+	}
+
+	/**
+	 * The chatbox building a line's name, after RuneLite's own channel plugin has put the rank icon in
+	 * front (it looks the sender up by the node's plain name, so ours stays plain): a marked line gets
+	 * its account-type icon after the leading icons and the Soulrend icon after the name. Before the game
+	 * lays the line out, so it wraps and aligns as its own.
+	 */
+	@Subscribe(priority = -1)
+	void onScriptCallbackEvent(ScriptCallbackEvent e) {
+		if (relayMarked.isEmpty() || !"chatMessageBuilding".equals(e.getEventName())) return;
+		var node = client.getIntStack()[client.getIntStackSize() - 1];
+		var icon = relayMarked.get(node);
+		if (icon == null) return;
+		var os = client.getObjectStack();
+		int at = client.getObjectStackSize() - 3;
+		os[at] = relayName(String.valueOf(os[at]), null, icon) + relayIcon();
+	}
+
+	/**
+	 * A relayed line's name as the chatbox draws it. A clan line we added has no rank to the game, which
+	 * draws its default orb: {@code rank} (the sender's real rank icon, "" for none, null to leave it)
+	 * goes in its place, and {@code icon} (an account type) before the name. The name may already be
+	 * wrapped in a colour tag by the player's chat colours, so leading tags are stepped over: anchored
+	 * on a bare {@code <img>}, a coloured name kept the default orb and read as a guest.
+	 */
+	static String relayName(String name, String rank, String icon) {
+		if (rank != null) name = name.replaceFirst("^((?:<(?!img=)[^>]*>)*)<img=\\d+>", "$1" + java.util.regex.Matcher.quoteReplacement(rank));
+		return name.replaceFirst("^((?:<[^>]*>)*)", "$1" + java.util.regex.Matcher.quoteReplacement(icon));
+	}
+
+	/** Client thread: clan / guest clan lines we added, and the sender's rank icon ("" for none). */
+	// As many as the game keeps: 100 lines each of clan and guest clan chat. Fewer, and an older line we added lost its rank icon and wore the game's default (guest) one.
+	final Map<Integer, String> relayRank = capped(200, false);
+
+	/**
+	 * Enter on public chat: the line goes out now, read as typed (never changed or held: the game sends
+	 * it as ever), without waiting for the game to echo it a tick later; when the echo lands it is the
+	 * same line again (the site drops the repeat). Chat effects ("wave:", "red:") are the game's, not
+	 * the words.
+	 */
+	@Subscribe
+	void onChatboxInput(ChatboxInput e) {
+		if (e.getChatType() == 0 && !e.getValue().startsWith("/")) relaySay("public", Text.removeTags(e.getValue()).replaceFirst("(?i)^((yellow|red|green|cyan|purple|white|flash[123]|glow[123]|wave2?|scroll|shake|slide):)+", ""), null);
+	}
+
+	/**
+	 * The Soulrend chat icon: an soulrend (pointed horn, flat top, narrow waist, wide foot) in flat gold with a
+	 * dark outline, drawn 1:1. Laid out like the tenure badge (tenureArt): a 13px-tall canvas with the
+	 * 9px glyph on rows 2-10, dropped TENURE_DROP, so the two sit level either side of the name.
+	 */
+	String relayIcon() {
+		if (relayIcon < 0) {
+			String[] a = {"..XXXXXXXXX", "XXXXXXXXXXX", "..XXXXXXXX.", ".....SSS...", ".....SSS...", "....XXXXX..", "...XXXXXXX."};
+			var img = new BufferedImage(15, 13, BufferedImage.TYPE_INT_ARGB);
+			for (int pass = 0; pass < 2; pass++)
+				for (int y = 0; y < 7; y++)
+					for (int x = 0; x < 11; x++) {
+						char k = a[y].charAt(x);
+						if (k == '.') continue;
+						if (pass == 1) img.setRGB(x + 2, y + 3, k == 'X' ? 0xFFFFCE28 : 0xFFD6A014);
+						else for (int d = 0; d < 9; d++) img.setRGB(x + 1 + d % 3, y + 2 + d / 3, 0xFF2A1C08);
+					}
+			relayIcon = chatIconManager.registerChatIcon(img);
+		}
+		return dropIcon(chatIconManager.chatIconIndex(relayIcon));
+	}
+
+	// The account-type icons the site may send (ironman, ultimate, hardcore, group, hardcore group, unranked group); nothing else.
+	static final Pattern ICON_LEAD = Pattern.compile("^<img=(2|3|10|41|42|43)>");
+
+	/** Client thread: a relayed line. If the game already showed it, add the icon to that copy; otherwise print the line at once. */
+	void showRelay(JsonObject m) {
+		if (config.soulrendChat() == SoulrendConfig.Relay.Off || !loggedIn() || client.getLocalPlayer() == null) return;
+		var n = m.get("n").getAsString();
+		var c = m.get("c").getAsString();
+		var key = c + relayKey(n, m.get("x").getAsString());
+		var seen = relaySeen.remove(key);
+		var game = seen == null ? null : client.getMessages().get(seen[0]);
+		if (game != null) {
+			relayMark(game, "");
+			return;
+		}
+		if (client.getIgnoreContainer().findByName(n) != null) return;
+		// The sender as our own client knows them: on screen (public), or in our own channel's member list
+		// (clan, guest clan, friends chat). Nobody unknown to it is shown.
+		Player near = null;
+		String from = null, rank = null, shown = null;
+		var type = PUBLICCHAT;
+		if ("public".equals(c)) {
+			for (var q : client.getPlayers()) if (q != null && q.getName() != null && relayKey(n, "").equals(relayKey(q.getName(), ""))) near = q;
+			if (near != null) shown = near.getName();
+		} else if ("clan".equals(c) || "guest".equals(c)) {
+			var g = "guest".equals(c);
+			var ch = g ? client.getGuestClanChannel() : client.getClanChannel();
+			var member = ch == null ? null : ch.findMember(n);
+			if (member != null) {
+				// As the game writes a sender: a non-breaking space between words. With a plain space the
+				// chatbox can't find the sender in the clan and draws the guest icon for an owner.
+				shown = member.getName().replace(' ', '\u00a0');
+				from = ch.getName();
+				type = g ? CLAN_GUEST_CHAT : CLAN_CHAT;
+				var cs = g ? client.getGuestClanSettings() : client.getClanSettings();
+				var title = cs == null ? null : cs.titleForRank(member.getRank());
+				int r = title == null ? -1 : chatIconManager.getIconNumber(title);
+				rank = r < 0 ? "" : "<img=" + r + ">";
+			}
+		} else if ("pm".equals(c)) {
+			// As the game would: Private On (anyone), Friends (a friend), Off (nobody); no filter read, nobody.
+			var f = client.getWidget(InterfaceID.Chatbox.CHAT_PRIVATE_FILTER);
+			var mode = f == null ? "Off" : Text.removeTags(f.getText());
+			var plain = Text.removeTags(n).replace('\u00a0', ' ');
+			if (plain.matches("[A-Za-z0-9 _-]{1,12}") && !mode.contains("Off") && client.getIgnoreContainer().findByName(plain) == null
+					&& (!mode.contains("Friends") || client.isFriended(plain, false))) {
+				shown = Text.escapeJagex(Text.toJagexName(plain));
+				type = PRIVATECHAT;
+			}
+		} else {
+			var fc = client.getFriendsChatManager();
+			var member = fc == null ? null : fc.findByName(n);
+			if (member != null) {
+				shown = member.getName();
+				from = fc.getName();
+				type = FRIENDSCHAT;
+			}
+		}
+		if (shown == null) return;
+		// Untrusted all the same: the words escaped; the name our client's own, after the rank and the
+		// account-type icon (only those six indices, by explicit match) and before the Soulrend icon.
+		var x = Text.escapeJagex(m.get("x").getAsString());
+		var im = m.has("nm") ? ICON_LEAD.matcher(m.get("nm").getAsString()) : null;
+		var icon = im != null && im.lookingAt() ? "<img=" + im.group(1) + ">" : "";
+		injecting = true;
+		try {
+			// The name stays the plain one: RuneLite's channel plugin finds the sender's rank by it, and the
+			// icons go on as the chatbox builds the line (onScriptCallbackEvent).
+			var node = client.addChatMessage(type, shown, x, from);
+			relayNodes.put(key, node.getId());
+			if (rank != null) relayRank.put(node.getId(), rank);
+			relayMark(node, icon);
+		} finally {
+			injecting = false;
+		}
+		relaySeen.remove(key);
+		var f = client.getWidget(InterfaceID.Chatbox.CHAT_PUBLIC_FILTER);
+		var mode = f == null ? "" : Text.removeTags(f.getText());
+		if (near != null && !mode.contains("Hide") && !mode.contains("Off") && (!mode.contains("Friends") || client.isFriended(n, false))) {
+			near.setOverheadText(Text.removeTags(x));
+			near.setOverheadCycle(150);
+		}
+	}
+
+	/** An event chat push row: its chatbox copy (built by the site), or the Feed tab's dot when that's off. */
+	void eventChatLine(JsonObject m) {
+		// "chat:<event>:<channel>": where "Reply in" posts, and the line's colours.
+		var feed = m.getAsJsonArray("feeds").get(0).getAsString().split(":");
+		// Off here, or this board switched off on the site: the panel's Feed tab gets a dot instead.
+		if (!config.eventChatbox() || chatboxOff.contains(feed[1])) {
+			var panel = sidebarPanel;
+			if (panel != null) panel.feedUnread();
+			return;
+		}
+		// The site escapes what people typed; still, only colour tags and escapes stay, and only a line led
+		// by its "[Board · Channel]" prefix is printed, so nothing can pass for a game message.
+		var line = m.get(chatOne && m.has("cb1") ? "cb1" : "cb").getAsString().replaceAll("<(?!/?col(=[0-9a-fA-F]{6})?>|lt>|gt>)[^>]*>", "");
+		if (!line.matches("^<col=[0-9a-fA-F]{6}>\\[[^<\\]]+\\]</col> .*")) return;
+		int tag = line.indexOf(']'), colon = line.indexOf(": ", tag);
+		if (colon < 0) return;
+		var ai = m.has("ai") ? "<img=" + m.get("ai").getAsInt() + ">" : "";
+		String[] p = {line.substring(line.indexOf('[') + 1, tag), line.substring(tag + 8, colon), line.substring(colon + 2).replaceAll("</?col[^>]*>", ""), feed[2],
+				ICON_LEAD.matcher(ai).lookingAt() ? ai : ""};
+		clientThread.invokeLater(() -> {
+			if (!loggedIn() || client.getLocalPlayer() == null) return;
+			opaqueChatbox();
+			var text = eventText(p);
+			eventLines.put(Text.removeTags(text), feed[1] + ":" + feed[2]);
+			eventNodes.put(client.addChatMessage(GAMEMESSAGE, "", text, null).getId(), p);
+		});
+	}
+
+	/** Client thread: event chat lines in the chatbox, as {tag, name, message, channel}, recoloured with the chatbox. */
+	final Map<Integer, String[]> eventNodes = capped(50, false);
+	/** Tag, Team, All, Announcements: on the opaque chatbox, then the transparent one. */
+	static final String[][] EVENT_COLS = {{"b04e00", "0a6b0a", "00666e", "7a4800"}, {"ff9b30", "72e872", "3ddbe0", "ffc34d"}};
+
+	/** "<soulrend>[Tag · All] <badge><icon>Name: message": the icon first (Soulrend's line), the tag in Soulrend orange, the words by channel. */
+	String eventText(String[] p) {
+		var c = EVENT_COLS[lastChatboxOpaque ? 0 : 1];
+		// The name as in game chat: the Supporter badge and colours (ChatFlair, as on player lines), then
+		// the account-type icon before the name.
+		var d = flairOn() ? chatFlair.decorateReadable(p[1], chatStar(), 0, lastChatboxOpaque) : null;
+		var who = d == null ? p[4] + p[1] : d.replaceFirst("^(<img=\\d+>)?", "$1" + p[4]);
+		return relayIcon() + "<col=" + c[0] + ">[" + p[0] + "]</col> " + who + ": <col=" + c["team".equals(p[3]) ? 1 : "all".equals(p[3]) ? 2 : 3] + ">" + p[2] + "</col>";
+	}
+
+	void fetchChatChans(Runnable then) {
+		try {
+			apiClient.interactiveExecutor().execute(() -> {
+				var r = apiClient.chatChans();
+				if (r != null && r.has("chans")) {
+					chatChans = r.getAsJsonArray("chans");
+					chatOne = !r.has("one") || r.get("one").getAsBoolean();
+				}
+				if (then != null && chatChans != null) clientThread.invoke(then);
+			});
+		} catch (RejectedExecutionException e) {
+			// shutting down
+		}
+	}
+
+	/** Client thread: RuneLite's own chatbox input (never the game's chat) for one event chat channel. */
+	void openEventChat(int i, String value) {
+		var list = chatChans;
+		if (list == null || list.size() == 0) {
+			sendChatMessage("No event chat you can post in right now.");
+			return;
+		}
+		eventChatAt = Math.floorMod(i, list.size());
+		var c = list.get(eventChatAt).getAsJsonObject();
+		eventChatInput = chatboxPanelManager.openTextInput("[" + c.get("l").getAsString() + "] " + getLocalPlayerName() + ":")
+				// The game's own chat limit, which the site enforces too (a longer line was dropped there whole).
+				.value(value.length() > 80 ? value.substring(0, 80) : value)
+				.addCharValidator(ch -> eventChatInput == null || eventChatInput.getValue().length() < 80)
+				.onDone((Consumer<String>) t -> sendEventChat(c, t))
+				.build();
+	}
+
+	void sendEventChat(JsonObject c, String text) {
+		if (text == null || text.trim().isEmpty()) return;
+		apiClient.interactiveExecutor().execute(() -> {
+			var err = FeedList.errorOf(apiClient.postUi("chat-send", Map.of("e", c.get("e").getAsString(), "to", c.get("to").getAsString()), Map.of("msg", text.trim())));
+			if (err != null) sendChatMessage(WARN, err);
+		});
+	}
+
+	/** Menu options about the player a chat line names (not a task or item it mentions). */
+	static final Set<String> PLAYER_OPTIONS = Set.of("Message", "Add friend", "Remove friend", "Delete friend", "Add ignore",
+		"Remove ignore", "Delete ignore", "Report", "Add Note", "Lookup", "Hop-to", "Reply", "Soulrend");
+
+	/** The open menu's Soulrend chat line, and whom it is about: a here/gone while it's open updates it. */
+	MenuEntry statusEntry;
+	Map<String, String> statusNames = Map.of();
+	Set<String> statusSeen = Set.of();
+
+	/** The status line for the menu's players: connected only for someone the game shows us right now. */
+	String relayStatus(int show) {
+		String status;
+		var live = new ArrayList<String>();
+		for (var n : statusNames.entrySet()) if (statusSeen.contains(n.getKey()) && relayConnected(n.getValue())) live.add(n.getValue());
+		if (show < 2) status = "reconnecting";
+		else if (statusNames.size() == 1) status = !live.isEmpty() ? "<col=00ff00>connected" : "<col=ff0000>disconnected";
+		else status = live.isEmpty() ? "<col=ff0000>none of these" : "<col=00ff00>" + String.join(", ", live.subList(0, Math.min(3, live.size()))) + (live.size() > 3 ? " +" + (live.size() - 3) : "");
+		return "<col=9f9f9f>Soulrend chat: " + status;
+	}
+
+	/** Client thread: an answer came in while the menu is open: its line shows it at once. */
+	void relayMenuRefresh() {
+		var e = statusEntry;
+		if (e != null && client.isMenuOpen()) e.setOption(relayStatus(relayPresence()));
+	}
+
+	/** Client-side entries only (nothing is sent to the game): event chat on the Clan tab, Reply on a line. */
+	@Subscribe
+	void onMenuOpened(MenuOpened e) {
+		var chans = chatChans;
+		var area = client.getWidget(InterfaceID.Chatbox.SCROLLAREA);
+		var mp = client.getMouseCanvasPosition();
+		var overChatLine = area != null && !area.isHidden() && area.getBounds().contains(mp.getX(), mp.getY());
+		// A player, a channel member or a chat line's name: whether they have Soulrend chat on. An info line,
+		// no action; only while our own relay is live (else we can't know anyone's).
+		// Only while we send through Soulrend chat: who can receive it matters to a sender, nobody else.
+		int show = relayPresence();
+		// Every player this menu is about, once each: a crowd's menu names several, and one line about
+		// whichever came first read as the status of all of them.
+		var names = new LinkedHashMap<String, String>();
+		var seen = new HashSet<String>();
+		var onFriendsList = false;
+		for (var en : e.getMenuEntries()) if (WidgetUtil.componentToInterface(en.getParam1()) == InterfaceID.FRIENDS) onFriendsList = true;
+		for (var en : show > 0 ? e.getMenuEntries() : new MenuEntry[0]) {
+			// Only someone the game itself shows us as here: in the scene, in one of our channels' member
+			// lists, or online on our friends list. Never more than the game shows (no entry at all).
+			var name = en.getPlayer() == null ? LEVEL.matcher(Text.removeTags(String.valueOf(en.getTarget()))).replaceAll("").trim() : en.getPlayer().getName();
+			if (empty(name)) continue;
+			// A menu opened on the friends list follows it: logged out there (offline, or hidden from us),
+			// no line, whatever we share. Other plugins' entries in the same menu (World Hopper's Hop-to,
+			// lookups) don't carry the list's widget, so this is decided for the menu, not per entry.
+			if (onFriendsList && !friendOnline(name)) continue;
+			var cc = client.getClanChannel();
+			var gc = client.getGuestClanChannel();
+			var fc = client.getFriendsChatManager();
+			// Visible: the game shows them to us right now. A chat line's name or a friend the game shows
+			// offline still gets a line, but always "disconnected": whoever hides as offline stays so, and
+			// it reads the same as someone without Soulrend.
+			var visible = en.getPlayer() != null || inScene(name) || inGroup(name) || friendOnline(name) || (cc != null && cc.findMember(name) != null)
+				|| (gc != null && gc.findMember(name) != null) || (fc != null && fc.findByName(name) != null);
+			// A hidden name gets a line only off a chat line, and only on an option about a player (not a
+			// task or an item a broadcast names); an offline friend none at all.
+			if (!visible && !(overChatLine && PLAYER_OPTIONS.contains(Text.removeTags(String.valueOf(en.getOption()))))) continue;
+			var key = Text.standardize(Text.removeTags(name));
+			names.putIfAbsent(key, Text.removeTags(name).replace('\u00a0', ' '));
+			if (visible) seen.add(key);
+		}
+		if (show == 2) relayWho(names.values());
+		statusEntry = null;
+		if (!names.isEmpty()) {
+			statusNames = names;
+			statusSeen = seen;
+			statusEntry = client.getMenu().createMenuEntry(1).setOption(relayStatus(show)).setTarget("").setType(MenuAction.RUNELITE);
+		}
+		for (var en : e.getMenuEntries()) {
+			int on = en.getParam1();
+			if (on != InterfaceID.Chatbox.CHAT_CLAN) continue;
+			for (int i = chans == null ? -1 : chans.size() - 1; i >= 0; i--) {
+				int at = i;
+				menuEntry("Event chat:", chans.get(i).getAsJsonObject().get("l").getAsString(), () -> openEventChat(at, ""));
+			}
+			return;
+		}
+		var kids = area == null || area.isHidden() ? null : area.getDynamicChildren();
+		if (kids == null || !area.getBounds().contains(mp.getX(), mp.getY())) return;
+		for (var w : kids) {
+			if (w == null || w.isHidden() || w.getText() == null || !w.getBounds().contains(mp.getX(), mp.getY())) continue;
+			var t = Text.removeTags(w.getText());
+			for (var line : eventLines.entrySet()) {
+				if (!t.endsWith(line.getKey()) || chans == null) continue;
+				for (int i = 0; i < chans.size(); i++) {
+					var c = chans.get(i).getAsJsonObject();
+					int at = i;
+					if (line.getValue().equals(c.get("e").getAsString() + ":" + c.get("to").getAsString())) menuEntry("Reply in", c.get("l").getAsString(), () -> openEventChat(at, ""));
+				}
+			}
+		}
+	}
+
+	void menuEntry(String option, String target, Runnable run) {
+		client.getMenu().createMenuEntry(1).setOption(option).setTarget("<col=ffb54d>" + target).setType(MenuAction.RUNELITE).onClick(x -> run.run());
+	}
+
+	synchronized void feedLine(JsonObject m) {
+		if (!config.chatFeed()) return;
+		var tag = m.has("tag") ? m.get("tag").getAsString() : "";
+		var who = m.has("who") ? m.get("who").getAsString() : "";
+		var text = m.has("text") ? m.get("text").getAsString() : "";
+		var now = now();
+		while (!feedShownAt.isEmpty() && now - feedShownAt.peekFirst() >= 60_000L) feedShownAt.pollFirst();
+		if (feedShownAt.size() >= FEED_PER_MINUTE) {
+			feedHeld++;
+			if (feedHeldFlush == null) feedHeldFlush = later(this::flushFeedHeld, Math.max(1_000L, 60_000L - (now - feedShownAt.peekFirst())));
+			return;
+		}
+		feedShownAt.addLast(now);
+		// The sender's Supporter colour on their name, and a Patron's star; the rest in the line's tone.
+		var whoColor = m.has("whoColor") ? ChatPalette.nameColor(m.get("whoColor").getAsString()) : null;
+		var star = m.has("star") && m.get("star").getAsBoolean();
+		// Champion/Patron: the name letter by letter across their gradient; else the solid colour.
+		String grad = null;
+		if (!who.isEmpty() && m.has("whoGrad") && m.get("whoGrad").isJsonArray()) {
+			List<String> stops = new ArrayList<>();
+			for (var e : m.getAsJsonArray("whoGrad")) if (e.isJsonPrimitive()) stops.add(e.getAsString());
+			grad = ChatPalette.gradientName(clean(who), stops);
+		}
+		// The dataset's look for this surface (own dark/light look, else adapted) wins over the push's
+		// raw colours, so a feed line's name matches the same name in chat.
+		var own = who.isEmpty() || !flairOn() ? null : chatFlair.paintNameFor(clean(who), lastChatboxOpaque);
+		var name = own != null ? own : grad != null ? grad
+				: whoColor != null ? "<col=" + whoColor + ">" + clean(who) + "</col>" : clean(who);
+		var fe = own == null ? null : chatFlair.entry(clean(who));
+		var lead = who.isEmpty() ? null : (fe != null && fe.t != null ? tenureIcon(fe, lastChatboxOpaque, -1) : star ? chatStar() : "") + name;
+		var tone = Tone.of(m.has("tone") ? m.get("tone").getAsString() : null);
+		sendChatLine(tag.isEmpty() ? "Soulrend" : "Soulrend \u00B7 " + tag, text, tone, lead);
+	}
+
+	synchronized void flushFeedHeld() {
+		feedHeldFlush = null;
+		if (feedHeld > 0) {
+			sendChatMessage(Tone.FEED, "+" + feedHeld + " more in the chat feed. Choose what shows on your Soulrend profile.");
+			feedHeld = 0;
+		}
+	}
+
+	/** {@code lead}: markup already made safe (a coloured name, an icon) before the message's own colour. */
+	void sendChatLine(String tag, String message, ChatPalette.Tone tone, String lead) {
+		sendChatLine(tag, message, tone, lead, null);
+	}
+
+	/** {@code tail}: already-safe markup after the message (a flaired name), e.g. "<col=…>N</col>!". */
+	void sendChatLine(String tag, String message, ChatPalette.Tone tone, String lead, String tail) {
+		if (empty(message)) return;
+		// A raw '|' in a chat line gets mangled by the chat pipeline (an event named
+		// "The AFK Spot | July Bingo" printed as a bare "July Bingo."). Interpolated names are
+		// admin-authored, so swap in the visually-identical broken bar instead. And no '<' or '>':
+		// feed lines carry other players' names, which must never open a chat tag.
+		var safe = clean(message);
+		clientThread.invokeLater(() -> {
+			// The opaque chatbox (fixed mode, or resizable with transparency off) is light parchment: the
+			// default bright colours swap for dark ones there. Colours the player picked are kept.
+			var opaque = opaqueChatbox();
+			// The tag's colour is the site's (Settings > In-game chat), else Soulrend gold; plain text white.
+			var own = opaque ? "000000" : "ffffff";
+			var prefix = chatTag != null ? chatTag : opaque ? "7a5600" : "ffd700";
+			// Every colour in the line, whoever chose it, readable on this chatbox (ChatPalette.readable).
+			var line = ChatPalette.readable("<col=" + prefix + ">[" + clean(tag) + "]</col> "
+					+ (lead != null ? lead + " " : "") + "<col=" + chatPalette.text(tone, own, opaque) + ">" + safe + "</col>"
+					+ (tail != null ? tail : ""), opaque);
+			// addChatMessage posts to every plugin's ChatMessage subscriber. During startup/logout
+			// RuneLite has neither a local player nor its varbit array yet, and a surprising number
+			// of third-party subscribers assume both exist. Never inject an Soulrend line into that
+			// half-initialised state: doing so can cascade into unrelated plugin exceptions and an
+			// injected-client crash.
+			if (!loggedIn() || client.getLocalPlayer() == null) return;
+			client.addChatMessage(GAMEMESSAGE, "", line, null);
+		});
+	}
+
+	// -- Profile sync: collection log + personal bests ---------------------------------------
+	// Both are the player's OWN data going to the player's OWN clan site -- the pattern the hub
+	// accepts (nothing here reads or reports anybody else). Everything is opt-out in config, and
+	// nothing is read at all while the toggles are off.
+
+	/**
+	 * The sidebar's "Sync clan roster" button.
+	 *
+	 * <p>Same work as the in-game one, with its own in-flight guard so a double click is one push,
+	 * and the result reported in chat where the player is looking. Refused outright when the clan
+	 * channel isn't readable — the roster is scraped from it, so there is nothing to send.
+	 */
+	void syncClanRosterFromPanel() {
+		if (!isAdmin) {
+			sendChatMessage("Only clan admins can sync the roster.");
+			return;
+		}
+		// Cached, because this is called from the side panel on the EDT — reading the clan channel
+		// from there is the same thread violation that swallowed the profile button's message.
+		if (!clanRosterReadable) {
+			sendChatMessage("Join your clan channel first — the roster is read from it.");
+			return;
+		}
+		if (panelRosterSyncRunning) {
+			sendChatMessage("Already syncing the roster.");
+			return;
+		}
+		panelRosterSyncRunning = true;
+		sendChatMessage("Syncing the clan roster...");
+		syncClanRoster((ok, msg) -> {
+			panelRosterSyncRunning = false;
+			repaintSidebar(); // the callback lands on the executor or client thread, never the EDT
+		});
+	}
+
+	/**
+	 * Whether profile data can be synced now — drives the in-tab "Sync profile" row.
+	 */
+	boolean supportsProfileSync() {
+		return config.syncClog() && apiClient.isConfigured() && siteKnown();
+	}
+
+	// Whether the collection log is on screen, as last seen on a tick. The panel's "Sync profile" can
+	// only work then (requestFullClogTransmit reads the log's own widgets); offered anywhere else it
+	// was a button whose only answer was "open your collection log".
+	volatile boolean clogOpen;
+
+	/** "Sync profile" in the side panel: supported, and the log is open to read from. */
+	/** Client thread: logged in on a separate-save (seasonal) world, cached for the side panel. */
+	void markSeasonalWorld() {
+		var on = client.getGameState() == GameState.LOGGED_IN && WorldInfo.separateSave(client.getWorldType());
+		if (on != seasonalWorld) {
+			seasonalWorld = on;
+			if (sidebarPanel != null) invokeLater(sidebarPanel::seasonalChanged);
+		}
+	}
+
+	volatile boolean seasonalWorld;
+
+	/** Any thread: whether the side panel should offer the seasonal-sharing switch. */
+	boolean seasonalSharingOffered() {
+		return seasonalWorld && pluginConfig != null;
+	}
+
+	boolean shareSeasonal() {
+		return config.shareSeasonal();
+	}
+
+	void setShareSeasonal(boolean on) {
+		configManager.setConfiguration("soulrendbingo", "shareSeasonal", on);
+	}
+
+	boolean canSyncProfileFromPanel() {
+		return clogOpen && supportsProfileSync();
+	}
+
+	void trackClogOpen() {
+		var open = client.getWidget(InterfaceID.Collection.FRAME) != null;
+		if (open != clogOpen) {
+			clogOpen = open;
+			repaintSidebar();
+		}
+	}
+
+	/**
+	 * Tell the site about a collection-log unlock as it happens, with the kill that produced it.
+	 *
+	 * <p>Otherwise the site only learns of the slot at the next log sync, and stamps it with THAT
+	 * moment: Moxi taken on the 16th Amoxliatl and synced at 39 read "at 39 KC", dated whenever the
+	 * log was next opened. The kill line is sent as-is and the site keeps it only when it belongs to
+	 * the item's page. One request per unlock, which is once per slot per account, ever.
+	 */
+	void sendClogUnlock(String item) {
+		if (!supportsProfileSync()) return;
+		// Read on the client thread, where the kill line was recorded.
+		var recentKill = lastKcName != null && now() - lastKcAtMs <= KC_ATTRIBUTION_WINDOW_MS;
+		var kcName = recentKill ? lastKcName : null;
+		var kc = recentKill ? lastKcValue : null;
+		submit(() -> {
+			try {
+				apiClient.submitClogUnlock(item, kcName, kc);
+			} catch (Exception e) {
+				// Not retried: the next log sync still records the slot, just without the live KC.
+			}
+		});
+	}
+
+	/**
+	 * A config answered, or the site said this person is in no clan — the log and bests are the
+	 * person's, so a solo player syncs them like anyone else.
+	 */
+	boolean siteKnown() {
+		return pluginConfig != null || apiClient.signedInWithoutClan();
+	}
+
+	/**
+	 * Live push is a runtime switch on the site, advertised only while it is on. In no clan the config
+	 * is a 404 and carries no capabilities; /api/version answers instead.
+	 */
+	boolean pushEnabled() {
+		var cfg = pluginConfig;
+		return cfg != null ? cfg.serverSupports("push-ws")
+				: apiClient.signedInWithoutClan() && apiClient.siteAdvertises("push-ws");
+	}
+
+
+	/**
+	 * Point the profile-sync state at the account that just logged in.
+	 *
+	 * <p>State is per-RSN, so switching characters swaps it rather than merging two logs. A no-op
+	 * when the same account logs back in, which is the common case.
+	 */
+	void loadProfileSyncState(String rsn) {
+		var key = rsn == null ? "" : rsn.trim().toLowerCase(ROOT);
+		if (key.isEmpty() || key.equals(profileSyncRsn)) return;
+		profileSyncRsn = key;
+		clogSync.reset();
+		personalBests.reset();
+		// A different character doesn't inherit this one's unsent highlights — the site files them
+		// against whoever the request authenticates as, which would now be the wrong person.
+		moments.reset();
+		clogSync.restoreState(cfgGet(accountKey(CFG_CLOG_STATE, key)));
+		// The whole-log fingerprint survives a restart: opening the collection log re-transmits
+		// everything every time, and without this each session's first open re-sent a log the site
+		// already had, byte for byte.
+		lastClogFingerprint = cfgLong(accountKey(CFG_CLOG_FINGERPRINT, key));
+		personalBests.restoreState(cfgGet(accountKey(CFG_PB_STATE, key)));
+		importRuneLitePersonalBests(key);
+	}
+
+	/**
+	 * Copy the personal bests RuneLite's own chat-commands plugin has already recorded, once.
+	 *
+	 * <p>Local config only -- the same store the player's own client wrote, on the same machine, for
+	 * the account they're logged into. Nothing is read about anyone else. Without it a profile
+	 * starts empty and fills in over months; with it, a player who has been playing for years sees
+	 * their real times the first time they open their clan profile.
+	 *
+	 * <p>Runs once per account per activity list (a flag in our own config), and does nothing when
+	 * chat-commands has never run -- then the live capture builds the set from the next kill onward.
+	 * The flag stores a signature of the names we asked for, so when the site adds an activity --
+	 * the awakened DT2 bosses, say -- everyone re-probes once for the new names. Re-running is safe:
+	 * a seeded time only ever replaces a slower one.
+	 */
+	void importRuneLitePersonalBests(String rsnKey) {
+		if (!config.importRuneLitePbs() || !config.syncPersonalBests()) return;
+		var profile = configManager.getRSProfileKey();
+		if (empty(profile)) return; // No RS profile yet -- try again next login rather than marking it done.
+		// The names to ask for. Without them there is nothing to probe, so we leave the flag unset
+		// and try again once the site's config has landed.
+		var cfg = pluginConfig;
+		var activities = cfg != null ? cfg.pbActivities : null;
+		if (empty(activities)) return;
+		// String.hashCode is specified, so the same list gives the same signature on every client
+		// and every release. An older flag ("1", or an earlier list) simply doesn't match.
+		var signature = Integer.toString(activities.hashCode());
+		var done = cfgGet(accountKey(CFG_PB_IMPORTED, rsnKey));
+		if (signature.equals(done)) return;
+
+		// ASK, don't list. RuneLite stores these under the RS-profile scope, and its only key-listing
+		// API reads the main profile — so the obvious loop over getConfigurationKeys() silently found
+		// nothing at all, whatever prefix it was given. getRSProfileConfiguration reads the right
+		// store, one key at a time, which is why the names have to come from somewhere.
+		Map<String, Integer> imported = new HashMap<>();
+		for (var base : activities) {
+			if (empty(base)) continue;
+			probeRuneLitePb(base, imported);
+			// Every scale RuneLite files a raid under. Its own pattern is
+			// "(?<teamsize>\\d+(?:\\+|-\\d+)? players?|Solo)", so a solo run is the WORD solo — not
+			// "1 players" — and a big team is a bucket rather than an exact count. Probing only
+			// "N players" therefore missed every solo raid time anyone had.
+			probeRuneLitePb(base + " solo", imported);
+			for (int size = 1; size <= MAX_PB_TEAM_SIZE; size++) probeRuneLitePb(base + " " + size + " players", imported);
+			for (var bucket : PB_TEAM_BUCKETS) probeRuneLitePb(base + " " + bucket, imported);
+		}
+
+		int adopted = personalBests.seed(imported, now());
+		cfgSet(accountKey(CFG_PB_IMPORTED, rsnKey), signature);
+		log.info("Imported {} PB(s) ({} probed)", adopted, imported.size());
+		if (adopted > 0) sendChatMessage("Imported " + adopted + " personal best" + (adopted == 1 ? "" : "s")
+				+ " from RuneLite.");
+	}
+
+	/**
+	 * Try the personal-best import again on the periodic tick.
+	 *
+	 * <p>It needs three things that don't arrive together: an account (login), an RS profile key
+	 * (login), and the site's activity list (the first config fetch). Running it only at login meant
+	 * the config usually hadn't landed yet and the import quietly did nothing. The once-per-account
+	 * flag makes every call after a successful one free.
+	 */
+	void retryPersonalBestImport() {
+		var rsn = profileSyncRsn;
+		if (!empty(rsn)) importRuneLitePersonalBests(rsn);
+	}
+
+	/** Read one stored best, if RuneLite has it for this account. Times are seconds; ours centis. */
+	void probeRuneLitePb(String activity, Map<String, Integer> into) {
+		var raw = configManager.getRSProfileConfiguration(RUNELITE_PB_GROUP, activity);
+		if (raw == null || raw.trim().isEmpty()) return;
+		try {
+			int centis = (int) Math.round(Double.parseDouble(raw.trim()) * 100.0);
+			if (centis > 0) into.put(activity, centis);
+		} catch (NumberFormatException e) {
+			// Not a time -- skip the key rather than the import.
+		}
+	}
+
+	/**
+	 * The send contract the profile-sync pushes share: the result on success (backoff cleared), else
+	 * null after the matching handler ran — rate-limited (gets the wait in ms), refused for good
+	 * (drop the batch) or failed (backoff bumped, batch kept); the last two get the error message.
+	 */
+	<T> T pushBatch(String what, SyncBackoff backoff, long now, Callable<T> send,
+			LongConsumer limited, Consumer<String> refused, Consumer<String> failed) {
+		try {
+			var result = send.call();
+			backoff.onSuccess();
+			return result;
+		} catch (RateLimitedException e) {
+			limited.accept(e.retryAfterMs);
+		} catch (PermanentSubmissionException e) {
+			log.info("{} refused: {}", what, e.getMessage());
+			refused.accept(e.getMessage());
+		} catch (Exception e) {
+			backoff.onFailure(now);
+			failed.accept(e.getMessage());
+		}
+		return null;
+	}
+
+	/**
+	 * Send any collection-log pages that have changed. Runs on the shared executor's 30s tick --
+	 * no thread of our own, and nothing on the client thread.
+	 */
+	void flushClogSync() {
+		if (profileSyncRsn == null || !supportsProfileSync()) return;
+		var now = now();
+		if (!clogSync.isDue(now) || !clogBackoff.ready(now)) return;
+		var batch = clogSync.nextBatch();
+		// Rate-limited: background sync, nothing to tell the player, just wait as long as the site asked.
+		// Refused outright (a malformed page, a site that doesn't take these): dropping the batch is the
+		// only way out of an otherwise permanent 30-second retry loop.
+		if (pushBatch("Collection log pages", clogBackoff, now, () -> {
+			apiClient.submitClogPages(batch, clogSync.syncedPages());
+			return batch;
+		}, ms -> clogPushAllowedAt = now() + Math.max(ms, 1_000L), m -> clogSync.onSent(batch), m -> {
+		}) == null) return;
+		clogSync.onSent(batch);
+		cfgSet(accountKey(CFG_CLOG_STATE, profileSyncRsn),
+				clogSync.serializeState());
+	}
+
+	/**
+	 * Push a settled whole-log transmit (see {@link ClogFullSync}). Runs on the same 30s tick as the
+	 * page sync; the two are complementary — this carries every obtained item, the page route carries
+	 * the kill-count lines that only appear on a drawn page.
+	 */
+	void flushFullClogSync() {
+		if (profileSyncRsn == null || !supportsProfileSync()) return;
+		var now = now();
+		if (!clogFullSync.isDue(now) || !clogFullBackoff.ready(now)) return;
+		// The site's own rate limit, respected before the request rather than discovered by it.
+		if (now < clogPushAllowedAt) return;
+		var manual = clogFullSync.isManual();
+		int count = clogFullSync.size();
+		// Opening the log re-transmits everything, and most opens change nothing. Pushing an
+		// identical log would burn the server's cooldown and rewrite 1,700 rows to say the same
+		// thing. A deliberate press still goes, so "sync now" always means something happened.
+		var fingerprint = clogFullSync.fingerprint();
+		if (!manual && fingerprint == lastClogFingerprint) {
+			clogFullSync.onSent();
+			// Nothing to send. Said once a login — proof the sync ran and agreed with the site —
+			// and then not again: the log is re-transmitted on every open, and a line each time
+			// saying nothing happened is worse than saying nothing at all.
+			if (!autoClogReportedThisLogin) {
+				autoClogReportedThisLogin = true;
+				sendChatMessage("Collection log checked — your profile is up to date.");
+			}
+			return;
+		}
+		// Rate-limited: it said when. Wait exactly that long instead of doubling blindly, and keep the
+		// batch. Refused: the site will keep saying no, so retrying forever is just noise. Failed: kept for
+		// the next attempt; a site that's down mustn't cost them the transmit.
+		var result = pushBatch("Whole-log", clogFullBackoff, now,
+				() -> apiClient.submitClogItems(clogFullSync.snapshot()), ms -> {
+					clogPushAllowedAt = now + Math.max(ms, 1_000L);
+					clogFullSync.onSendFailed(now);
+					if (manual) sendChatMessage("Synced very recently — the site allows one sync a minute. Try again in "
+							+ secs(ms) + "s.");
+				}, m -> {
+					clogFullSync.onSent();
+					if (manual) sendChatMessage(WARN, "Couldn't sync your profile: " + m + ".");
+				}, m -> {
+					clogFullSync.onSendFailed(now);
+					if (manual) sendChatMessage(WARN, "Couldn't sync your profile: " + m + ". It'll retry on its own.");
+				});
+		manualSyncStartedAt = 0; // landed or given up on — nothing for the watchdog to complain about
+		if (result == null) return;
+		clogPushAllowedAt = now + SERVER_CLOG_COOLDOWN_MS;
+		lastClogFingerprint = fingerprint;
+		if (profileSyncRsn != null) cfgSet(accountKey(CFG_CLOG_FINGERPRINT, profileSyncRsn),
+				"" + fingerprint);
+		clogFullSync.onSent();
+		log.info("Collection log synced: {} items", count);
+		if (manual) {
+			// The game's own slot count, as the log's title shows it: the transmit can carry a few more item
+			// ids than slots (the same slot under two ids), and "497" beside a log reading 493 looked wrong.
+			int slots = client.getVarpValue(VarPlayerID.COLLECTION_COUNT);
+			sendChatMessage(Tone.DONE, "Profile synced — " + (slots > 0 ? slots : count) + " collection log slots.");
+		} else if (result.added > 0) {
+			// New slots are news: always said.
+			autoClogReportedThisLogin = true;
+			sendChatMessage(Tone.DONE, "Collection log synced — " + result.added + " new slot"
+					+ (result.added == 1 ? "" : "s") + ".");
+		} else if (!autoClogReportedThisLogin) {
+			// A push that added nothing still proves the round trip worked — once a login.
+			autoClogReportedThisLogin = true;
+			sendChatMessage("Collection log synced — nothing new.");
+		}
+	}
+
+	/** Same contract for best times. */
+	void flushPersonalBests() {
+		if (!config.syncPersonalBests() || !apiClient.isConfigured() || profileSyncRsn == null
+				|| !siteKnown()) return;
+		var now = now();
+		if (!personalBests.isDue(now) || !pbBackoff.ready(now)) return;
+		var batch = personalBests.nextBatch();
+		// Bests ride the same limiter; a rate-limited batch stays dirty and goes up when it clears.
+		if (pushBatch("Personal bests", pbBackoff, now, () -> {
+			apiClient.submitPersonalBests(batch);
+			return batch;
+		}, ms -> pbBackoff.onFailure(now()), m -> personalBests.onSent(batch), m -> {
+		}) == null) return;
+		personalBests.onSent(batch);
+		cfgSet(accountKey(CFG_PB_STATE, profileSyncRsn),
+				personalBests.serializeState());
+	}
+
+	/**
+	 * The clan channel loaded (or changed) — the moment the in-game roster becomes readable.
+	 *
+	 * <p>Rosters used to drift until an admin remembered to press "Sync clan roster": someone joins,
+	 * the site doesn't know, and their drops land as a guest. The data is right here at login, so
+	 * take it. Admin-only (the site refuses anyone else's push anyway), at most once every half hour
+	 * per session, and silent — an automatic sync that announced itself in chat every login would be
+	 * worse than the drift.
+	 */
+	/** The guest channel last reported for the chat feed's guest bridge, and when. */
+	volatile String lastGuestChannel;
+	volatile long lastGuestChannelAt;
+	/** Under the site's presence TTL (10 minutes), so sitting in a channel never lapses. */
+	static final long GUEST_PRESENCE_REFRESH_MS = 4 * 60_000L;
+
+	/**
+	 * The clan whose guest channel this character sits in → the site, for the chat feed's guest bridge.
+	 * Only while the feed is on; again every few minutes while it stays, and null once it's left.
+	 */
+	void pushGuestChannel() {
+		if (!apiClient.isConfigured() || pluginConfig == null) return;
+		if (!config.chatFeed() || !loggedIn()) {
+			if (lastGuestChannel != null) sendGuestChannel(null);
+			return;
+		}
+		clientThread.invoke(() -> {
+			var guest = client.getGuestClanChannel();
+			var name = guest != null ? guest.getName() : null;
+			if (!Objects.equals(name, lastGuestChannel) || name != null && now() - lastGuestChannelAt >= GUEST_PRESENCE_REFRESH_MS) sendGuestChannel(name);
+		});
+	}
+
+	void sendGuestChannel(String name) {
+		lastGuestChannel = name;
+		lastGuestChannelAt = now();
+		submit(() -> {
+			try {
+				apiClient.submitGuestChannel(name);
+			} catch (IOException e) {
+				lastGuestChannelAt = 0; // the next tick tries again
+			}
+		});
+	}
+
+	@Subscribe
+	void onClanChannelChanged(ClanChannelChanged event) {
+		// Joined or left a guest channel: tell the guest bridge now rather than on the next tick.
+		if (event.isGuest()) submit(() -> safely("pushGuestChannel", this::pushGuestChannel));
+		// The member list arrives just after the channel; a delay is cheaper than polling for it.
+		if (!event.isGuest() && config.autoSyncClanRoster()) later(() -> safely("autoRosterSync", this::autoSyncClanRoster), AUTO_ROSTER_DELAY_MS);
+	}
+
+	/**
+	 * Push the in-game roster if we're allowed to and haven't recently. Every guard here is a reason
+	 * NOT to send: not an admin, no token, roster not loaded yet, one already running, or one ran
+	 * within the last half hour.
+	 */
+	void autoSyncClanRoster() {
+		if (autoRosterSyncRunning || !isAdmin) return;
+		var token = config.playerToken();
+		if (empty(token) || !apiClient.isConfigured()) return;
+		var now = now();
+		if (lastAutoRosterSyncAt != 0 && now - lastAutoRosterSyncAt < AUTO_ROSTER_MIN_GAP_MS) return;
+		autoRosterSyncRunning = true;
+		lastAutoRosterSyncAt = now;
+		autoRosterAnnounce = true;
+		syncClanRoster((ok, msg) -> {
+			autoRosterSyncRunning = false;
+			if (!ok) lastAutoRosterSyncAt = 0; // most likely "roster not loaded yet": the next channel change tries again
+		});
+	}
+}

@@ -1,0 +1,149 @@
+package com.soulrend;
+
+import com.google.gson.Gson;
+import okhttp3.OkHttpClient;
+import org.junit.Before;
+import org.junit.Test;
+
+import static org.junit.Assert.assertEquals;
+
+/**
+ * WHICH CLAN a request is for, once the Site URL stops naming one.
+ *
+ * The member types one address and one Soulrend answers on it for every clan, so on the canonical form
+ * the URL says nothing about which clan is meant and the server picks from the token. That works,
+ * and it is invisible: a member drafted onto two live boards had no way to see which one their drops
+ * were filing into, and no way to change it.
+ *
+ * So there are two slugs and they are not the same thing. The one the MEMBER picked wins outright.
+ * The one the SERVER last said it answered for is adopted for everything else — which is what makes
+ * a submission, a starting shot and its upload land in the right clan on an address that names none,
+ * since those routes resolve a clan from the address rather than from the token.
+ *
+ * The config poll is the exception that makes Auto work: on Auto it stays unaddressed, so every poll
+ * is a fresh question and a member whose live board moves to their other clan follows it.
+ */
+public class ClanAddressingTest
+{
+	private BingoApiClient client;
+
+	@Before
+	public void setUp()
+	{
+		client = new BingoApiClient(new Gson(), new OkHttpClient());
+		client.configure("tok");
+	}
+
+	// ---- Auto: nothing chosen, nothing heard yet ---------------------------------------------------
+
+	@Test
+	public void withNothingKnownEveryUrlIsTheBareRoot()
+	{
+		assertEquals("https://soulrend.events/api/plugin/stats", client.clanUrl("/api/plugin/stats"));
+		assertEquals("https://soulrend.events/api/plugin/config", client.configUrl("/api/plugin/config"));
+		assertEquals("", client.getActiveClan());
+	}
+
+	@Test
+	public void theServerSAnswerIsAdoptedForEverythingButTheNextQuestion()
+	{
+		client.setResolvedClan("theafkspot");
+
+		// Everything the plugin DOES is now addressed…
+		assertEquals("https://soulrend.events/c/theafkspot/api/plugin/stats", client.clanUrl("/api/plugin/stats"));
+		assertEquals("https://soulrend.events/c/theafkspot/api/events/12/submissions",
+			client.clanUrl("/api/events/12/submissions"));
+		assertEquals("https://soulrend.events/c/theafkspot/api/upload", client.clanUrl("/api/upload"));
+
+		// …but the poll that ASKS stays open, so the site can still change its mind.
+		assertEquals("https://soulrend.events/api/plugin/config", client.configUrl("/api/plugin/config"));
+		assertEquals("theafkspot", client.getActiveClan());
+	}
+
+	@Test
+	public void onAutoTheSiteCanMoveUsToAnotherClan()
+	{
+		client.setResolvedClan("theafkspot");
+		client.setResolvedClan("vanguard"); // a new board went live over there
+		assertEquals("https://soulrend.events/c/vanguard/api/plugin/stats", client.clanUrl("/api/plugin/stats"));
+	}
+
+	// ---- An explicit pick outranks the server ------------------------------------------------------
+
+	@Test
+	public void aMemberSPickBeatsWhateverTheServerResolved()
+	{
+		client.setResolvedClan("theafkspot");
+		client.setChosenClan("vanguard");
+
+		assertEquals("https://soulrend.events/c/vanguard/api/plugin/stats", client.clanUrl("/api/plugin/stats"));
+		// And the poll is addressed too — they asked for this clan, so stop re-asking.
+		assertEquals("https://soulrend.events/c/vanguard/api/plugin/config", client.configUrl("/api/plugin/config"));
+		assertEquals("vanguard", client.getActiveClan());
+	}
+
+	@Test
+	public void choosingAutoAgainHandsTheDecisionBack()
+	{
+		client.setResolvedClan("theafkspot");
+		client.setChosenClan("vanguard");
+		client.setChosenClan(""); // the Auto row
+
+		assertEquals("https://soulrend.events/c/theafkspot/api/plugin/stats", client.clanUrl("/api/plugin/stats"));
+		assertEquals("https://soulrend.events/api/plugin/config", client.configUrl("/api/plugin/config"));
+	}
+
+	// ---- The slug is validated, because it goes straight into a URL --------------------------------
+
+	@Test
+	public void anythingThatIsNotASlugNamesNoClan()
+	{
+		for (String bad : new String[]{
+			null, "", "   ",
+			"a",                                // too short for the site's own pattern
+			"Not A Slug",                       // spaces
+			"THEAFKSPOT/../../evil",            // traversal
+			"theafkspot/api/plugin/config",     // a path, not a slug
+			"the_afk_spot",                     // underscore is not in the alphabet
+			"..",
+			"a".repeat(33),                     // past the 32-char cap
+		})
+		{
+			client.setChosenClan(bad);
+			client.setResolvedClan(bad);
+			assertEquals("rejected: " + bad,
+				"https://soulrend.events/api/plugin/stats", client.clanUrl("/api/plugin/stats"));
+		}
+	}
+
+	@Test
+	public void aSlugIsLowercasedAndTrimmedRatherThanRefused()
+	{
+		client.setChosenClan("  TheAfkSpot  ");
+		assertEquals("https://soulrend.events/c/theafkspot/api/plugin/stats", client.clanUrl("/api/plugin/stats"));
+	}
+
+	// ---- Signing in is about a person, so it never carries a clan ----------------------------------
+
+	@Test
+	public void deviceSignInIsNeverAddressed()
+	{
+		client.setChosenClan("vanguard");
+		client.setResolvedClan("theafkspot");
+
+		// The member has no clan yet at this point — that is the whole reason they are signing in — and
+		// the site's device-auth pair is a platform route that a clan prefix would only redirect out of.
+		assertEquals("https://soulrend.events/api/plugin/auth/start", BingoApiClient.authUrl("/api/plugin/auth/start"));
+		assertEquals("https://soulrend.events/api/plugin/auth/poll", BingoApiClient.authUrl("/api/plugin/auth/poll"));
+	}
+
+	@Test
+	public void anUnconfiguredClientBuildsNothingSurprising()
+	{
+		BingoApiClient blank = new BingoApiClient(new Gson(), new OkHttpClient());
+		blank.setResolvedClan("theafkspot");
+		// No base URL: the caller checks isConfigured() before ever calling out, and the builder must
+		// not throw on the way to that check.
+		assertEquals("null/c/theafkspot/api/plugin/stats", blank.clanUrl("/api/plugin/stats"));
+	}
+}
