@@ -59,6 +59,7 @@ def text_transform(path: Path, source: str) -> str:
         if n != 1:
             raise RuntimeError("Upstream PluginDescriptor migration did not match audited version")
         source = source.replace('internalName = "anvil",', 'internalName = "soulrend-bingo"')
+        source = source.replace('name = "Anvil",', 'name = "Soulrend Bingo",')
         source = source.replace(
             'Companion plugin for the Anvil clan-events platform — codeword overlay, auto-submits tracked bingo drops, clan Discord notifications',
             'Soulrend Bingo companion (development build; site integration pending)',
