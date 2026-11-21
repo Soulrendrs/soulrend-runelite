@@ -1,0 +1,25 @@
+# Soulrend Bingo — RuneLite plugin
+
+Official RuneLite companion for the [Soulrend Bingo Portal](https://soulrend.events).
+
+> **Status: development foundation.** The plugin has not been released, tested against production, or submitted to the RuneLite Plugin Hub. Do not install a development build expecting working Soulrend authentication or proof submission.
+
+## Architecture
+
+The RuneLite plugin is a client for Soulrend's existing Django API. Event eligibility, board progression, proof approval, and official Wise Old Man XP/KC credit remain server-authoritative.
+
+## Upstream and licensing
+
+This project is being adapted from [AhmedFathy2001/anvil-plugin](https://github.com/AhmedFathy2001/anvil-plugin), pinned initially to commit `7e45a7708b8513e90e651ff685ba5329a2896aa5`. The original Java plugin is BSD-2-Clause licensed; the fork must preserve its original copyright and license. The Anvil website has a different license and is not included.
+
+The Soulrend plugin uses its own plugin identity, configuration namespace (`soulrendbingo`), credential storage and proof queue. Anvil settings must not be imported or modified.
+
+## Development roadmap
+
+1. Import and isolate the Java plugin source with the original BSD license.
+2. Establish CI and a no-Anvil-network regression gate.
+3. Implement Soulrend device authentication and event discovery with the Django backend.
+4. Add safe live board display, screenshot proofs, retries, and XP/KC telemetry without bypassing official WOM scoring.
+5. Verify with actual RuneLite and apply to the Plugin Hub.
+
+Backend integration design: [soulrend-bingos/docs/runelite-plugin-integration.md](https://github.com/Soulrendrs/soulrend-bingos/blob/main/docs/runelite-plugin-integration.md) (pending review/merge).
