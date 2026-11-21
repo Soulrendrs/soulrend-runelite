@@ -60,7 +60,7 @@ import net.runelite.api.clan.ClanMember;
 
 @Slf4j
 @PluginDescriptor(
-		name = "Soulrend",
+		name = "Soulrend Bingo",
 		description = "Soulrend Bingo companion (development build; site integration pending)",
 		tags = {"soulrend", "bingo", "overlay", "drops", "loot", "clan", "event"},
 		// Required by getPluginDirectory(), which throws without it — the directory is named after it.
