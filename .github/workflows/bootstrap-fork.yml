@@ -48,6 +48,9 @@ jobs:
           set -euo pipefail
           python3 soulrend/scripts/import_anvil.py upstream soulrend
 
+      - name: Restore original functional tenure glyph atlas (BSD-licensed)
+        run: cp upstream/src/main/resources/com/anvil/tenure.png soulrend/src/main/resources/com/soulrend/tenure.png
+
       - name: Verify and commit imported source
         shell: bash
         working-directory: soulrend

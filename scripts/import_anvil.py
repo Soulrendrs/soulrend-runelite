@@ -158,7 +158,7 @@ def run(upstream: Path, destination: Path) -> None:
 
     # Never ship old logos. Keep resource names used by the compiled Java code.
     (destination / "icon.png").write_bytes(icon_png(40))
-    for basename in ("sidebar_icon.png", "clog_banner.png", "tenure.png"):
+    for basename in ("sidebar_icon.png", "clog_banner.png"):
         file = destination / "src/main/resources/com/soulrend" / basename
         if file.exists():
             file.write_bytes(icon_png(32))
