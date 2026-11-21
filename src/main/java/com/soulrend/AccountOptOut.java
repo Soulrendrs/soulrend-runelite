@@ -1,0 +1,85 @@
+package com.soulrend;
+
+import java.util.*;
+
+/**
+ * Characters this RuneLite install has been told are not the signed-in Soulrend user's.
+ *
+ * <p>The Account Token names whoever set this RuneLite up, not whoever is playing. Siblings share a
+ * PC; friends log in at each other's. So the plugin links every character it plays by default — the
+ * one-click path — and the side panel's "Not my account" puts the logged-in character here. While a
+ * character in this set is logged in, the plugin sends Soulrend nothing at all
+ * ({@link BingoApiClient#setAccountPaused}).
+ *
+ * <p>Stored as digests, never raw: the account hash is a credential the site treats as proof of
+ * control, and the name is somebody else's. Both are kept so the launcher's pre-login name hint can
+ * be withheld too. RuneLite-free and immutable so it is unit-testable; the plugin persists
+ * {@link #serialize()} in its own config.
+ */
+final class AccountOptOut {
+	static final AccountOptOut EMPTY = new AccountOptOut(Collections.emptySet());
+
+	final Set<String> digests;
+
+	AccountOptOut(Set<String> digests) {
+		this.digests = Collections.unmodifiableSet(digests);
+	}
+
+	static AccountOptOut parse(String raw) {
+		var out = new LinkedHashSet<String>();
+		if (raw != null) {
+			for (var part : raw.split(",")) {
+				var p = part.trim();
+				if (!p.isEmpty()) out.add(p);
+			}
+		}
+		return new AccountOptOut(out);
+	}
+
+	String serialize() {
+		return String.join(",", digests);
+	}
+
+	/** Is this character opted out? Either key matches: the hash is rename-proof, the name works pre-login. */
+	boolean contains(long accountHash, String rsn) {
+		var h = hashKey(accountHash);
+		var n = nameKey(rsn);
+		return (h != null && digests.contains(h)) || (n != null && digests.contains(n));
+	}
+
+	/** The launcher's pre-login name: withhold the hint for a character that's opted out. */
+	boolean containsName(String rsn) {
+		var n = nameKey(rsn);
+		return n != null && digests.contains(n);
+	}
+
+	AccountOptOut with(long accountHash, String rsn) {
+		var next = new LinkedHashSet<>(digests);
+		var h = hashKey(accountHash);
+		var n = nameKey(rsn);
+		if (h != null) next.add(h);
+		if (n != null) next.add(n);
+		return new AccountOptOut(next);
+	}
+
+	AccountOptOut without(long accountHash, String rsn) {
+		var next = new LinkedHashSet<>(digests);
+		next.remove(hashKey(accountHash));
+		next.remove(nameKey(rsn));
+		return new AccountOptOut(next);
+	}
+
+	boolean isEmpty() {
+		return digests.isEmpty();
+	}
+
+	/** "h" / "n" plus the first 16 hex chars of SHA-256 (DiskFiles.fingerprint): plenty to tell a handful of local characters apart. */
+	static String hashKey(long accountHash) {
+		return accountHash == -1L ? null : "h" + DiskFiles.fingerprint("hash:" + accountHash);
+	}
+
+	static String nameKey(String rsn) {
+		var norm = Rsn.normalize(rsn);
+		return norm.isEmpty() ? null : "n" + DiskFiles.fingerprint("rsn:" + norm);
+	}
+}

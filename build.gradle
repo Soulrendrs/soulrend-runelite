@@ -1,0 +1,60 @@
+plugins {
+    id 'java'
+}
+
+repositories {
+    mavenLocal()
+    maven {
+        url = 'https://repo.runelite.net'
+    }
+    mavenCentral()
+}
+
+// 'latest.release' rather than a pinned number: the dev client has to match the LIVE game revision
+// or it crashes on startup reading enums out of a stale cache ("your client is out of date"), and a
+// pin silently rots the moment Jagex pushes an update. It's also what the plugin hub builds against.
+def runeLiteVersion = 'latest.release'
+
+dependencies {
+    compileOnly group: 'net.runelite', name: 'client', version: runeLiteVersion
+    compileOnly 'org.projectlombok:lombok:1.18.30'
+    annotationProcessor 'org.projectlombok:lombok:1.18.30'
+
+    testImplementation 'junit:junit:4.12'
+    testImplementation group: 'net.runelite', name: 'client', version: runeLiteVersion
+    testImplementation group: 'net.runelite', name: 'jshell', version: runeLiteVersion
+}
+
+group = 'com.soulrend'
+// Single source of truth for the plugin version: BingoApiClient reads the same resource at runtime
+// and sends it to sites as X-Soulrend-Plugin-Version (see docs/PLUGIN_WIRE.md in the soulrend site repo).
+version = file('src/main/resources/com/soulrend/version.txt').text.trim()
+sourceCompatibility = '11'
+targetCompatibility = '11'
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+tasks.register('runClient', JavaExec) {
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.soulrend.SoulrendPluginTest'
+    // RuneLite refuses to start without -ea; its GPU plugin's ModelUploader assertion crashes a dev
+    // client, so assertions stay on everywhere but there.
+    jvmArgs = ['-ea', '-da:net.runelite.client.plugins.gpu...']
+    // ./gradlew runClient -Dsoulrend.site=https://beta.soulrend.events — hand it on to the client's JVM
+    // (a -D on the gradle line only reaches gradle's own). SOULREND_SITE in the environment works too.
+    if (System.getProperty('soulrend.site')) {
+        systemProperty 'soulrend.site', System.getProperty('soulrend.site')
+    }
+    // A second account side by side: ./gradlew runClient -Prlhome=$HOME/rl-b
+    // RuneLite reads ${user.home}/.runelite (config + credentials.properties), so a home holding
+    // account B's credentials logs that client into B, with its own settings and Soulrend token.
+    if (project.hasProperty('rlhome')) {
+        systemProperty 'user.home', project.property('rlhome')
+    }
+    // RuneLite's own flags, e.g. -Prlargs="--developer-mode --debug"
+    if (project.hasProperty('rlargs')) {
+        args project.property('rlargs').toString().trim().split('\\s+')
+    }
+}

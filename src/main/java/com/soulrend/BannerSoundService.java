@@ -1,0 +1,337 @@
+package com.soulrend;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import net.runelite.client.audio.AudioPlayer;
+import net.runelite.client.util.Filepath;
+
+import javax.inject.*;
+import javax.swing.SwingUtilities;
+import java.io.IOException;
+import java.nio.file.StandardCopyOption;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.function.Consumer;
+import java.util.stream.*;
+
+/**
+ * Plays a clip when the bingo banner fires, and another when a mission drops. No clips ship with the
+ * plugin — users supply their own WAV/PCM files (the only format stock Java decodes) through
+ * {@link #importSounds}, which copies them into {@code sounds/banner/} or {@code sounds/mission/}.
+ * The folder is what makes a clip a banner clip or a mission clip; there is no setting to keep in
+ * step with it, and a mission folder left empty simply keeps the built-in chime. The old {@code .runelite/soulrend-bingo-sounds}
+ * folder is not readable from here and is not the one legacy directory the migration could carry, so
+ * anyone who used it re-imports. Nothing plays until a file is added. Playback goes through RuneLite's {@link AudioPlayer} (plugin-hub policy requires
+ * this over the raw Java Sound API).
+ */
+@Slf4j
+@Singleton
+@RequiredArgsConstructor(onConstructor_ = @Inject)
+public class BannerSoundService {
+	/**
+	 * The plugin's own `sounds/` folder, handed over by SoulrendPlugin at startUp.
+	 *
+	 * NOT MIGRATED, and deliberately so: the client moves exactly one legacy folder and that slot is
+	 * spent on the pending queue, which holds screenshots of drops that cannot be taken again. A .wav
+	 * is still wherever the user got it, and Add sounds re-imports it through the same picker they
+	 * used the first time.
+	 */
+	volatile Filepath root;
+
+	final SoulrendConfig config;
+	final AudioPlayer audioPlayer;
+	// The service is a singleton that outlives a plugin stop/start, so shutdown() can't leave a dead
+	// executor behind: the next play() would throw RejectedExecutionException into the loot handler.
+	ExecutorService audioExecutor;
+
+
+	void setRoot(Filepath dir) {
+		root = dir;
+		migrateLooseClips();
+		for (var kind : Kind.values()) relist(kind);
+	}
+
+	/**
+	 * WHICH CLIP IS THIS? Answered by the folder it is in, not by a setting.
+	 *
+	 * <p>A mission dropping is the opposite kind of news from a tile being finished, so the two
+	 * should not sound alike — but "different how?" used to be a toggle choosing between the banner
+	 * clip and a built-in chime, with no way to supply a mission clip at all. A folder each answers
+	 * it without asking anything: drop a .wav in {@code mission/} and missions play it, leave it
+	 * empty and they keep the built-in chime.</p>
+	 */
+	enum Kind {
+		BANNER, MISSION;
+
+		final String folder = name().toLowerCase(Locale.ROOT);
+	}
+
+	/** One kind's directory, created on demand, or null when there is nowhere to read or write. */
+	Filepath dir(Kind kind) {
+		var d = root;
+		if (d == null) return null;
+		try {
+			var sub = d.joinSegment(kind.folder);
+			if (!sub.exists()) sub.createDirectories();
+			return sub;
+		} catch (IOException e) {
+			log.warn("No {} sounds directory: {}", kind.folder, e.getMessage());
+			return null;
+		}
+	}
+
+	/**
+	 * Clips added before the folders existed sat loose in {@code sounds/}, where nothing looks any
+	 * more. They are banner clips — that is all there was — so they are moved once, quietly. Doing it
+	 * here rather than asking means nobody's sounds stop working because the layout changed under
+	 * them.
+	 */
+	void migrateLooseClips() {
+		var d = root;
+		List<Filepath> loose = d == null || !d.isDirectory() ? new ArrayList<>() : wavsIn(d);
+		var banner = loose.isEmpty() ? null : dir(Kind.BANNER);
+		if (banner == null) return;
+		for (var f : loose) {
+			try {
+				f.moveTo(banner.joinSegment(f.getFileName()), StandardCopyOption.REPLACE_EXISTING);
+			} catch (Exception e) {
+			}
+		}
+	}
+
+	/** Every .wav in one kind's folder. Depth 1 — a clip is a file in it, never deeper. */
+	List<Filepath> wavFiles(Kind kind) {
+		var dir = dir(kind);
+		return dir == null ? new ArrayList<>() : wavsIn(dir);
+	}
+
+	static List<Filepath> wavsIn(Filepath dir) {
+		try (var walk = dir.walk(1)) {
+			return walk.filter(f -> f.isFile() && f.getFileName().toLowerCase().endsWith(".wav")).collect(Collectors.toList());
+		} catch (IOException e) {
+			return new ArrayList<>();
+		}
+	}
+
+	/** True if this kind has at least one .wav (i.e. it could play something of its own). */
+	boolean hasClips(Kind kind) {
+		return !wavFiles(kind).isEmpty();
+	}
+
+	/**
+	 * How old a folder listing may get before it's re-read. The panel asks on every draw, on the EDT,
+	 * so it is always answered from memory and the re-read happens on {@link #audioExecutor}; a clip
+	 * dropped into the folder by hand shows up this much later at worst (Add sounds re-reads at once).
+	 */
+	static final long LISTING_TTL_MS = 10_000L;
+	final Map<Kind, List<String>> listed = new EnumMap<>(Kind.class);
+	final Map<Kind, Long> listedAt = new EnumMap<>(Kind.class);
+	final Set<Kind> relisting = EnumSet.noneOf(Kind.class);
+	/** Told (on the audio thread) when a re-read finds the clips changed, so the panel can redraw. */
+	volatile Runnable onClipsChanged = () -> { };
+
+	void setOnClipsChanged(Runnable onChange) {
+		onClipsChanged = onChange == null ? () -> { } : onChange;
+	}
+
+	/**
+	 * All .wav filenames for one kind, case-insensitively sorted (for the in-tab manager). Never
+	 * touches disk: it answers from the last listing (empty before the first) and, if that's stale,
+	 * re-reads the folder in the background.
+	 */
+	List<String> listClips(Kind kind) {
+		List<String> cached;
+		boolean stale;
+		synchronized (this) {
+			cached = listed.getOrDefault(kind, Collections.emptyList());
+			var at = listedAt.get(kind);
+			stale = at == null || System.currentTimeMillis() - at >= LISTING_TTL_MS;
+		}
+		if (stale) relist(kind);
+		return cached;
+	}
+
+	/** Re-read one kind's folder on the audio thread; a no-op while a re-read is already queued. */
+	void relist(Kind kind) {
+		synchronized (this) {
+			if (!relisting.add(kind)) return;
+		}
+		try {
+			executor().execute(() -> relistNow(kind));
+		} catch (RejectedExecutionException e) {
+			synchronized (this) {
+				relisting.remove(kind);
+			}
+		}
+	}
+
+	/** Blocking (disk) — the audio thread only. */
+	void relistNow(Kind kind) {
+		var names = Collections.unmodifiableList(wavFiles(kind).stream()
+			.map(Filepath::getFileName).sorted(String.CASE_INSENSITIVE_ORDER).collect(Collectors.toList()));
+		List<String> before;
+		synchronized (this) {
+			relisting.remove(kind);
+			before = listed.put(kind, names);
+			listedAt.put(kind, System.currentTimeMillis());
+		}
+		if (!names.equals(before == null ? List.of() : before)) onClipsChanged.run();
+
+	}
+
+	/**
+	 * A clip filename as something to read: "odablock-we-won.wav" becomes "Odablock we won".
+	 *
+	 * <p>Clips arrive as downloaded files, so their names are slugs. Printed verbatim they made both
+	 * the in-game list and the side panel look like a directory listing that had leaked into the
+	 * interface. Lives here rather than in either panel because both of them show the same files.
+	 */
+	static String displayName(String file) {
+		var s = file == null ? "" : file.trim();
+		int dot = s.lastIndexOf('.');
+		if (dot > 0) s = s.substring(0, dot);
+		s = s.replace('_', ' ').replace('-', ' ').replaceAll("\\s+", " ").trim();
+		if (s.isEmpty()) return file == null ? "" : file;
+		return Character.toUpperCase(s.charAt(0)) + s.substring(1);
+	}
+
+	/**
+	 * True if {@code name} is in the play cycle. The cycle is the comma-separated allowlist in
+	 * {@link SoulrendConfig#bannerSoundClip()}; an empty allowlist means "every clip plays".
+	 */
+	boolean isSelected(String name) {
+		var sel = parseSelected(config.bannerSoundClip());
+		return sel.isEmpty() || sel.contains(name.toLowerCase());
+	}
+
+	/** Parse the comma-separated clip allowlist into lowercased ".wav" filenames. Empty = play all. */
+	static Set<String> parseSelected(String csv) {
+		var out = new LinkedHashSet<String>();
+		if (csv == null) return out;
+		for (var part : csv.split(",")) {
+			var s = part.trim().toLowerCase();
+			if (s.isEmpty()) continue;
+			if (!s.endsWith(".wav")) s += ".wav";
+			out.add(s);
+		}
+		return out;
+	}
+
+	void play(Kind kind) {
+		if (!config.bannerSound()) return;
+		try {
+			executor().submit(() -> playBlocking(kind));
+		} catch (RejectedExecutionException e) {
+		}
+	}
+
+	synchronized ExecutorService executor() {
+		if (audioExecutor == null || audioExecutor.isShutdown()) {
+			audioExecutor = Executors.newSingleThreadExecutor(r -> {
+				var t = new Thread(r, "soulrend-banner-sound");
+				t.setDaemon(true);
+				return t;
+			});
+		}
+		return audioExecutor;
+	}
+
+	void playBlocking(Kind kind) {
+		try {
+			var files = wavFiles(kind);
+			if (files.isEmpty()) return;
+
+			// The cycle is the allowlist (comma-separated filenames); empty = every clip is eligible.
+			// Each banner plays one at random from the eligible set, so a multi-clip cycle varies.
+			// Mission clips have no allowlist: the folder is already the choice of what plays.
+			var selected = kind == Kind.BANNER ? parseSelected(config.bannerSoundClip()) : Set.<String>of();
+			var candidates = new ArrayList<Filepath>();
+			for (var f : files) {
+				if (selected.isEmpty() || selected.contains(f.getFileName().toLowerCase())) candidates.add(f);
+			}
+			if (candidates.isEmpty()) return;
+
+			// AudioPlayer takes a Filepath directly as of 1.12.39, so the clip never leaves the sandbox.
+			audioPlayer.play(candidates.get(ThreadLocalRandom.current().nextInt(candidates.size())), gainDb());
+		} catch (Exception e) {
+		}
+	}
+
+	/**
+	 * Convert the 0–100 volume config to a MASTER_GAIN decibel value AudioPlayer applies. 100 → 0 dB
+	 * (unattenuated); lower volumes attenuate logarithmically; 0 → effectively silent. AudioPlayer
+	 * clamps to the line's supported range.
+	 */
+	float gainDb() {
+		int vol = Math.max(0, Math.min(100, config.bannerSoundVolume()));
+		return vol <= 0 ? -80f : (float) (20.0 * Math.log10(vol / 100.0));
+	}
+
+	/**
+	 * Opens a file picker and copies the chosen WAV(s) into the user sounds folder. {@code onImported}
+	 * (may be null) is invoked with the successfully-copied filenames so the caller can confirm in chat;
+	 * it's skipped when the user cancels or nothing copied.
+	 */
+	void importSounds(Kind kind, Consumer<List<String>> onImported) {
+		SwingUtilities.invokeLater(() -> {
+			// Filepath.Chooser rather than a bare JFileChooser: the user picking a file is how a
+			// plugin is granted anything outside its own directory, and it is the same dialog they
+			// were already looking at. Nothing else about this flow changes — the clips are copied
+			// in, and playback still only ever reads our own folder.
+			var chosen = new Filepath.Chooser()
+				.setIsOpen()
+				.setAcceptsFiles()
+				.setMultiSelectionEnabled(true)
+				.setDialogTitle(kind == Kind.MISSION ? "Add mission sounds" : "Add banner sounds")
+				.addExtensionFilter("WAV audio", "wav")
+				.showDialog((java.awt.Component) null);
+			if (chosen == null || chosen.isEmpty()) return;
+			var dir = dir(kind);
+			if (dir == null) return;
+			// The picker needs the EDT; the copies don't, and a big .wav is a long copy.
+			try {
+				executor().execute(() -> copyIn(kind, dir, chosen, onImported));
+			} catch (RejectedExecutionException e) {
+			}
+		});
+	}
+
+	/** Blocking (disk) — the audio thread only. */
+	void copyIn(Kind kind, Filepath dir, List<Filepath> chosen, Consumer<List<String>> onImported) {
+		var imported = new ArrayList<String>();
+		for (var src : chosen) {
+			var name = src.getFileName();
+			try {
+				src.copyTo(dir.joinSegment(name), StandardCopyOption.REPLACE_EXISTING);
+				imported.add(name);
+			} catch (Exception e) {
+				log.warn("Could not import sound {}: {}", name, e.getMessage());
+			}
+		}
+		relistNow(kind);
+		if (onImported != null && !imported.isEmpty()) onImported.accept(imported);
+	}
+
+	/** Copies the user sounds folder's path — see Clipboards for why it can't be opened directly. */
+	void copyFolderPath() {
+		var dir = root;
+		if (dir == null) return;
+		// The PARENT, not one kind's folder: both `banner/` and `mission/` are inside it, so one
+		// paste lands somewhere the player can see the whole arrangement and drag files between them.
+		try {
+			if (!dir.exists()) dir.createDirectories();
+		} catch (IOException e) {
+			return;
+		}
+		// LinkBrowser::open is restricted for hub releases, so the path goes on the clipboard and the
+		// player pastes it wherever they were going to open it.
+		Clipboards.copy(dir.toString());
+	}
+
+	synchronized void shutdown() {
+		if (audioExecutor != null) {
+			audioExecutor.shutdownNow();
+			audioExecutor = null;
+		}
+	}
+}
