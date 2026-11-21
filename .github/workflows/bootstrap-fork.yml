@@ -1,0 +1,68 @@
+name: Bootstrap Anvil fork (one time)
+on:
+  push:
+    branches:
+      - foundation/anvil-fork-isolation-20261121
+    paths:
+      - scripts/import_anvil.py
+      - .github/workflows/bootstrap-fork.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: soulrend-plugin-bootstrap
+  cancel-in-progress: false
+
+jobs:
+  import:
+    if: github.repository == 'Soulrendrs/soulrend-runelite'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Soulrend foundation branch
+        uses: actions/checkout@v4
+        with:
+          path: soulrend
+          persist-credentials: true
+
+      - name: Checkout exact upstream Anvil plugin commit
+        uses: actions/checkout@v4
+        with:
+          repository: AhmedFathy2001/anvil-plugin
+          ref: 7e45a7708b8513e90e651ff685ba5329a2896aa5
+          path: upstream
+          persist-credentials: false
+
+      - name: Verify pinned upstream identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C upstream rev-parse HEAD)" = 7e45a7708b8513e90e651ff685ba5329a2896aa5
+          test -f upstream/LICENSE
+
+      - name: Copy and rename upstream Java plugin
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 soulrend/scripts/import_anvil.py upstream soulrend
+
+      - name: Verify and commit imported source
+        shell: bash
+        working-directory: soulrend
+        run: |
+          set -euo pipefail
+          test -f src/main/java/com/soulrend/SoulrendPlugin.java
+          test -f LICENSE
+          test -f gradlew
+          test ! -f src/main/java/com/anvil/AnvilPlugin.java
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nothing to import"
+            exit 0
+          fi
+          git commit -m "feat: import and isolate BSD-licensed Anvil RuneLite plugin"
+          git push origin HEAD:refs/heads/foundation/anvil-fork-isolation-20261121
