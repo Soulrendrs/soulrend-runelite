@@ -81,6 +81,15 @@ public class BingoApiClient {
 		// Read timeout is generous because some server reads do several round-trips to Turso
 		// and can take a while; tighter timeouts here will trip even on healthy servers.
 		httpClient = client.newBuilder()
+		// During Phase 2A the only supported production routes are device authorization,
+		// identity and revocation. Never POST inherited Anvil submissions to Soulrend.
+		.addInterceptor(chain -> {
+			var url = chain.request().url();
+			if ("soulrend.events".equalsIgnoreCase(url.host())
+				&& !url.encodedPath().startsWith("/api/runelite/v1/"))
+				throw new IOException("Legacy plugin routes are disabled until Soulrend implements them.");
+			return chain.proceed(chain.request());
+		})
 			.addInterceptor(pauseGate())
 			.connectTimeout(10, TimeUnit.SECONDS)
 			.readTimeout(90, TimeUnit.SECONDS)
@@ -298,6 +307,17 @@ public class BingoApiClient {
 	public DeviceAuthStart authStart() {
 		return getOrNull(plainRequest(authUrl("/api/runelite/v1/device/start")).post(RequestBody.create(null, new byte[0])),
 			DeviceAuthStart.class);
+	}
+
+	/** GET /api/runelite/v1/me is deliberately separate from Anvil's profile/config wire. */
+	static final class RuneLiteIdentity {
+		String username;
+	}
+
+	RuneLiteIdentity identityForToken(String token) {
+		if (token == null || token.isEmpty()) return null;
+		return getOrNull(plainRequest(authUrl("/api/runelite/v1/me"))
+			.header("Authorization", "Bearer " + token).get(), RuneLiteIdentity.class);
 	}
 
 	/** GET /api/plugin/brief: the lines printed at login and the palette Soulrend chat lines use. */
