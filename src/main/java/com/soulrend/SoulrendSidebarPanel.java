@@ -245,7 +245,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		styleFlatButton(inboxButton, WHITE);
 		inboxButton.setBorder(createEmptyBorder(5, 6, 5, 6));
 		inboxButton.setToolTipText("Notifications");
-		inboxButton.addActionListener(e -> selectTab(NOTIFICATIONS));
+		inboxButton.addActionListener(e -> selectTab(tab == NOTIFICATIONS ? CLAN : NOTIFICATIONS));
 		var headerActions = new JPanel(new BorderLayout(4, 0));
 		headerActions.setBackground(DARK_GRAY_COLOR);
 		headerActions.add(inboxButton, WEST);
