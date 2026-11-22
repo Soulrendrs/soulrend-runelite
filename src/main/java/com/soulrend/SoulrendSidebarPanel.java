@@ -131,7 +131,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 	final ConfigManager configManager;
 	/** RuneLite's shared client-lifetime scheduler — paces the sign-in flow's approval polls. */
 	final ScheduledExecutorService executor;
-	final JButton signInButton = new JButton("Sign in with Discord");
+	final JButton signInButton = new JButton("Connect to Soulrend");
 	final JLabel signInStatus = small("", MUTED);
 	final JPanel signInRow = new JPanel(new BorderLayout(0, 2));
 	// The token isn't in RuneLite's settings (SoulrendConfig.playerToken is hidden), so the panel carries
@@ -147,6 +147,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 	boolean onScreen;
 	boolean signInInFlight;
 	volatile DeviceSignIn signIn;
+	volatile String connectedWebsiteUser;
 
 	// The logged-in character's row (SoulrendSidebarDataSource.AccountRow) — one quiet line, because almost
 	// everyone reading it is the owner: "Tracking X · Not you? ×", "Not tracking X here · Track again",
@@ -852,9 +853,21 @@ public class SoulrendSidebarPanel extends PluginPanel {
 					var stored = configManager.getConfiguration("soulrendbingo", "playerToken");
 					if (stored == null || stored.isEmpty()) {
 						log.warn("Token did not persist");
-						setSignInStatus("Signed in, but RuneLite didn't save the token — copy it "
-							+ "from Profile > RuneLite plugin on the site and use Paste a token below.");
-					} else setSignInStatus("");
+						setSignInStatus("Connected, but RuneLite did not save your session. Reconnect or check RuneLite profile settings.");
+					} else {
+						setSignInStatus("");
+						// Verify the connected website user without putting credentials in the UI.
+						interactive().execute(() -> {
+							var identity = api.identityForToken(result.token);
+							if (identity != null && identity.username != null)
+								invokeLater(() -> {
+									if (result.token.equals(configManager.getConfiguration("soulrendbingo", "playerToken"))) {
+										connectedWebsiteUser = identity.username;
+										refreshAccountRow();
+									}
+								});
+						});
+					}
 				}
 				refreshSignInRow();
 				refresh();
@@ -875,7 +888,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		// Masked: the token signs in as the member, and a stream or a screenshot must not show it.
 		var field = new JPasswordField();
 		field.addHierarchyListener(e -> invokeLater(field::requestFocusInWindow));
-		if (showConfirmDialog(this, new Object[]{"Paste your token from soulrend.events (Profile → RuneLite plugin):", field},
+		if (showConfirmDialog(this, new Object[]{"Paste an existing Soulrend bearer token (advanced):", field},
 			"Soulrend", OK_CANCEL_OPTION, PLAIN_MESSAGE) != OK_OPTION) return;
 		var token = new String(field.getPassword()).trim();
 		if (token.isEmpty()) return;
@@ -930,6 +943,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		if (showConfirmDialog(this, "Sign this computer out of Soulrend? Tracking stops until you sign in again.",
 			"Soulrend", OK_CANCEL_OPTION, PLAIN_MESSAGE) != OK_OPTION) return;
 		if (api != null) api.revokeToken();
+		connectedWebsiteUser = null;
 		// Clearing the token fires onConfigChanged, which drops the session state (configureApiClient).
 		setToken("");
 		refreshSignInRow();
@@ -954,7 +968,9 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		// Shown whenever this computer is signed in — it is also where Sign out lives.
 		accountRowPanel.setVisible(!api.needsSignIn());
 		if (row == null) {
-			setAccountLabel("Signed in", "Signed in to Soulrend on this computer. Log in to a character to start tracking it.", false);
+			setAccountLabel(connectedWebsiteUser == null ? "Signed in" :
+				"Connected as <b>" + esc(connectedWebsiteUser) + "</b>",
+				"Connected to Soulrend. Bingo tracking and board sync are not available yet.", false);
 			accountLink.setVisible(false);
 			setAccountStatus("");
 			accountRowPanel.repaint();

@@ -342,7 +342,7 @@ public class ApiClientHttpTest
 		}
 		assertEquals(1, seen.size());
 		assertEquals("POST", seen.get(0).method());
-		assertEquals("/api/plugin/auth/signout", seen.get(0).url().encodedPath());
+		assertEquals("/api/runelite/v1/session/revoke", seen.get(0).url().encodedPath());
 		assertEquals("Bearer tok", seen.get(0).header("Authorization"));
 
 		// Signed out already: nothing to revoke, nothing sent.

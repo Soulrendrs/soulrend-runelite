@@ -81,6 +81,14 @@ public class BingoApiClient {
 		// Read timeout is generous because some server reads do several round-trips to Turso
 		// and can take a while; tighter timeouts here will trip even on healthy servers.
 		httpClient = client.newBuilder()
+		// During Phase 2A the only supported production routes are device authorization,
+		// identity and revocation. Never POST inherited Anvil submissions to Soulrend.
+		.addInterceptor(chain -> {
+			var url = chain.request().url();
+			if (!productionRouteAllowed(url))
+				throw new IOException("Legacy plugin routes are disabled until Soulrend implements them.");
+			return chain.proceed(chain.request());
+		})
 			.addInterceptor(pauseGate())
 			.connectTimeout(10, TimeUnit.SECONDS)
 			.readTimeout(90, TimeUnit.SECONDS)
@@ -93,6 +101,12 @@ public class BingoApiClient {
 		readClient = httpClient.newBuilder()
 			.readTimeout(20, TimeUnit.SECONDS)
 			.build();
+	}
+
+	/** Prevent unsupported inherited endpoints from reaching the production Django site. */
+	static boolean productionRouteAllowed(HttpUrl url) {
+		return !"soulrend.events".equalsIgnoreCase(url.host())
+			|| url.encodedPath().startsWith("/api/runelite/v1/");
 	}
 
 	/**
@@ -281,13 +295,13 @@ public class BingoApiClient {
 
 	// ---- Device-code sign-in (home-native RFC 8628; see the site's /api/plugin/auth/*) ----------
 
-	/** POST /api/plugin/auth/start response. */
+	/** POST /api/runelite/v1/device/start response. */
 	public static class DeviceAuthStart {
 		public String device_code, user_code, verification_url, verification_url_complete;
 		public int interval, expires_in;
 	}
 
-	/** POST /api/plugin/auth/poll response — status: pending | slow_down | expired | denied | complete. */
+	/** POST /api/runelite/v1/device/poll response — status: pending | slow_down | expired | denied | complete. */
 	public static class DeviceAuthPoll {
 		public String status, token;
 		public int interval;
@@ -296,8 +310,19 @@ public class BingoApiClient {
 	/** Begin the device sign-in. Deliberately UNAUTHENTICATED (the whole point is no token yet), and
 	 * only ever started by a click on Sign in. Null on transport/HTTP failure. */
 	public DeviceAuthStart authStart() {
-		return getOrNull(plainRequest(authUrl("/api/plugin/auth/start")).post(RequestBody.create(null, new byte[0])),
+		return getOrNull(plainRequest(authUrl("/api/runelite/v1/device/start")).post(RequestBody.create(null, new byte[0])),
 			DeviceAuthStart.class);
+	}
+
+	/** GET /api/runelite/v1/me is deliberately separate from Anvil's profile/config wire. */
+	static final class RuneLiteIdentity {
+		String username;
+	}
+
+	RuneLiteIdentity identityForToken(String token) {
+		if (token == null || token.isEmpty()) return null;
+		return getOrNull(plainRequest(authUrl("/api/runelite/v1/me"))
+			.header("Authorization", "Bearer " + token).get(), RuneLiteIdentity.class);
 	}
 
 	/** GET /api/plugin/brief: the lines printed at login and the palette Soulrend chat lines use. */
@@ -366,18 +391,18 @@ public class BingoApiClient {
 	/** Poll the device sign-in. Null on transport failure (caller treats as a pending tick). */
 	public DeviceAuthPoll authPoll(String deviceCode) {
 		if (deviceCode == null || deviceCode.isEmpty()) return null;
-		return getOrNull(plainRequest(authUrl("/api/plugin/auth/poll")).post(RequestBody.create(MediaType.parse("application/json"),
+		return getOrNull(plainRequest(authUrl("/api/runelite/v1/device/poll")).post(RequestBody.create(MediaType.parse("application/json"),
 			gson.toJson(singletonMap("device_code", deviceCode)))), DeviceAuthPoll.class);
 	}
 
 	/**
-	 * POST /api/plugin/auth/signout: revoke this token on the site, so Sign out ends it everywhere.
+	 * POST /api/runelite/v1/session/revoke: revoke this token on the site, so Sign out ends it everywhere.
 	 * Call BEFORE the token is cleared. Best effort on the HTTP pool: a failure, or an older site's
 	 * 404, is ignored and never holds up the sign-out.
 	 */
 	void revokeToken() {
 		if (needsSignIn()) return;
-		var req = publicRequest(authUrl("/api/plugin/auth/signout")).post(RequestBody.create(null, new byte[0]));
+		var req = publicRequest(authUrl("/api/runelite/v1/session/revoke")).post(RequestBody.create(null, new byte[0]));
 		interactiveExecutor().execute(() -> getOrNull(req, Object.class));
 	}
 

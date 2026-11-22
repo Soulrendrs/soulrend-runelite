@@ -63,7 +63,7 @@ public class SignInGateTest
 	@Test
 	public void signInGoesToTheFixedSiteBeforeThereIsAToken()
 	{
-		assertEquals("https://soulrend.events/api/plugin/auth/start", BingoApiClient.authUrl("/api/plugin/auth/start"));
+		assertEquals("https://soulrend.events/api/runelite/v1/device/start", BingoApiClient.authUrl("/api/runelite/v1/device/start"));
 	}
 
 	@Test

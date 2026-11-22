@@ -8,15 +8,15 @@ import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.util.LinkBrowser;
 
 /**
- * The plugin's "Sign in with Discord" — the home-native device-code flow (site: /api/plugin/auth/*).
- * Start → open the home's /link-device page in the member's browser → poll until approved → hand the
+ * The plugin's "Connect to Soulrend" — the home-native device-code flow (site: /api/runelite/v1/device/*).
+ * Start → open the home's /runelite/connect/ page in the member's browser → poll until approved → hand the
  * account token to the caller to store. Asynchronous: every step runs on the scheduler (approval polls
  * paced by delayed rescheduling, never a sleeping thread) and BOTH callbacks arrive on that executor
  * thread — marshal to the EDT before touching Swing. {@code done} fires exactly once.
  *
  * <p><b>Security:</b> no local listener — completion is detected purely by polling the home. The
  * browser URL is pinned to the CONFIGURED home origin (the one host the member explicitly typed
- * into the plugin config) + the fixed {@code /link-device} path: same anti-phishing shape as the
+ * into the plugin config) + the fixed {@code /runelite/connect/} path: same anti-phishing shape as the
  * federation broker pin, anchored to user intent instead of a hardcoded host, which is what lets
  * this work for hosted, self-hosted, and fully-standalone sites alike.</p>
  */
@@ -24,7 +24,7 @@ import net.runelite.client.util.LinkBrowser;
 @Slf4j
 public final class DeviceSignIn {
 	/** Fixed path of the approval page on the home site — the only page this flow will ever open. */
-	static final String LINK_PATH = "/link-device";
+	static final String LINK_PATH = "/runelite/connect/";
 
 	/** Fallback pacing/deadline when the server response omits them. */
 	static final int DEFAULT_INTERVAL_S = 5;
@@ -84,7 +84,7 @@ public final class DeviceSignIn {
 		// (see browse), and the failure mode of assuming success is a player staring at a code with
 		// nowhere to type it — while the cost of saying both is one extra clause.
 		browserOpener.accept(url);
-		status.accept("Approve code " + start.user_code + " in your browser. If it didn't open: " + url);
+		status.accept("Enter code " + start.user_code + " at soulrend.events/runelite/connect/");
 
 		var intervalMs = Math.max(1, start.interval > 0 ? start.interval : DEFAULT_INTERVAL_S) * 1000L;
 		var deadline = System.currentTimeMillis()
@@ -163,7 +163,7 @@ public final class DeviceSignIn {
 			return target.getScheme() != null && target.getHost() != null && target.getUserInfo() == null
 				&& target.getScheme().equalsIgnoreCase(home.getScheme())
 				&& target.getHost().equalsIgnoreCase(home.getHost()) && target.getPort() == home.getPort()
-				&& target.getPath() != null && target.getPath().startsWith(LINK_PATH);
+				&& target.getPath() != null && target.getPath().equals(LINK_PATH);
 		} catch (URISyntaxException e) {
 			return false;
 		}
