@@ -133,8 +133,8 @@ public class ClanAddressingTest
 
 		// The member has no clan yet at this point — that is the whole reason they are signing in — and
 		// the site's device-auth pair is a platform route that a clan prefix would only redirect out of.
-		assertEquals("https://soulrend.events/api/plugin/auth/start", BingoApiClient.authUrl("/api/plugin/auth/start"));
-		assertEquals("https://soulrend.events/api/plugin/auth/poll", BingoApiClient.authUrl("/api/plugin/auth/poll"));
+		assertEquals("https://soulrend.events/api/runelite/v1/device/start", BingoApiClient.authUrl("/api/runelite/v1/device/start"));
+		assertEquals("https://soulrend.events/api/runelite/v1/device/poll", BingoApiClient.authUrl("/api/runelite/v1/device/poll"));
 	}
 
 	@Test

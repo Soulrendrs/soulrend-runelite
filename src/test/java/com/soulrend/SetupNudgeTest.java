@@ -47,7 +47,7 @@ public class SetupNudgeTest
 	{
 		String[] lines = SetupNudge.lines(SetupNudge.Kind.FIRST_RUN);
 		assertEquals(2, lines.length);
-		assertTrue("the instruction names the button that does it", lines[0].contains("Sign in with Discord"));
+		assertTrue("the instruction names the button that does it", lines[0].contains("Connect to Soulrend"));
 		assertTrue("the reason names where the account lives", lines[1].contains(SetupNudge.SITE_HOST));
 		assertTrue("and that a clan is not a prerequisite", lines[1].contains("No clan needed"));
 	}

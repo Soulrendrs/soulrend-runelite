@@ -53,7 +53,7 @@ public final class SetupNudge {
 		switch (kind) {
 			case FIRST_RUN:
 				return new String[]{
-					"Not connected yet — open the Soulrend panel (the soulrend icon on the right) and press \"Sign in with Discord\".",
+					"Not connected yet — open the Soulrend panel (the soulrend icon on the right) and press \"Connect to Soulrend\".",
 					"A free account on " + SITE_HOST + " tracks your collection log, personal bests and records. No clan needed — and starting one is free.",
 				};
 			default:
