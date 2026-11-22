@@ -750,11 +750,8 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		addAll(settingsPanel, bold("On the Soulrend website"), gap(6));
 		siteRow("Discord posts & screenshot privacy", "What you post to your clan's Discord", "/settings/announcements");
 		siteRow("All your Soulrend settings", "Profile, characters, name colours and more", "/settings");
-		siteRow("Guides", "The side panel, events, proofs, Supporter perks", "/guide");
+		siteRow("Guides", "The side panel, events, proofs", "/guide");
 		siteRow("What's new", "Everything new on Soulrend, for your roles", "/whats-new");
-		settingsPanel.add(gap(6));
-		settingsPanel.add(linkRow(DARKER_GRAY_COLOR, small(isSupporter() ? "★ Your Supporter perks" : "★ Become a Supporter", new Color(0xFF_D3_5C)), null,
-			SUPPORTER_TIP, this::openSupporter));
 		redraw(settingsPanel);
 	}
 
@@ -789,15 +786,13 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		return capH(onClick(row, open));
 	}
 
-	static final String SUPPORTER_TIP = "Name colours, profile banners, clan boosts — and it keeps Soulrend running";
 
 	/** What the settings tab last drew from (settingsKey), so an unchanged refresh skips the rebuild. */
 	String settingsShown;
 
 	String settingsKey(PanelActions actions) {
 		var k = new StringBuilder()
-			.append(actions.canSyncProfile).append('|').append(actions.canSyncRoster).append('|').append(actions.rosterNote)
-			.append('|').append(isSupporter());
+			.append(actions.canSyncProfile).append('|').append(actions.canSyncRoster).append('|').append(actions.rosterNote);
 		for (var clip : data.sounds(BANNER)) k.append('|').append(clip).append(data.bannerSoundOn(clip) ? '+' : '-');
 		return k.append("|m").append(data.sounds(MISSION).size()).toString();
 	}
@@ -946,17 +941,6 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		configManager.setConfiguration("soulrendbingo", "playerToken", token);
 	}
 
-	/** The tracked character wears Supporter flair (any tier), so the link offers perks, not a pitch. */
-	boolean isSupporter() {
-		var me = data.myRsn();
-		var e = me == null ? null : data.flairOf(me);
-		return e != null && Boolean.TRUE.equals(e.s);
-	}
-
-	void openSupporter() {
-		LinkBrowser.browse(api.siteLink(isSupporter() ? "/settings/supporter" : "/supporter"));
-	}
-
 	void showAccountMenu(Component anchor) {
 		var menu = new JPopupMenu();
 		var row = shownAccountRow;
@@ -967,7 +951,6 @@ public class SoulrendSidebarPanel extends PluginPanel {
 				invokeLater(() -> selectTab(YOU));
 			} else ProfileLookup.open(row.rsn);
 		});
-		item(menu, isSupporter() ? "Your Supporter perks" : "Become a Supporter", SUPPORTER_TIP, this::openSupporter);
 		if (tracking && !accountActionInFlight) {
 			item(menu, "Not my account…", "Someone else plays " + row.rsn + " here — stop tracking it on this computer", this::onAccountButton);
 			menu.addSeparator();
