@@ -387,6 +387,13 @@ public class BingoApiClient {
             .header("Authorization", "Bearer " + token.trim()).get(), NotificationInbox.class);
     }
 
+    NotificationInbox notificationCount() {
+        var token = playerToken;
+        if (token == null || token.trim().isEmpty() || accountPaused) return null;
+        return getOrNull(plainRequest(authUrl("/api/runelite/v1/notifications?count=1"))
+            .header("Authorization", "Bearer " + token.trim()).get(), NotificationInbox.class);
+    }
+
     NotificationInbox markNotificationRead(Long id) {
         var token = playerToken;
         if (token == null || token.trim().isEmpty() || accountPaused) return null;
