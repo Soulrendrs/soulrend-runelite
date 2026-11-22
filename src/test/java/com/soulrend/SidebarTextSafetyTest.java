@@ -1,5 +1,6 @@
 package com.soulrend;
 
+import java.awt.Color;
 import javax.swing.plaf.basic.BasicHTML;
 import org.junit.Test;
 import static org.junit.Assert.assertEquals;
@@ -48,6 +49,16 @@ public class SidebarTextSafetyTest
 		// A stray '<' that isn't the HTML trigger is left alone (JLabel wouldn't treat it as HTML either).
 		assertEquals("<3 clan", Ui.plainText("<3 clan"));
 		assertFalse(BasicHTML.isHTMLString(Ui.plainText("<3 clan")));
+	}
+
+	@Test
+	public void bingoRowsKeepExplicitContrastAndEscapeServerText()
+	{
+		var row = SoulrendSidebarPanel.boardText("Rare <img src=x> · 12/50",
+			Ui.REGULAR, Color.WHITE);
+		assertEquals(Color.WHITE, row.getForeground());
+		assertTrue(row.getText().contains("&lt;img src=x&gt;"));
+		assertFalse(row.getText().contains("<img"));
 	}
 
 	@Test
