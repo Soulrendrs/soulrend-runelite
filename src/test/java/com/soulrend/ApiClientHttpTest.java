@@ -60,12 +60,12 @@ public class ApiClientHttpTest
     @Test
     public void devicePairingUsesOnlyFirstPartyRouteAndNonSecretMetadata() {
         BingoApiClient c = client();
-        reply = "{\\\"device_code\\\":\\\"secret\\\",\\\"user_code\\\":\\\"ABCD-EFGH\\\"}";
+        reply = "{\"device_code\":\"secret\",\"user_code\":\"ABCD-EFGH\"}";
         BingoApiClient.DeviceAuthStart start = c.authStart();
         assertEquals("ABCD-EFGH", start.user_code);
         assertEquals("/api/runelite/v1/device/start", seen.get(0).url().encodedPath());
-        assertTrue(bodies.get(0).contains("\\\"device_name\\\""));
-        assertTrue(bodies.get(0).contains("\\\"plugin_version\\\""));
+        assertTrue(bodies.get(0).contains("\"device_name\""));
+        assertTrue(bodies.get(0).contains("\"plugin_version\""));
         assertFalse(bodies.get(0).contains("playerToken"));
         assertFalse(bodies.get(0).contains("installation_id"));
     }
@@ -78,7 +78,7 @@ public class ApiClientHttpTest
         code = 500;
         assertNull(c.tokenStillValid("token"));
         code = 200;
-        reply = "{\\\"username\\\":\\\"player\\\",\\\"device\\\":{\\\"name\\\":\\\"Gaming PC\\\",\\\"activated\\\":true}}";
+        reply = "{\"username\":\"player\",\"device\":{\"name\":\"Gaming PC\",\"activated\":true}}";
         assertEquals(Boolean.TRUE, c.tokenStillValid("token"));
         BingoApiClient.RuneLiteIdentity identity = c.identityForToken("token");
         assertEquals("player", identity.username);
