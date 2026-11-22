@@ -469,19 +469,35 @@ public class BingoApiClient {
 			.header("Authorization", "Bearer " + token).get(), RuneLiteIdentity.class);
 	}
 
-	/** True on a valid authenticated response, false ONLY on explicit 401.
-	 * Unknown/offline errors must not erase a good session. */
-	Boolean tokenStillValid(String token) {
+	/** Probe both authorization state and current device label in one GET.
+	 * A network/server failure is unknown, not an explicit revocation. */
+	static final class SessionProbe {
+		final boolean authorized;
+		final RuneLiteIdentity identity;
+
+		SessionProbe(boolean authorized, RuneLiteIdentity identity) {
+			this.authorized = authorized;
+			this.identity = identity;
+		}
+	}
+
+	SessionProbe probeSession(String token) {
 		if (token == null || token.isBlank() || accountPaused) return null;
 		try {
 			return execute(readClient, plainRequest(authUrl("/api/runelite/v1/me"))
 				.header("Authorization", "Bearer " + token).get(), (response, body) -> {
-					if (response.code() == 401) return Boolean.FALSE;
-					return response.isSuccessful() ? Boolean.TRUE : null;
+					if (response.code() == 401) return new SessionProbe(false, null);
+					if (!response.isSuccessful()) return null;
+					return new SessionProbe(true, gson.fromJson(body, RuneLiteIdentity.class));
 				});
-		} catch (IOException e) {
+		} catch (IOException | JsonParseException e) {
 			return null;
 		}
+	}
+
+	Boolean tokenStillValid(String token) {
+		SessionProbe probe = probeSession(token);
+		return probe == null ? null : probe.authorized;
 	}
 
 	/** GET /api/plugin/brief: the lines printed at login and the palette Soulrend chat lines use. */
