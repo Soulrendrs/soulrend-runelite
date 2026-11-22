@@ -183,12 +183,16 @@ final class AutomaticEvidence {
                     (a, b) -> (int) Math.min(Integer.MAX_VALUE, (long) a + b));
             }
         }
+        var captures = new ArrayList<PendingSubmission>();
+        var captureId = UUID.randomUUID().toString();
         for (var match : snapshot.matches) {
             if (match.rule.matchesDrop(quantities, source)) {
-                capture(snapshot, match, match.rule.item_id, quantities.get(match.rule.item_id), source, false);
-                return; // One automatic capture per observed loot batch.
+                var proof = prepare(snapshot, match, captureId, match.rule.item_id,
+                    quantities.get(match.rule.item_id), source, false);
+                if (proof != null) captures.add(proof);
             }
         }
+        capture(snapshot, captures);
     }
 
     void combatBatch(List<SoulrendPlugin.PendingCaTask> tasks, boolean initialized, int before, int after) {
@@ -199,24 +203,28 @@ final class AutomaticEvidence {
         // An aggregate points increase cannot identify the new task in a mixed batch.
         if (after > before && unique.size() != 1) return;
         boolean repeat = after == before;
+        var captures = new ArrayList<PendingSubmission>();
+        var captureId = UUID.randomUUID().toString();
         for (var task : unique) {
             if (task.isEmpty()) continue;
             for (var match : snapshot.matches) {
                 if (match.rule.matchesTask(task, repeat)) {
-                    capture(snapshot, match, match.rule.task_id, 1, "", repeat);
-                    return;
+                    var proof = prepare(snapshot, match, captureId, match.rule.task_id, 1, "", repeat);
+                    if (proof != null) captures.add(proof);
                 }
             }
         }
+        capture(snapshot, captures);
     }
 
-    private void capture(BoardRules snapshot, Match match, int evidenceId, int quantity, String source, boolean repeat) {
+    private PendingSubmission prepare(BoardRules snapshot, Match match, String captureId,
+                                      int evidenceId, int quantity, String source, boolean repeat) {
         long now = System.currentTimeMillis();
         attempted.values().removeIf(at -> now - at >= CAPTURE_COOLDOWN_MS);
         if (attempted.size() >= MAX_PENDING_FOR_SESSION - snapshot.pending
-            || attempted.putIfAbsent(match.rule.tile, now) != null) return;
+            || attempted.putIfAbsent(match.rule.tile, now) != null) return null;
         var pending = new PendingSubmission();
-        pending.runeliteCaptureId = UUID.randomUUID().toString();
+        pending.runeliteCaptureId = captureId;
         pending.runeliteSession = snapshot.session;
         pending.capturedRsn = snapshot.character;
         pending.eventId = match.event;
@@ -228,10 +236,16 @@ final class AutomaticEvidence {
         pending.evidenceRepeat = repeat;
         pending.label = "Bingo evidence";
         pending.timestamp = now;
+        return pending;
+    }
+
+    private void capture(BoardRules snapshot, List<PendingSubmission> captures) {
+        if (captures.isEmpty()) return;
         plugin.onNextFrame(image -> {
             if (!sameSession(snapshot.session, snapshot.character)) return;
             try {
-                plugin.pendingSubmissionStore.save(pending, SoulrendPlugin.jpeg(image));
+                byte[] screenshot = SoulrendPlugin.jpeg(image);
+                for (var proof : captures) plugin.pendingSubmissionStore.save(proof, screenshot);
             } catch (IOException ignored) {
                 // No evidence file was committed. Never send a capture without an image.
             }
