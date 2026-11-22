@@ -307,11 +307,25 @@ public class BingoApiClient {
 		public int interval;
 	}
 
-	/** Begin the device sign-in. Deliberately UNAUTHENTICATED (the whole point is no token yet), and
-	 * only ever started by a click on Sign in. Null on transport/HTTP failure. */
+	/** Installation metadata is a correlation hint, never a secret or authentication credential. */
+	volatile InstallationIdentity installationIdentity;
+
+	void setInstallationIdentity(InstallationIdentity identity) {
+		installationIdentity = identity;
+	}
+
+	/** Begin device sign-in with the installation's own local random identifier. */
 	public DeviceAuthStart authStart() {
-		return getOrNull(plainRequest(authUrl("/api/runelite/v1/device/start")).post(RequestBody.create(null, new byte[0])),
-			DeviceAuthStart.class);
+		var body = new HashMap<String, String>();
+		var identity = installationIdentity;
+		var id = identity == null ? null : identity.getOrCreate();
+		if (id != null) body.put("installation_id", id);
+		var platform = InstallationIdentity.platform();
+		if (!platform.isEmpty()) body.put("platform", platform);
+		body.put("device_name", InstallationIdentity.defaultName(platform));
+		body.put("plugin_version", PLUGIN_VERSION);
+		return getOrNull(plainRequest(authUrl("/api/runelite/v1/device/start"))
+			.post(RequestBody.create(JSON, gson.toJson(body))), DeviceAuthStart.class);
 	}
 
 	/** GET /api/runelite/v1/me is deliberately separate from Anvil's profile/config wire. */
@@ -440,12 +454,34 @@ public class BingoApiClient {
 
     static final class RuneLiteIdentity {
 		String username;
+		DeviceInfo device;
+	}
+
+	static final class DeviceInfo {
+		String name, expires_at;
+		int session_id;
+		boolean activated;
 	}
 
 	RuneLiteIdentity identityForToken(String token) {
 		if (token == null || token.isEmpty()) return null;
 		return getOrNull(plainRequest(authUrl("/api/runelite/v1/me"))
 			.header("Authorization", "Bearer " + token).get(), RuneLiteIdentity.class);
+	}
+
+	/** True on a valid authenticated response, false ONLY on explicit 401.
+	 * Unknown/offline errors must not erase a good session. */
+	Boolean tokenStillValid(String token) {
+		if (token == null || token.isBlank() || accountPaused) return null;
+		try {
+			return execute(readClient, plainRequest(authUrl("/api/runelite/v1/me"))
+				.header("Authorization", "Bearer " + token).get(), (response, body) -> {
+					if (response.code() == 401) return Boolean.FALSE;
+					return response.isSuccessful() ? Boolean.TRUE : null;
+				});
+		} catch (IOException e) {
+			return null;
+		}
 	}
 
 	/** GET /api/plugin/brief: the lines printed at login and the palette Soulrend chat lines use. */
