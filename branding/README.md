@@ -4,7 +4,7 @@ This is the approved Soulrend silver-and-red flame mask supplied by the project 
 The plugin name visible to players is **Soulrend**. The RuneLite configuration group
 remains **soulrendbingo**, independent from Anvil's configuration.
 
-- `pluginhub-48x72.png`: transparent indexed PNG, 48×72 px, approved Plugin Hub icon.
+- `pluginhub-48x72.png`: transparent indexed PNG, 48×72 px, Plugin Hub-sized icon (not yet submitted or reviewed by RuneLite).
   Published at repository root as `icon.png`.
 - `sidebar-32x32.png`: square transparent PNG optimized for the RuneLite side navigation
   button and its 20×20 world-map marker. Published at
