@@ -796,6 +796,9 @@ public class SoulrendSidebarPanel extends PluginPanel {
 	}
 
 	public void onDeactivate() {
+        generation++;
+        reading = false;
+        nextRead = 0;
 		onScreen = false;
 		data.feedOnScreen(false);
 		autoRefresh.stop();
@@ -1190,10 +1193,10 @@ public class SoulrendSidebarPanel extends PluginPanel {
         int selected = selectedEvent;
         reading = true;
         interactive().execute(() -> {
-            var list = api.bingoRead("", token, BingoApiClient.EventList.class);
+            var list = api.bingoRead("", token, character, BingoApiClient.EventList.class);
             var event = list == null || list.events == null ? null : list.events.stream()
                 .filter(e -> e.id == selected).findFirst().orElse(null);
-            var board = event == null ? null : api.bingoRead("/" + event.id + "/board", token, BingoApiClient.TeamBoard.class);
+            var board = event == null ? null : api.bingoRead("/" + event.id + "/board", token, character, BingoApiClient.TeamBoard.class);
             invokeLater(() -> {
                 if (generation != version) return;
                 reading = false;
@@ -1210,7 +1213,12 @@ public class SoulrendSidebarPanel extends PluginPanel {
                     for (var e : list.events) {
                         JButton button = new JButton(e.name);
                         button.putClientProperty("html.disable", Boolean.TRUE);
-                        button.addActionListener(a -> {selectedEvent = e.id; readBingos(true);});
+                        button.addActionListener(a -> {
+                            if (reading) return;
+                            selectedEvent = e.id;
+                            renderLoading();
+                            readBingos(true);
+                        });
                         rows.add(button);
                         rows.add(new JLabel(e.status + " · " + (e.team == null ? "Unassigned" : e.team)));
                         if (e.characters != null) rows.add(new JLabel("Characters: " + String.join(", ", e.characters)));

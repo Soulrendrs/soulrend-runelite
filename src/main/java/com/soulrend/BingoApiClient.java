@@ -337,8 +337,10 @@ public class BingoApiClient {
             return name + " · " + status + (target == null ? "" : " · " + value + "/" + target + " " + scope);
         }
     }
-    <T> T bingoRead(String path, String token, Class<T> type) {
-        return getOrNull(plainRequest(authUrl("/api/runelite/v1/events" + path))
+    <T> T bingoRead(String path, String token, String character, Class<T> type) {
+        var url = HttpUrl.parse(authUrl("/api/runelite/v1/events" + path)).newBuilder();
+        if (character != null) url.addQueryParameter("character", character);
+        return getOrNull(plainRequest(url.build().toString())
             .header("Authorization", "Bearer " + token).get(), type);
     }
 
