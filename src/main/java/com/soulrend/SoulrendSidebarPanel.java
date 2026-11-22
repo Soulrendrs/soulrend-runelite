@@ -1222,7 +1222,11 @@ public class SoulrendSidebarPanel extends PluginPanel {
                 String renderKey = api.gson.toJson(list) + "|" + selectedEvent + "|" + api.gson.toJson(board);
                 if (!manual && Objects.equals(renderKey, lastBingoRenderKey)) return;
                 lastBingoRenderKey = renderKey;
-                if (list == null || list.events == null) rows.add(new JLabel("Unable to load bingos — check your connection or reconnect to Soulrend"));
+                if (list == null || list.events == null) {
+                    rows.add(new JLabel(api.lastBingoHttpStatus == 401
+                        ? "Soulrend session expired or revoked. Sign out and connect again."
+                        : "Unable to load bingos — check your connection or reconnect to Soulrend"));
+                }
                 else {
                     connectedWebsiteUser = list.username;
                     refreshAccountRow();
