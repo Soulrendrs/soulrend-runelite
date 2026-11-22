@@ -57,6 +57,23 @@ public class ApiClientHttpTest
 		return c;
 	}
 
+    @Test
+    public void bingoReadDistinguishesRevokedSessionAndRecovery() {
+        BingoApiClient c = client();
+        code = 401;
+        reply = "{\\"error\\":\\"unauthorized\\"}";
+        assertNull(c.bingoRead("", "test-bearer", "My Character", BingoApiClient.EventList.class));
+        assertEquals(401, c.lastBingoHttpStatus);
+        assertEquals("Bearer test-bearer", seen.get(0).header("Authorization"));
+        assertEquals("My Character", seen.get(0).url().queryParameter("character"));
+
+        code = 200;
+        reply = "{\\"username\\":\\"member\\",\\"events\\":[]}";
+        BingoApiClient.EventList recovered = c.bingoRead("", "test-bearer", "My Character", BingoApiClient.EventList.class);
+        assertEquals("member", recovered.username);
+        assertEquals(200, c.lastBingoHttpStatus);
+    }
+
 	@Test
 	public void conditionalGetReusesTheCachedBodyOn304() throws IOException
 	{
