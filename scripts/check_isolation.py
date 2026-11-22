@@ -46,16 +46,55 @@ for path in SRC.rglob("*"):
     ):
         if re.search(pattern, text, flags=re.IGNORECASE):
             ERRORS.append(f"{path.relative_to(ROOT)}: {label}")
-# First-party icon should meet the documented Plugin Hub dimensions.
-icon = ROOT / "icon.png"
-if icon.is_file():
-    b = icon.read_bytes()
-    ensure(b.startswith(b"\x89PNG\r\n\x1a\n"), "root icon is PNG")
-    if len(b) >= 24:
-        w, h = struct.unpack(">II", b[16:24])
-        ensure(w <= 48 and h <= 72, f"root icon oversized: {w}x{h}")
-else:
-    ERRORS.append("root icon missing")
+# Plugin Hub limits the icon to 48x72 px. Validate the shipped artwork and
+# the matching sidebar image (which RuneLite also uses as a world-map marker).
+# Python stdlib-only so the check runs without Pillow or extra CI dependencies.
+def check_brand_icon(path, width, height, canonical):
+    asset = ROOT / path
+    brand = ROOT / canonical
+    if not asset.exists():
+        ERRORS.append(f"Missing Soulrend icon: {path}")
+        return
+    if not brand.exists():
+        ERRORS.append(f"Missing official brand source: {canonical}")
+        return
+    raw = asset.read_bytes()
+    ensure(raw == brand.read_bytes(), f"{path} must match approved {canonical}")
+    if not raw.startswith(b"\x89PNG\r\n\x1a\n") or len(raw) < 33:
+        ERRORS.append(f"{path} is not PNG")
+        return
+    w, h, depth, kind, compression, filtering, interlace = struct.unpack(">IIBBBBB", raw[16:29])
+    ensure((w, h) == (width, height), f"{path}: expected {width}x{height}, found {w}x{h}")
+    ensure((depth, kind, compression, filtering, interlace) == (8, 3, 0, 0, 0),
+           f"{path}: must be 8-bit indexed PNG, no interlace")
+    chunks = {}
+    offset = 8
+    while offset < len(raw):
+        if offset + 12 > len(raw):
+            ERRORS.append(f"{path}: incomplete PNG chunk")
+            return
+        chunk_len = struct.unpack(">I", raw[offset:offset + 4])[0]
+        tag = raw[offset + 4:offset + 8]
+        end = offset + 12 + chunk_len
+        if end > len(raw):
+            ERRORS.append(f"{path}: truncated PNG payload")
+            return
+        chunks.setdefault(tag, raw[offset + 8:offset + 8 + chunk_len])
+        offset = end
+        if tag == b"IEND":
+            break
+    ensure(b"IDAT" in chunks and b"IEND" in chunks, f"{path}: incomplete PNG")
+    palette = chunks.get(b"PLTE", b"")
+    alpha = chunks.get(b"tRNS", b"")
+    ensure(len(palette) >= 3 and len(palette) % 3 == 0, f"{path}: invalid PNG palette")
+    ensure(bool(alpha) and min(alpha) == 0 and max(alpha) == 255, f"{path}: transparent background is required")
+    colors = [palette[k:k + 3] for k in range(0, len(palette), 3)]
+    ensure(any(r > 170 and g < 120 and b < 120 for r, g, b in colors), f"{path}: red Soulrend marking missing")
+    ensure(any(r > 170 and g > 130 and b < 130 for r, g, b in colors), f"{path}: yellow Soulrend eye missing")
+    ensure(any(min(r, g, b) > 160 for r, g, b in colors), f"{path}: silver Soulrend mask missing")
+
+check_brand_icon("icon.png", 48, 72, "branding/pluginhub-48x72.png")
+check_brand_icon("src/main/resources/com/soulrend/sidebar_icon.png", 32, 32, "branding/sidebar-32x32.png")
 if ERRORS:
     for m in ERRORS:
         print("ERROR:", m, file=sys.stderr)
