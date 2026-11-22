@@ -174,7 +174,7 @@ final class SiteBridge
 		java.util.function.Consumer<String> openUrl) throws InterruptedException
 	{
 		BingoApiClient.DeviceAuthStart start;
-		Request startReq = new Request.Builder().url(site() + "/api/plugin/auth/start")
+		Request startReq = new Request.Builder().url(site() + "/api/runelite/v1/device/start")
 			.header("X-Soulrend-Plugin-Version", pluginVersion())
 			.post(okhttp3.RequestBody.create(null, new byte[0])).build();
 		try (Response r = http.newCall(startReq).execute())
@@ -200,7 +200,7 @@ final class SiteBridge
 		while (System.currentTimeMillis() < deadline)
 		{
 			Thread.sleep(interval);
-			Request poll = new Request.Builder().url(site() + "/api/plugin/auth/poll")
+			Request poll = new Request.Builder().url(site() + "/api/runelite/v1/device/poll")
 				.header("X-Soulrend-Plugin-Version", pluginVersion())
 				.post(okhttp3.RequestBody.create(json,
 					gson.toJson(java.util.Collections.singletonMap("device_code", start.device_code)))).build();
