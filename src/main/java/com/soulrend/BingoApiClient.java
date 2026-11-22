@@ -315,7 +315,36 @@ public class BingoApiClient {
 	}
 
 	/** GET /api/runelite/v1/me is deliberately separate from Anvil's profile/config wire. */
-	static final class RuneLiteIdentity {
+	static final class EventList {
+        String username;
+        List<EventSummary> events;
+    }
+    static final class EventSummary {
+        int id;
+        String name, status, team;
+        List<String> characters;
+    }
+    static final class TeamBoard {
+        String captain;
+        List<BoardTile> tiles;
+    }
+    static final class BoardTile {
+        String name, status, value, target, scope;
+        boolean credited;
+        String label() {
+            if ("hidden".equals(status)) return "Hidden tile";
+            if ("locked".equals(status)) return "Locked tile";
+            return name + " · " + status + (target == null ? "" : " · " + value + "/" + target + " " + scope);
+        }
+    }
+    <T> T bingoRead(String path, String token, String character, Class<T> type) {
+        var url = HttpUrl.parse(authUrl("/api/runelite/v1/events" + path)).newBuilder();
+        if (character != null) url.addQueryParameter("character", character);
+        return getOrNull(plainRequest(url.build().toString())
+            .header("Authorization", "Bearer " + token).get(), type);
+    }
+
+    static final class RuneLiteIdentity {
 		String username;
 	}
 

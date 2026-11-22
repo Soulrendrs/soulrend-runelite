@@ -7196,6 +7196,7 @@ public class SoulrendPlugin extends Plugin {
 	}
 
 	void refreshConfigLocked() {
+		if (BingoApiClient.CANONICAL_SITE.equals(BingoApiClient.site())) return;
 		if (!apiClient.isConfigured()) return;
 		try {
 			var askedAt = now();

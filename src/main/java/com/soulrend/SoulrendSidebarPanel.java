@@ -796,6 +796,9 @@ public class SoulrendSidebarPanel extends PluginPanel {
 	}
 
 	public void onDeactivate() {
+        generation++;
+        reading = false;
+        nextRead = 0;
 		onScreen = false;
 		data.feedOnScreen(false);
 		autoRefresh.stop();
@@ -1161,7 +1164,94 @@ public class SoulrendSidebarPanel extends PluginPanel {
 	 * picker and strip redraw from it and the Clan tab asks the site. A burst of repaints — config,
 	 * hello, a login — asks the site once; a click on Refresh always asks.
 	 */
-	void refresh(boolean manual) {
+	int selectedEvent;
+    long nextRead;
+    int retrySeconds = 30;
+    String panelToken, panelCharacter;
+    long generation;
+    boolean reading;
+
+    void readBingos(boolean manual) {
+        String token = api.playerToken;
+        String character = data.myRsn();
+        if (!Objects.equals(token, panelToken) || !Objects.equals(character, panelCharacter)) {
+            generation++;
+            reading = false;
+            selectedEvent = 0;
+            nextRead = 0;
+            panelToken = token;
+            panelCharacter = character;
+            connectedWebsiteUser = null;
+            renderLoading();
+        }
+        refreshSignInRow();
+        refreshAccountRow();
+        if (api.needsSignIn()) { setContent(firstRunCard()); return; }
+        if (api.isAccountPaused()) { setContent(new JLabel("Paused for this character")); return; }
+        if (reading || (!manual && System.currentTimeMillis() < nextRead)) return;
+        long version = ++generation;
+        int selected = selectedEvent;
+        reading = true;
+        interactive().execute(() -> {
+            var list = api.bingoRead("", token, character, BingoApiClient.EventList.class);
+            var event = list == null || list.events == null ? null : list.events.stream()
+                .filter(e -> e.id == selected).findFirst().orElse(null);
+            var board = event == null ? null : api.bingoRead("/" + event.id + "/board", token, character, BingoApiClient.TeamBoard.class);
+            invokeLater(() -> {
+                if (generation != version) return;
+                reading = false;
+                if (!onScreen || !Objects.equals(token, api.playerToken) || !Objects.equals(character, data.myRsn()) || api.isAccountPaused()) return;
+                var rows = column();
+                boolean failed = list == null || list.events == null || (event != null && board == null);
+                retrySeconds = failed ? Math.min(240, retrySeconds * 2) : 30;
+                nextRead = System.currentTimeMillis() + retrySeconds * 1000L;
+                if (list == null || list.events == null) rows.add(new JLabel("Unable to load bingos"));
+                else {
+                    connectedWebsiteUser = list.username;
+                    refreshAccountRow();
+                    if (list.events.isEmpty()) rows.add(new JLabel("No eligible bingos"));
+                    for (var e : list.events) {
+                        JButton button = new JButton(e.name);
+                        button.putClientProperty("html.disable", Boolean.TRUE);
+                        button.addActionListener(a -> {
+                            if (reading) return;
+                            selectedEvent = e.id;
+                            renderLoading();
+                            readBingos(true);
+                        });
+                        rows.add(button);
+                        rows.add(new JLabel(e.status + " · " + (e.team == null ? "Unassigned" : e.team)));
+                        if (e.characters != null) rows.add(new JLabel("Characters: " + String.join(", ", e.characters)));
+                    }
+                    if (event != null) {
+                        JButton link = new JButton("Open event on Soulrend");
+                        link.addActionListener(a -> LinkBrowser.browse(BingoApiClient.CANONICAL_SITE + "/events/" + event.id + "/"));
+                        rows.add(link);
+                        if (board == null) rows.add(new JLabel("Board unavailable"));
+                        else {
+                            if (board.captain != null) rows.add(new JLabel("Captain: " + board.captain));
+                            if (board.tiles != null) {
+                                long credited = board.tiles.stream().filter(t -> t.credited).count();
+                                rows.add(new JLabel("Team progress: " + credited + "/" + board.tiles.size()));
+                                for (var tile : board.tiles) {
+                                    JLabel label = new JLabel(tile.label());
+                                    label.putClientProperty("html.disable", Boolean.TRUE);
+                                    rows.add(label);
+                                }
+                            }
+                        }
+                    }
+                }
+                setContent(rows);
+            });
+        });
+    }
+
+    void refresh(boolean manual) {
+        if (onScreen && BingoApiClient.CANONICAL_SITE.equals(BingoApiClient.site())) {
+            readBingos(manual);
+            return;
+        }
 		if (!onScreen) return;
 		refreshAccountRow();
 		if (manual) {
