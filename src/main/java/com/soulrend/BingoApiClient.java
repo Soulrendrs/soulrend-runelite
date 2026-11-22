@@ -85,8 +85,7 @@ public class BingoApiClient {
 		// identity and revocation. Never POST inherited Anvil submissions to Soulrend.
 		.addInterceptor(chain -> {
 			var url = chain.request().url();
-			if ("soulrend.events".equalsIgnoreCase(url.host())
-				&& !url.encodedPath().startsWith("/api/runelite/v1/"))
+			if (!productionRouteAllowed(url))
 				throw new IOException("Legacy plugin routes are disabled until Soulrend implements them.");
 			return chain.proceed(chain.request());
 		})
@@ -102,6 +101,12 @@ public class BingoApiClient {
 		readClient = httpClient.newBuilder()
 			.readTimeout(20, TimeUnit.SECONDS)
 			.build();
+	}
+
+	/** Prevent unsupported inherited endpoints from reaching the production Django site. */
+	static boolean productionRouteAllowed(HttpUrl url) {
+		return !"soulrend.events".equalsIgnoreCase(url.host())
+			|| url.encodedPath().startsWith("/api/runelite/v1/");
 	}
 
 	/**

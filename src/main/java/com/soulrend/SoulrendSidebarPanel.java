@@ -853,8 +853,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 					var stored = configManager.getConfiguration("soulrendbingo", "playerToken");
 					if (stored == null || stored.isEmpty()) {
 						log.warn("Token did not persist");
-						setSignInStatus("Signed in, but RuneLite didn't save the token — copy it "
-							+ "from Profile > RuneLite plugin on the site and use Paste a token below.");
+						setSignInStatus("Connected, but RuneLite did not save your session. Reconnect or check RuneLite profile settings.");
 					} else {
 						setSignInStatus("");
 						// Verify the connected website user without putting credentials in the UI.

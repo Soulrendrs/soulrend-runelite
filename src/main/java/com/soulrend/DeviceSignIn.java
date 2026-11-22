@@ -84,7 +84,7 @@ public final class DeviceSignIn {
 		// (see browse), and the failure mode of assuming success is a player staring at a code with
 		// nowhere to type it — while the cost of saying both is one extra clause.
 		browserOpener.accept(url);
-		status.accept("Approve code " + start.user_code + " in your browser. If it didn't open: " + url);
+		status.accept("Enter code " + start.user_code + " at soulrend.events/runelite/connect/");
 
 		var intervalMs = Math.max(1, start.interval > 0 ? start.interval : DEFAULT_INTERVAL_S) * 1000L;
 		var deadline = System.currentTimeMillis()
