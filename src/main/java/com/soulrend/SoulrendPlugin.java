@@ -146,6 +146,7 @@ public class SoulrendPlugin extends Plugin {
 
 	@Inject
 	PendingSubmissionStore pendingSubmissionStore;
+	final AutomaticEvidence automaticEvidence = new AutomaticEvidence(this);
 
 	@Inject
 	Gson gson;
@@ -1495,6 +1496,7 @@ public class SoulrendPlugin extends Plugin {
 	}
 
 	protected void shutDown() {
+		automaticEvidence.clear();
 		sessionGains.reset();
 		keyManager.unregisterKeyListener(eventChatKey);
 		clientThread.invokeLater(this::unflairAll);
@@ -2994,6 +2996,7 @@ public class SoulrendPlugin extends Plugin {
 
 	/** A kill's loot: its vestige rolls, then the drop tiles for whatever no chat line already credited. */
 	void npcLoot(String name, Collection<ItemStack> items) {
+		automaticEvidence.drop(items, "npc");
 		trackVestigeRolls(name, items);
 		processLoot(name, chatCredits.unclaimed(items, now()), "npc");
 	}
@@ -3064,6 +3067,7 @@ public class SoulrendPlugin extends Plugin {
 		// raid twice. Restricted to EVENT loot — NPC kills come through onNpcLootReceived, and
 		// loot keys were re-typed to "pvp" above.
 		if ("event".equals(kind)) processNpcKill(source);
+		if (!isInventoryDiffLoot(source, event.getType())) automaticEvidence.drop(items, kind);
 		processLoot(source, chatCredits.unclaimed(items, now()), kind);
 		processValueTiles(source, items, kind);
 		recordEventLoot(source, items, kind);
@@ -4919,12 +4923,13 @@ public class SoulrendPlugin extends Plugin {
 	 * Retries any pending submissions with exponential backoff.
 	 */
 	void retryPendingSubmissions() {
+		automaticEvidence.sync();
 		if (!apiClient.isConfigured()) return;
 
 		if (!proofBackoff.ready(now())) return; // the last pass failed; wait out the backoff (the site coming back cuts it short)
 		var pending = pendingSubmissionStore.loadAll();
 		// Saved manual proofs never upload; don't log a "retry" for them every 30s.
-		pending.removeIf(sub -> sub.manual);
+		pending.removeIf(sub -> sub.manual || sub.runeliteCaptureId != null);
 		if (pending.isEmpty()) return;
 
 		log.info("Retrying {} proof(s)", pending.size());
@@ -8946,6 +8951,7 @@ public class SoulrendPlugin extends Plugin {
 			if (threshold > 0 && before < threshold && threshold <= total) cleared = t; // values() ascend, so the last match is the highest tier crossed
 		}
 		if (cleared != null && !tiers.isEmpty()) postCaTierClear(cleared);
+		automaticEvidence.combatBatch(batch, caPointsInitialized, before, total);
 
 		// Individual tasks: post each FIRST-seen task at/above the configured floor, but only when
 		// this tick's completions actually raised the CA point total. Already-owned tasks re-fire the

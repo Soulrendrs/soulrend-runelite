@@ -365,6 +365,39 @@ public class BingoApiClient {
         }
     }
 
+    static final class EvidenceRules {
+        List<AutomaticEvidence.Rule> rules;
+    }
+
+    EvidenceRules evidenceRules(int eventId, String token, String character) {
+        var url = evidenceUrl(eventId, character);
+        return getOrNull(plainRequest(url).header("Authorization", "Bearer " + token).get(), EvidenceRules.class);
+    }
+
+    private String evidenceUrl(int eventId, String character) {
+        return HttpUrl.parse(authUrl("/api/runelite/v1/events/" + eventId + "/evidence")).newBuilder()
+            .addQueryParameter("character", character).build().toString();
+    }
+
+    int uploadEvidence(PendingSubmissionStore.PendingSubmission proof, String token, byte[] image) throws IOException {
+        var body = new MultipartBody.Builder().setType(MultipartBody.FORM)
+            .addFormDataPart("tile", String.valueOf(proof.tileId))
+            .addFormDataPart("capture_id", proof.runeliteCaptureId)
+            .addFormDataPart("captured_at", java.time.Instant.ofEpochMilli(proof.timestamp).toString())
+            .addFormDataPart("kind", proof.evidenceKind)
+            .addFormDataPart("objective_id", String.valueOf(proof.evidenceId));
+        if ("ca".equals(proof.evidenceKind)) {
+            body.addFormDataPart("repeat", proof.evidenceRepeat ? "1" : "0");
+        } else {
+            body.addFormDataPart("source", proof.evidenceSource)
+                .addFormDataPart("quantity", String.valueOf(proof.amount));
+        }
+        body.addFormDataPart("image", "evidence.jpg", RequestBody.create(MediaType.parse("image/jpeg"), image));
+        return execute(httpClient, plainRequest(evidenceUrl(proof.eventId, proof.capturedRsn))
+            .header("Authorization", "Bearer " + token).post(body.build()),
+            (reply, data) -> reply.code());
+    }
+
     /** One account inbox across the website and RuneLite; no clan routes or gameplay actions. */
     static final class NotificationInbox {
         List<NotificationItem> items;

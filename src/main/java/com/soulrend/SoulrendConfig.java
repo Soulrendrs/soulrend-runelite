@@ -4,6 +4,10 @@ import net.runelite.client.config.*;
 
 @ConfigGroup("soulrendbingo")
 public interface SoulrendConfig extends Config {
+	@ConfigItem(keyName = "automaticEvidence", name = "Automatic bingo evidence", section = bingoSection,
+		description = "Send a game screenshot for matching drops or Combat Achievements to Soulrend for review. Failed uploads are stored locally for retry.")
+	default boolean automaticEvidence() { return false; }
+
 	// ---- Sections (collapsible groups, top to bottom) ----
 	// Split by purpose: Setup + Bingo are event-participation; the "Notifications:" sections are
 	// clan-wide Discord posts that fire with or without an active bingo.
