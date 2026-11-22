@@ -1669,6 +1669,9 @@ public class SoulrendPlugin extends Plugin {
 		var prevXp = lastSkillXp.put(skill, xp);
 		var realGain = prevXp != null && xp > prevXp;
 		if (realGain) {
+			if (!statsUnsettled && loggedIn() && config != null && config.automaticEvidence()) {
+				automaticEvidence.observeSkill(skill.getName(), client.getTickCount());
+			}
 			// What a duplicate skilling pet came from: the game's line names nothing (DuplicateInference).
 			lastXpSkill = name;
 			lastXpAt = now();
@@ -2460,6 +2463,7 @@ public class SoulrendPlugin extends Plugin {
 			gameValueCounters.onLoading();
 		} else if (off || hop || gs == GameState.CONNECTION_LOST) {
 			gameValueCounters.onSessionEnd();
+			automaticEvidence.clearSkillObservations();
 			sessionGains.reset();
 			movedFrom = null;
 			movedTick = -1;
@@ -2990,6 +2994,7 @@ public class SoulrendPlugin extends Plugin {
 		// same-tick deaths is counted in full (NpcLootReceived under-fires those). See serverNpcLootSeen.
 		if (firstServerLoot && name != null && name.equalsIgnoreCase(fallbackKillName)
 			&& client.getTickCount() - fallbackKillTick <= 2 /* FALLBACK_KILL_TICKS */) return; // the client-side fallback already counted this very kill (see fallbackKillName)
+		automaticEvidence.npcKill(event.getComposition().getId());
 		processValueTiles(name, event.getItems(), "npc");
 		processNpcKill(name);
 	}
@@ -3014,6 +3019,7 @@ public class SoulrendPlugin extends Plugin {
 		if (!serverNpcLootSeen) {
 			fallbackKillName = name;
 			fallbackKillTick = client.getTickCount();
+			automaticEvidence.npcKill(event.getNpc().getId());
 			processValueTiles(name, event.getItems(), "npc");
 			processNpcKill(name);
 		}
@@ -3548,6 +3554,7 @@ public class SoulrendPlugin extends Plugin {
 				maybeNotifyDiaryCompletion(area, tier);
 				recordFeedMoment(new Moment("diary", null, area, 1, null, null, null, null, null, tier,
 						now(), ("diary|" + area + "|" + tier).toLowerCase(ROOT)));
+				automaticEvidence.named("diary", area + " " + tier);
 				creditDiaryTiles(area, tier);
 			}
 		}
@@ -3618,6 +3625,7 @@ public class SoulrendPlugin extends Plugin {
 		var t = now();
 		recentClogUnlocks.values().removeIf(at -> t - at > 15_000 /* CLOG_UNLOCK_SAME_MS */);
 		if (recentClogUnlocks.putIfAbsent(item.toLowerCase(ROOT), t) != null) return; // the other line for this unlock got here first
+		automaticEvidence.named("clog", item);
 		// A pet drop moments ago is still waiting to learn WHICH pet it was — this line is the
 		// only thing that says so. It takes the name and both clog posts stand down, or the same
 		// pet lands twice, once as 🐾 and once as 📕.
@@ -4381,9 +4389,14 @@ public class SoulrendPlugin extends Plugin {
 		// open, a recent ground Take or telegrab, an interface just closed, or emptied from storage:
 		// record only.
 		int tick = client.getTickCount();
-		if (previous == null || !rules.has("gain") || !live() || rules.blackout() || gainSuppressingInterfaceOpen()
+		if (previous == null || gainSuppressingInterfaceOpen()
 				|| tick - lastGroundTakeTick <= 2 || tick - lastTelegrabTick <= 8 /* TELEGRAB_GUARD_TICKS */
 				|| tick - lastSuppressCloseTick <= 2 || tick - lastStorageMoveTick <= 2) return;
+
+		if (automaticEvidence.hasGatheringRules()) {
+			automaticEvidence.gathering(previous, counts, tick);
+		}
+		if (!rules.has("gain") || !live() || rules.blackout()) return;
 
 		for (var e : counts.entrySet()) {
 			int delta = e.getValue() - previous.getOrDefault(e.getKey(), 0);

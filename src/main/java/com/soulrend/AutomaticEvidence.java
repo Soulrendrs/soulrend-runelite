@@ -11,6 +11,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -21,17 +22,31 @@ final class AutomaticEvidence {
     private static final int MAX_ACTIVE_BOARDS = 5;
     private static final int MAX_PENDING_FOR_SESSION = 40;
 
+    private static final Set<String> GATHERING_SKILLS = Set.of("fishing", "mining", "woodcutting", "cooking", "farming", "hunter");
+
     static final class Rule {
         int tile;
         String kind;
-        Integer item_id, quantity, task_id;
-        String source, task_name;
+        Integer item_id, quantity, task_id, npc_id, diary_id;
+        String source, task_name, item_name, diary_name;
         boolean allow_repeat;
 
         boolean matchesDrop(Map<Integer, Integer> items, String actualSource) {
             return "drop".equals(kind) && item_id != null
                 && items.getOrDefault(item_id, 0) >= (quantity == null ? 1 : quantity)
                 && (source == null || source.isEmpty() || source.equals(actualSource));
+        }
+
+        boolean matchesGain(String skill, Map<Integer, Integer> gains) {
+            return "gain".equals(kind) && item_id != null && skill.equals(source)
+                && gains.getOrDefault(item_id, 0) >= (quantity == null ? 1 : quantity);
+        }
+
+        Integer namedId(String type, String name) {
+            if (!type.equals(kind)) return null;
+            String expected = "diary".equals(type) ? diary_name : item_name;
+            if (expected == null || !expected.strip().equalsIgnoreCase(name.strip())) return null;
+            return "diary".equals(type) ? diary_id : item_id;
         }
 
         boolean matchesTask(String task, boolean repeat) {
@@ -70,6 +85,7 @@ final class AutomaticEvidence {
     private final AtomicBoolean syncing = new AtomicBoolean();
     private final Map<Integer, Long> attempted = new HashMap<>(); // client thread
     private volatile BoardRules rules;
+    private final Map<String, Integer> skillTicks = new HashMap<>(); // client thread
 
     AutomaticEvidence(SoulrendPlugin plugin) {
         this.plugin = plugin;
@@ -189,6 +205,81 @@ final class AutomaticEvidence {
             if (match.rule.matchesDrop(quantities, source)) {
                 var proof = prepare(snapshot, match, captureId, match.rule.item_id,
                     quantities.get(match.rule.item_id), source, false);
+                if (proof != null) captures.add(proof);
+            }
+        }
+        capture(snapshot, captures);
+    }
+
+    void npcKill(int npcId) {
+        var snapshot = ready();
+        if (snapshot == null || npcId <= 0) return;
+        var captures = new ArrayList<PendingSubmission>();
+        var captureId = UUID.randomUUID().toString();
+        for (var match : snapshot.matches) {
+            if ("npc_kill".equals(match.rule.kind) && Integer.valueOf(npcId).equals(match.rule.npc_id)) {
+                var proof = prepare(snapshot, match, captureId, npcId, 1, "", false);
+                if (proof != null) captures.add(proof);
+            }
+        }
+        capture(snapshot, captures);
+    }
+
+    void named(String kind, String name) {
+        var snapshot = ready();
+        if (snapshot == null || name == null) return;
+        var captures = new ArrayList<PendingSubmission>();
+        var captureId = UUID.randomUUID().toString();
+        for (var match : snapshot.matches) {
+            var id = match.rule.namedId(kind, name);
+            if (id != null) {
+                var proof = prepare(snapshot, match, captureId, id, 1, "", false);
+                if (proof != null) captures.add(proof);
+            }
+        }
+        capture(snapshot, captures);
+    }
+
+    boolean hasGatheringRules() {
+        var snapshot = rules;
+        return snapshot != null && snapshot.matches.stream().anyMatch(match -> "gain".equals(match.rule.kind));
+    }
+
+    void observeSkill(String skill, int tick) {
+        String key = skill.toLowerCase(Locale.ROOT);
+        if (GATHERING_SKILLS.contains(key)) skillTicks.put(key, tick);
+    }
+
+    void clearSkillObservations() {
+        skillTicks.clear();
+    }
+
+    static String gatheringSkill(Map<String, Integer> skillTicks, int tick) {
+        String eligible = null;
+        for (var entry : skillTicks.entrySet()) {
+            if (entry.getValue() != tick) continue;
+            if (eligible != null) return null; // Cannot attribute one change to two skills.
+            eligible = entry.getKey();
+        }
+        return eligible;
+    }
+
+    /** Called only after the fork's bank, trade, shop, storage and pickup guards pass. */
+    void gathering(Map<Integer, Integer> before, Map<Integer, Integer> after, int tick) {
+        var snapshot = ready();
+        String skill = gatheringSkill(skillTicks, tick);
+        if (snapshot == null || skill == null) return;
+        var gains = new HashMap<Integer, Integer>();
+        after.forEach((id, count) -> {
+            int increase = count - before.getOrDefault(id, 0);
+            if (increase > 0) gains.put(id, increase);
+        });
+        var captures = new ArrayList<PendingSubmission>();
+        var captureId = UUID.randomUUID().toString();
+        for (var match : snapshot.matches) {
+            if (match.rule.matchesGain(skill, gains)) {
+                var id = match.rule.item_id;
+                var proof = prepare(snapshot, match, captureId, id, gains.get(id), skill, false);
                 if (proof != null) captures.add(proof);
             }
         }

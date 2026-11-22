@@ -22,6 +22,22 @@ public class AutomaticEvidenceTest {
     }
 
     @Test
+    public void inventoryGainNeedsCurrentUnambiguousSkillXpAndMatchingStack() {
+        var rule = new AutomaticEvidence.Rule();
+        rule.kind = "gain";
+        rule.item_id = 331;
+        rule.source = "fishing";
+        rule.quantity = 2;
+        assertFalse(rule.matchesGain("mining", Map.of(331, 2)));
+        assertFalse(rule.matchesGain("fishing", Map.of(331, 1)));
+        assertTrue(rule.matchesGain("fishing", Map.of(331, 2)));
+        org.junit.Assert.assertNull(AutomaticEvidence.gatheringSkill(Map.of(), 8));
+        org.junit.Assert.assertNull(AutomaticEvidence.gatheringSkill(Map.of("fishing", 7), 8));
+        org.junit.Assert.assertNull(AutomaticEvidence.gatheringSkill(Map.of("fishing", 8, "mining", 8), 8));
+        org.junit.Assert.assertEquals("fishing", AutomaticEvidence.gatheringSkill(Map.of("fishing", 8), 8));
+    }
+
+    @Test
     public void repeatCombatTasksRequireAnExplicitRule() {
         var rule = new AutomaticEvidence.Rule();
         rule.kind = "ca";
