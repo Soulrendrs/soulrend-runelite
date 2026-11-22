@@ -865,24 +865,27 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		String token = api.playerToken;
 		probingSession = true;
 		interactive().execute(() -> {
-			Boolean valid = api.tokenStillValid(token);
-			BingoApiClient.RuneLiteIdentity identity =
-				Boolean.TRUE.equals(valid) && connectedWebsiteUser == null
-					? api.identityForToken(token) : null;
+			BingoApiClient.SessionProbe probe = api.probeSession(token);
 			invokeLater(() -> {
 				probingSession = false;
 				if (!Objects.equals(token, api.playerToken) || !onScreen) return;
-				if (Boolean.FALSE.equals(valid)) {
+				if (probe != null && !probe.authorized) {
 					connectedWebsiteUser = null;
 					connectedDeviceName = null;
 					setToken("");
 					setSignInStatus("Session expired or revoked. Connect again.");
 					refreshSignInRow();
 					refreshAccountRow();
-				} else if (identity != null && identity.username != null) {
-					connectedWebsiteUser = identity.username;
-					connectedDeviceName = identity.device != null ? identity.device.name : null;
-					refreshAccountRow();
+				} else if (probe != null && probe.identity != null &&
+					probe.identity.username != null) {
+					String user = probe.identity.username;
+					String name = probe.identity.device != null ? probe.identity.device.name : null;
+					if (!Objects.equals(connectedWebsiteUser, user) ||
+						!Objects.equals(connectedDeviceName, name)) {
+						connectedWebsiteUser = user;
+						connectedDeviceName = name;
+						refreshAccountRow();
+					}
 				}
 			});
 		});
