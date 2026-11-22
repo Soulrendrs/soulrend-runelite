@@ -10,5 +10,5 @@ This is a code and test inventory. Live validation against a staged Django deplo
 | Collection log and diaries | Existing unlock and completion handlers | Website proof remains available. | Dedicated evidence rules and live tests still needed. |
 | Timed and deathless clears | Existing raid timing and death gates | Website proof remains available. | Review reliable start, completion and death signals per raid before adding automatic evidence. |
 
-The plugin setting is off by default. Django must separately enable its first-party evidence API.
+The plugin setting is on by default and players can turn it off to stop capture and retries. Django must separately enable its first-party evidence API.
 The local queue uses the original session and character. A rotated or revoked session does not inherit old evidence.
