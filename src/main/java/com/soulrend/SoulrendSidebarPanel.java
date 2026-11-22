@@ -1254,6 +1254,18 @@ public class SoulrendSidebarPanel extends PluginPanel {
                         if (board == null) rows.add(new JLabel("Board unavailable"));
                         else {
                             if (board.captain != null) rows.add(boardText("Captain: " + board.captain));
+                            if (board.progress != null) {
+                                rows.add(boardText("Team progress: " + board.progress.completed
+                                    + "/" + board.progress.visible + " visible objectives credited"));
+                            }
+                            if (board.standings != null && !board.standings.isEmpty()) {
+                                rows.add(Box.createVerticalStrut(8));
+                                rows.add(boardText("Standings"));
+                                for (var rank : board.standings) {
+                                    rows.add(boardText(rank.rank + ". " + rank.team + " · "
+                                        + rank.points + " pts · " + rank.completed + " objectives"));
+                                }
+                            }
                             if (board.tiles != null) {
                                 var available = board.tiles.stream()
                                     .filter(t -> t.name != null && !"hidden".equals(t.status) && !"locked".equals(t.status))

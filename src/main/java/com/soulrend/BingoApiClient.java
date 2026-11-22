@@ -327,6 +327,15 @@ public class BingoApiClient {
     static final class TeamBoard {
         String captain;
         List<BoardTile> tiles;
+        TeamProgress progress;
+        List<TeamStanding> standings;
+    }
+    static final class TeamProgress {
+        int visible, completed;
+    }
+    static final class TeamStanding {
+        int rank, points, completed;
+        String team;
     }
     static final class BoardTile {
         String name, status, value, target, scope;
