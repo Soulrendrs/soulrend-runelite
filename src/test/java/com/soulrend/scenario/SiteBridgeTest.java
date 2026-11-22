@@ -72,7 +72,7 @@ public class SiteBridgeTest
 
 		for (OkHttpClient c : clients)
 		{
-			try (Response r = c.newCall(new Request.Builder().url("https://soulrend.events/api/plugin/config").build()).execute())
+			try (Response r = c.newCall(new Request.Builder().url("https://soulrend.events/api/runelite/v1/me").build()).execute())
 			{
 				assertEquals(200, r.code());
 			}
@@ -80,7 +80,7 @@ public class SiteBridgeTest
 		assertEquals("each client reached the override site, not soulrend.events", clients.size(), hits.size());
 		for (String hit : hits)
 		{
-			assertEquals("/api/plugin/config boss-pet", hit);
+			assertEquals("/api/runelite/v1/me boss-pet", hit);
 		}
 	}
 }
