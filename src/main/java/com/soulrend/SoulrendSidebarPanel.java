@@ -812,6 +812,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		autoRefresh.start();
 		for (var v : views) v.resume();
 		startProofTimer.start();
+		observedGainsTimer.start();
 	}
 
 	public void onDeactivate() {
@@ -823,6 +824,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		autoRefresh.stop();
 		for (var v : views) v.stop();
 		startProofTimer.stop();
+		observedGainsTimer.stop();
 	}
 
 	// ---- Device sign-in (DeviceSignIn) ------------------------------------------------------
@@ -1190,6 +1192,8 @@ public class SoulrendSidebarPanel extends PluginPanel {
     long generation;
     boolean reading;
     String lastBingoRenderKey;
+    private final Map<JLabel, BingoApiClient.BoardTile> observedRows = new LinkedHashMap<>();
+    private final Timer observedGainsTimer = new Timer(1000, e -> refreshObservedGains());
 
     /** Prefer the active bingo, but retain an explicit choice while it is eligible. */
     static BingoApiClient.EventSummary selectBingoEvent(List<BingoApiClient.EventSummary> events, int selected) {
@@ -1212,6 +1216,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
             panelToken = token;
             panelCharacter = character;
             lastBingoRenderKey = null;
+            observedRows.clear();
             connectedWebsiteUser = null;
             renderLoading();
         }
@@ -1241,6 +1246,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
                 String renderKey = api.gson.toJson(list) + "|" + selectedEvent + "|" + api.gson.toJson(board);
                 if (!manual && Objects.equals(renderKey, lastBingoRenderKey)) return;
                 lastBingoRenderKey = renderKey;
+                observedRows.clear();
                 if (list == null || list.events == null) {
                     rows.add(boardText(api.lastBingoHttpStatus == 401
                         ? "Soulrend session expired or revoked. Sign out and connect again."
@@ -1257,6 +1263,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
                             rows.add(fullWidthButton(Ui.plainText(e.name), Ui.plainText(e.name), () -> {
                                 if (reading) return;
                                 selectedEvent = e.id;
+                                observedRows.clear();
                                 renderLoading();
                                 readBingos(true);
                             }));
@@ -1293,6 +1300,8 @@ public class SoulrendSidebarPanel extends PluginPanel {
                                 rows.add(gap(8));
                                 rows.add(boardText(available.isEmpty() ? "No objectives available yet"
                                     : "Objectives · " + credited + " completed", BOLD, WHITE));
+                                boolean linked = "active".equals(event.status) && character != null
+                                    && event.characters != null && event.characters.stream().anyMatch(rsn -> Rsn.same(rsn, character));
                                 for (var tile : available) {
                                     rows.add(Box.createVerticalStrut(4));
                                     JLabel card = boardText(tile.label(), REGULAR, WHITE);
@@ -1300,13 +1309,37 @@ public class SoulrendSidebarPanel extends PluginPanel {
                                     card.setOpaque(true);
                                     card.setBorder(createEmptyBorder(6, 8, 6, 8));
                                     rows.add(capH(card));
+                                    if (linked && tile.metric != null && ("skill_xp".equals(tile.objective_type)
+                                        || "boss_kc".equals(tile.objective_type))) {
+                                        JLabel observed = small("", MUTED);
+                                        observed.setBorder(createEmptyBorder(2, 8, 2, 8));
+                                        observed.setToolTipText("Observed on this client this session. Official credit comes from Wise Old Man.");
+                                        observed.setVisible(false);
+                                        observedRows.put(observed, tile);
+                                        rows.add(observed);
+                                    }
                                 }
                             }
                         }
                     }
                 }
+                refreshObservedGains();
                 setContent(rows);
             });
+        });
+    }
+
+    private void refreshObservedGains() {
+        if (tab != CLAN || observedRows.isEmpty()) return;
+        String token = api.playerToken;
+        String character = data.myRsn();
+        var gains = Objects.equals(token, panelToken) && Objects.equals(character, panelCharacter) && !api.isAccountPaused()
+            ? data.sessionGains(character, token) : Map.<String, Long>of();
+        observedRows.forEach((label, tile) -> {
+            long gain = gains.getOrDefault(tile.objective_type + ":" + tile.metric, 0L);
+            String text = gain > 0 ? "Observed: +" + gain + ("skill_xp".equals(tile.objective_type) ? " XP" : " KC") + " this session" : "";
+            if (!Objects.equals(text, label.getText())) label.setText(text);
+            if (label.isVisible() != (gain > 0)) label.setVisible(gain > 0);
         });
     }
 

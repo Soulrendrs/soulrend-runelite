@@ -338,7 +338,7 @@ public class BingoApiClient {
         String team;
     }
     static final class BoardTile {
-        String name, status, value, target, scope;
+        String name, status, value, target, scope, objective_type, metric;
         boolean credited;
         String label() {
             if ("hidden".equals(status)) return "Hidden tile";
