@@ -1172,6 +1172,8 @@ public class SoulrendSidebarPanel extends PluginPanel {
     boolean reading;
 
     void readBingos(boolean manual) {
+        clanPicker.setVisible(false);
+        tabStrip.setVisible(false);
         String token = api.playerToken;
         String character = data.myRsn();
         if (!Objects.equals(token, panelToken) || !Objects.equals(character, panelCharacter)) {
@@ -1220,23 +1222,32 @@ public class SoulrendSidebarPanel extends PluginPanel {
                             readBingos(true);
                         });
                         rows.add(button);
-                        rows.add(new JLabel(e.status + " · " + (e.team == null ? "Unassigned" : e.team)));
-                        if (e.characters != null) rows.add(new JLabel("Characters: " + String.join(", ", e.characters)));
+                        rows.add(boardText(("active".equals(e.status) ? "Active" : "Upcoming")
+                            + (e.team == null ? "" : " · " + e.team)));
+                        if (e.characters != null) rows.add(boardText("Characters: " + String.join(", ", e.characters)));
                     }
                     if (event != null) {
+                        rows.add(Box.createVerticalStrut(10));
                         JButton link = new JButton("Open event on Soulrend");
                         link.addActionListener(a -> LinkBrowser.browse(BingoApiClient.CANONICAL_SITE + "/events/" + event.id + "/"));
                         rows.add(link);
                         if (board == null) rows.add(new JLabel("Board unavailable"));
                         else {
-                            if (board.captain != null) rows.add(new JLabel("Captain: " + board.captain));
+                            if (board.captain != null) rows.add(boardText("Captain: " + board.captain));
                             if (board.tiles != null) {
-                                long credited = board.tiles.stream().filter(t -> t.credited).count();
-                                rows.add(new JLabel("Team progress: " + credited + "/" + board.tiles.size()));
-                                for (var tile : board.tiles) {
-                                    JLabel label = new JLabel(tile.label());
-                                    label.putClientProperty("html.disable", Boolean.TRUE);
-                                    rows.add(label);
+                                var available = board.tiles.stream()
+                                    .filter(t -> t.name != null && !"hidden".equals(t.status) && !"locked".equals(t.status))
+                                    .collect(java.util.stream.Collectors.toList());
+                                long credited = available.stream().filter(t -> t.credited).count();
+                                rows.add(boardText(available.isEmpty() ? "No objectives available yet"
+                                    : "Objectives · " + credited + " completed"));
+                                for (var tile : available) {
+                                    rows.add(Box.createVerticalStrut(4));
+                                    JTextArea card = boardText(tile.label());
+                                    card.setBackground(DARKER_GRAY_COLOR);
+                                    card.setOpaque(true);
+                                    card.setBorder(createEmptyBorder(6, 8, 6, 8));
+                                    rows.add(card);
                                 }
                             }
                         }
@@ -1245,6 +1256,18 @@ public class SoulrendSidebarPanel extends PluginPanel {
                 setContent(rows);
             });
         });
+    }
+
+    private JTextArea boardText(String text) {
+        JTextArea label = new JTextArea(text);
+        label.setFont(getFont());
+        label.setForeground(getForeground());
+        label.setLineWrap(true);
+        label.setWrapStyleWord(true);
+        label.setEditable(false);
+        label.setFocusable(false);
+        label.setOpaque(false);
+        return label;
     }
 
     void refresh(boolean manual) {
