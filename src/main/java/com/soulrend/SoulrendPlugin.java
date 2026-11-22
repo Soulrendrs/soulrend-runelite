@@ -330,6 +330,7 @@ public class SoulrendPlugin extends Plugin {
 	// "Your completed <X> count is: N") chat lines, so a rare-drop post can show the KC it
 	// landed on. Chat + loot events both run on the client thread, so no synchronisation needed.
 	final Map<String, Integer> killCounts = new HashMap<>();
+	final SessionGains sessionGains = new SessionGains();
 
 	/**
 	 * The "Soulrend" button in the collection log header.
@@ -1494,6 +1495,7 @@ public class SoulrendPlugin extends Plugin {
 	}
 
 	protected void shutDown() {
+		sessionGains.reset();
 		keyManager.unregisterKeyListener(eventChatKey);
 		clientThread.invokeLater(this::unflairAll);
 		invokeLater(() -> GradientLabel.watch(null));
@@ -1604,6 +1606,7 @@ public class SoulrendPlugin extends Plugin {
 
 	/** Back at the login screen (or starting there): the next stat burst is a table arriving. */
 	void unsettleStats() {
+		sessionGains.reset();
 		statsUnsettled = true;
 		statsSettleTicks = 0;
 		lastSkillLevel.clear();
@@ -1658,6 +1661,9 @@ public class SoulrendPlugin extends Plugin {
 		// A real gain (XP rose) vs the login/resync baseline burst — only the former marks the tile "You".
 		var name = skill.getName();
 		int xp = event.getXp();
+		if (!statsUnsettled && loggedIn() && apiClient != null && !apiClient.isAccountPaused()) {
+			sessionGains.skill(getLocalPlayerName(), apiClient.playerToken, name, xp);
+		}
 		var prevXp = lastSkillXp.put(skill, xp);
 		var realGain = prevXp != null && xp > prevXp;
 		if (realGain) {
@@ -1764,6 +1770,7 @@ public class SoulrendPlugin extends Plugin {
 		}
 		if ("shareSeasonal".equals(key) && sidebarPanel != null) invokeLater(sidebarPanel::seasonalChanged);
 		if (isInternalStateKey(key)) return;
+		if ("playerToken".equals(key)) sessionGains.reset();
 		configureApiClient();
 		if ("profileLookupMenu".equals(key) || "lookupPlayers".equals(key)) profileLookup.syncPlayerItem();
 		if ("trackerOnePanel".equals(key)) tileTracker.setOnePanel(config.trackerOnePanel());
@@ -2451,6 +2458,7 @@ public class SoulrendPlugin extends Plugin {
 			gameValueCounters.onLoading();
 		} else if (off || hop || gs == GameState.CONNECTION_LOST) {
 			gameValueCounters.onSessionEnd();
+			sessionGains.reset();
 			movedFrom = null;
 			movedTick = -1;
 			// Chat line ids start over with the session, so an old mark would land on a stranger's line.
@@ -3436,6 +3444,9 @@ public class SoulrendPlugin extends Plugin {
 				var firstSeen = !killCounts.containsKey(kcKey);
 				int kc = Integer.parseInt(kcMatcher.group("count").replace(",", ""));
 				killCounts.put(kcKey, kc);
+				if (!statsUnsettled && loggedIn() && !statsAreArtificial() && apiClient != null && !apiClient.isAccountPaused()) {
+					sessionGains.boss(getLocalPlayerName(), apiClient.playerToken, kcName, kc);
+				}
 				lastKcName = kcName;
 				lastKcValue = kc;
 				lastKcAtMs = now();

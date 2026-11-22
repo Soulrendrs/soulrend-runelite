@@ -222,6 +222,12 @@ public class SoulrendSidebarDataSource {
 		return apiClient.getCurrentRsn();
 	}
 
+	/** Read a snapshot of this character's uncredited client observations. */
+	java.util.Map<String, Long> sessionGains(String rsn, String token) {
+		var p = plugin;
+		return p == null ? java.util.Map.of() : p.sessionGains.snapshot(rsn, token);
+	}
+
 	// ── The clan switcher's data ────────────────────────────────────────────────────────────────
 	//
 	// One Soulrend serves every clan, so the Site URL names none of them and a person may hold seats in
