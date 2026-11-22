@@ -94,7 +94,7 @@ public class BingoClogBannerOverlay extends Overlay {
 		var complete = current >= required;
 		var middle = complete ? "Tile complete!" : "Progress:";
 		var bottom = required > 1 ? label + " (" + current + "/" + required + ")" : label;
-		return show("Soulrend Bingo", middle, bottom);
+		return show("Soulrend", middle, bottom);
 	}
 
 	/** Full three-line control. False when it folded into the "+N more" banner (play no sound). */
@@ -123,7 +123,7 @@ public class BingoClogBannerOverlay extends Overlay {
 		if (active == null || now - startedAt >= total) {
 			active = queue.poll();
 			int n = active == null ? folded.getAndSet(0) : 0;
-			if (n > 0) active = new String[]{"Soulrend Bingo", "+" + n + " more", "See chat and the panel"};
+			if (n > 0) active = new String[]{"Soulrend", "+" + n + " more", "See chat and the panel"};
 			if (active == null) return null;
 			startedAt = now;
 			wrapped = null;

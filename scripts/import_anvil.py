@@ -59,10 +59,10 @@ def text_transform(path: Path, source: str) -> str:
         if n != 1:
             raise RuntimeError("Upstream PluginDescriptor migration did not match audited version")
         source = source.replace('internalName = "anvil",', 'internalName = "soulrend-bingo"')
-        source = source.replace('name = "Anvil",', 'name = "Soulrend Bingo",')
+        source = source.replace('name = "Anvil",', 'name = "Soulrend",')
         source = source.replace(
             'Companion plugin for the Anvil clan-events platform — codeword overlay, auto-submits tracked bingo drops, clan Discord notifications',
-            'Soulrend Bingo companion (development build; site integration pending)',
+            'Soulrend companion (development build; site integration pending)',
         )
     if path.as_posix().endswith("PendingSubmissionStore.java"):
         # The fork has an independent root (getPluginDirectory), never a migrated Anvil directory.
@@ -82,7 +82,7 @@ def text_transform(path: Path, source: str) -> str:
     source = source.replace("anvil", "soulrend")
     if path.name == "runelite-plugin.properties":
         source = (
-            "displayName=Soulrend Bingo\n"
+            "displayName=Soulrend\n"
             "author=Soulrendrs\n"
             "build=standard\n"
             "description=RuneLite companion for Soulrend Bingo Portal. Account linking and site integration are under development.\n"

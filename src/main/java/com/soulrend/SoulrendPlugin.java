@@ -60,8 +60,8 @@ import net.runelite.api.clan.ClanMember;
 
 @Slf4j
 @PluginDescriptor(
-		name = "Soulrend Bingo",
-		description = "Soulrend Bingo companion (development build; site integration pending)",
+		name = "Soulrend",
+		description = "Soulrend companion (development build; site integration pending)",
 		tags = {"soulrend", "bingo", "overlay", "drops", "loot", "clan", "event"},
 		// Required by getPluginDirectory(), which throws without it — the directory is named after it.
 		internalName = "soulrend-bingo"
@@ -5526,7 +5526,7 @@ public class SoulrendPlugin extends Plugin {
 		if (sidebarPanel != null) invokeLater(sidebarPanel::tileCompleted);
 		if (!config.teamCompletionBanner()) return false;
 		// A drop's own popup already showed it complete: no second popup, but the chat line still says so.
-		if (!locallyShownTiles.contains(tileId)) if (clogBanner.show("Soulrend Bingo", "Tile complete!", label)) playBannerSound();
+		if (!locallyShownTiles.contains(tileId)) if (clogBanner.show("Soulrend", "Tile complete!", label)) playBannerSound();
 		return true;
 	}
 
@@ -5600,7 +5600,7 @@ public class SoulrendPlugin extends Plugin {
 		Set<Integer> shown = new HashSet<>();
 		for (var t : cfg.completedTiles) if (t.partOf != null && locallyShownTiles.contains(t.tileId)) shown.add(t.partOf);
 		newlyDone.stream().filter(t -> !shown.contains(t.tileId)).max(Comparator.comparingInt(t -> t.points))
-			.ifPresent(t -> { if (clogBanner.show("Soulrend Bingo", "Tile complete!", t.label)) playBannerSound(); });
+			.ifPresent(t -> { if (clogBanner.show("Soulrend", "Tile complete!", t.label)) playBannerSound(); });
 		// A persistent chat line for EVERY newly-completed tile (including the bannered one) — the
 		// banner is easy to miss, so leave a record naming who finished it. Stat/manual completions
 		// carry no crediting player, so those just say "Tile complete: <label>!".
