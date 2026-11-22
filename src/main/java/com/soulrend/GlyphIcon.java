@@ -20,7 +20,7 @@ import javax.swing.Icon;
 @RequiredArgsConstructor
 final class GlyphIcon implements Icon {
 	enum Shape {
-		CHEVRON_LEFT, CHEVRON_RIGHT, EXTERNAL, CHECK, CLOSE, ELLIPSIS, GEAR, STAR, UP, DOWN
+		CHEVRON_LEFT, CHEVRON_RIGHT, EXTERNAL, CHECK, CLOSE, ELLIPSIS, GEAR, BELL, STAR, UP, DOWN
 	}
 
 	final Shape shape;
@@ -87,6 +87,15 @@ final class GlyphIcon implements Icon {
 						p.lineTo(cx + Math.cos(a) * s * 0.44, cx + Math.sin(a) * s * 0.44);
 					}
 					g.draw(p);
+					break;
+				case BELL:
+					p.moveTo(s * 0.2, s * 0.72);
+					p.curveTo(s * 0.31, s * 0.61, s * 0.28, s * 0.43, s * 0.3, s * 0.34);
+					p.curveTo(s * 0.35, s * 0.08, s * 0.65, s * 0.08, s * 0.7, s * 0.34);
+					p.curveTo(s * 0.72, s * 0.43, s * 0.69, s * 0.61, s * 0.8, s * 0.72);
+					p.closePath();
+					g.draw(p);
+					g.draw(new Arc2D.Float(s * 0.41f, s * 0.72f, s * 0.18f, s * 0.15f, 185, 170, Arc2D.OPEN));
 					break;
 				case STAR:
 					// Filled five points: an Soulrend Supporter, beside their name.

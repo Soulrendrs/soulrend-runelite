@@ -76,7 +76,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 	// Clan is everything the panel always was — `content` below, untouched. You and Lookup are views
 	// the site builds (UiView), and only exist once the site has answered: until then the strip hides
 	// and the Clan tab says it can't reach the site, with the sound lists under it (renderEmpty).
-	enum Tab { CLAN, FEED, YOU, LOOKUP, SETTINGS }
+	enum Tab { CLAN, FEED, NOTIFICATIONS, YOU, LOOKUP, SETTINGS }
 	Tab tab = CLAN;
 	/** Whether the strip is showing, i.e. signed in to a site that serves player cards. */
 	boolean tabsOn;
@@ -107,6 +107,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 	long clanAskedAt;
 	/** ⚙: syncing and this client's own settings — profile sync, roster sync for admins, sounds. */
 	final JPanel settingsPanel = column();
+	final SoulrendNotificationPanel notificationPanel;
 	final JPanel lookupRecentRow = column();
 	final JTextField lookupSearch = new JTextField();
 	/** Fills in names as you type in {@link #lookupSearch}; built with the tab bodies. */
@@ -124,6 +125,8 @@ public class SoulrendSidebarPanel extends PluginPanel {
 	// re-addresses everything the plugin does — board, stat pushes, submissions, notifications.
 	final JComboBox<ClanChoice> clanPicker = new JComboBox<>();
 	final JButton refreshButton = new JButton("Refresh");
+	final JButton inboxButton = new JButton(new GlyphIcon(BELL, 15));
+	long nextNotificationCountAt;
 
 	// Device sign-in (home-native, DeviceSignIn): shown whenever there is no Account Token yet — the
 	// main way in, so nobody has to copy a token out of the site.
@@ -194,6 +197,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		super(true); // wrap in RuneLite's scroll pane so a long nearest-tiles list scrolls
 		this.data = dataSource;
 		this.api = apiClient;
+		this.notificationPanel = new SoulrendNotificationPanel(this, apiClient);
 		this.configManager = configManager;
 		this.executor = executor;
 		// Item and boss icons for the player card: the managers are null in tests that build the panel by hand.
@@ -215,6 +219,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		autoRefresh = new Timer(POLL_INTERVAL_MS, e -> {
 			// With the live push up, a push asks for the board when it moves (boardChanged) and "2m ago"
 			// times tick locally (UiView), so the timer is only a safety net: every 5 minutes.
+			refreshNotificationCountIfDue();
 			if (!typingInSearch() && (!pushLive.getAsBoolean() || ++quietTicks % PUSH_SAFETY_TICKS == 0)) refresh(); // the view redraws only if the site's answer changed
 		});
 		autoRefresh.setCoalesce(true);
@@ -239,7 +244,14 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		var titleRow = left(new JPanel(new BorderLayout()));
 		titleRow.setBackground(DARK_GRAY_COLOR);
 		titleRow.add(title, WEST);
-		titleRow.add(refreshButton, EAST);
+		styleFlatButton(inboxButton, WHITE);
+		inboxButton.setToolTipText("Notifications");
+		inboxButton.addActionListener(e -> selectTab(NOTIFICATIONS));
+		var headerActions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 2, 0));
+		headerActions.setBackground(DARK_GRAY_COLOR);
+		headerActions.add(inboxButton);
+		headerActions.add(refreshButton);
+		titleRow.add(headerActions, EAST);
 		capH(titleRow);
 
 		// Sign-in affordance — visible whenever there is no token (see refreshSignInRow).
@@ -328,7 +340,12 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		gc.gridy = 0;
 		for (var t : Tab.values()) {
 			JLabel label;
-			if (t == SETTINGS) {
+			if (t == NOTIFICATIONS) {
+				label = new JLabel(new GlyphIcon(BELL, 13), SwingConstants.CENTER);
+				label.setToolTipText("Notifications");
+				label.setPreferredSize(new Dimension(34, label.getPreferredSize().height));
+				gc.weightx = 0;
+			} else if (t == SETTINGS) {
 				// An icon, not a fourth word: three named tabs and a narrow gear keep the strip calm.
 				label = new JLabel(new GlyphIcon(GEAR, 13), SwingConstants.CENTER);
 				label.setToolTipText("Syncing and settings");
@@ -464,7 +481,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		feedRead();
 		data.feedOnScreen(onScreen && next == FEED);
 		tabBody.removeAll();
-		tabBody.add(next == CLAN ? content : next == FEED ? feedView : next == YOU ? youView : next == LOOKUP ? lookupPanel : settingsPanel,
+		tabBody.add(next == CLAN ? content : next == FEED ? feedView : next == YOU ? youView : next == LOOKUP ? lookupPanel : next == NOTIFICATIONS ? notificationPanel : settingsPanel,
 			NORTH);
 		tabBody.revalidate();
 		styleTabs();
@@ -473,7 +490,8 @@ public class SoulrendSidebarPanel extends PluginPanel {
 			renderYou(true);
 		} else if (next == FEED) {
 			renderFeed();
-		} else if (next == SETTINGS) renderSettings();
+		} else if (next == NOTIFICATIONS) notificationPanel.refresh(true);
+		else if (next == SETTINGS) renderSettings();
 		redraw(this);
 	}
 
@@ -787,6 +805,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 
 	public void onActivate() {
 		onScreen = true;
+		refreshNotificationCountIfDue();
 		feedRead();
 		data.feedOnScreen(tab == FEED);
 		refresh();
@@ -815,6 +834,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 	 * button is the member explicitly choosing to connect.
 	 */
 	void refreshSignInRow() {
+		inboxButton.setEnabled(!api.needsSignIn());
 		if (signInInFlight) return;
 		var show = api.needsSignIn();
 		signInRow.setVisible(show);
@@ -826,6 +846,26 @@ public class SoulrendSidebarPanel extends PluginPanel {
 	void cancelSignIn() {
 		var flow = signIn;
 		if (flow != null) flow.cancel();
+	}
+
+	/** Account-wide unread badge, polled at most once per minute while the sidebar is visible. */
+	void refreshNotificationCountIfDue() {
+		if (!onScreen || api.needsSignIn() || api.accountPaused) return;
+		long now = System.currentTimeMillis();
+		if (now < nextNotificationCountAt) return;
+		nextNotificationCountAt = now + 60_000L;
+		async(api::notificationCount, result -> {
+			if (onScreen && !api.needsSignIn() && result != null)
+				notificationPanel.updateCount(result.unread_count);
+		});
+	}
+
+	void notificationCountChanged(int unread) {
+		var badge = unread > 99 ? "99+" : String.valueOf(unread);
+		var tip = unread > 0 ? "Notifications: " + badge + " unread" : "Notifications";
+		inboxButton.setToolTipText(tip);
+		var label = tabLabels.get(NOTIFICATIONS);
+		if (label != null) label.setToolTipText(tip);
 	}
 
 	/** Run the device sign-in (async, every step on the shared executor); on success store the token —
