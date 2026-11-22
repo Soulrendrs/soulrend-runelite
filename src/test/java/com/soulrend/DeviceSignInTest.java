@@ -67,7 +67,7 @@ public class DeviceSignInTest
 		List<Runnable> queued = new ArrayList<>();
 		List<Object> callbacks = new ArrayList<>();
 		DeviceSignIn flow = new DeviceSignIn(null, url -> { }, (step, delayMs) -> queued.add(step));
-		flow.run(callbacks::add, callbacks::add);
+		flow.run(callbacks::add, callbacks::add, callbacks::add);
 		flow.cancel();
 		for (Runnable step : new ArrayList<>(queued))
 		{

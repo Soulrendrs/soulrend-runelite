@@ -137,9 +137,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 	final JButton signInButton = new JButton("Connect to Soulrend");
 	final JLabel signInStatus = small("", MUTED);
 	final JPanel signInRow = new JPanel(new BorderLayout(0, 2));
-	// The token isn't in RuneLite's settings (SoulrendConfig.playerToken is hidden), so the panel carries
-	// both ends: a manual paste for when the browser sign-in can't work, and Sign out.
-	final JLabel pasteTokenLink = new ClipLabel("Paste a token instead");
+	final JLabel signInCode = new JLabel("", SwingConstants.CENTER);
 	/** Opens the account menu: Not my account / Sign out. */
 	final JLabel accountMenuLink = new JLabel(new GlyphIcon(ELLIPSIS, 14));
 	/**
@@ -261,9 +259,15 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		signInStatus.setVisible(false);
 		signInRow.setBackground(DARK_GRAY_COLOR);
 		signInRow.add(signInButton, NORTH);
-		signInRow.add(signInStatus, CENTER);
-		styleLink(pasteTokenLink, "Paste the token from soulrend.events (Profile → RuneLite plugin)", this::pasteToken);
-		signInRow.add(pasteTokenLink, SOUTH);
+		signInCode.setFont(new Font(Font.MONOSPACED, Font.BOLD, 22));
+		signInCode.setForeground(WHITE);
+		signInCode.setBackground(DARKER_GRAY_COLOR);
+		signInCode.setOpaque(true);
+		signInCode.setBorder(createEmptyBorder(8, 6, 8, 6));
+		signInCode.putClientProperty("html.disable", Boolean.TRUE);
+		signInCode.setVisible(false);
+		signInRow.add(signInCode, CENTER);
+		signInRow.add(signInStatus, SOUTH);
 		left(capH(signInRow)).setVisible(false);
 
 		onClick(accountLink, this::onAccountButton);
@@ -750,11 +754,8 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		addAll(settingsPanel, bold("On the Soulrend website"), gap(6));
 		siteRow("Discord posts & screenshot privacy", "What you post to your clan's Discord", "/settings/announcements");
 		siteRow("All your Soulrend settings", "Profile, characters, name colours and more", "/settings");
-		siteRow("Guides", "The side panel, events, proofs, Supporter perks", "/guide");
+		siteRow("Guides", "The side panel, events, proofs", "/guide");
 		siteRow("What's new", "Everything new on Soulrend, for your roles", "/whats-new");
-		settingsPanel.add(gap(6));
-		settingsPanel.add(linkRow(DARKER_GRAY_COLOR, small(isSupporter() ? "★ Your Supporter perks" : "★ Become a Supporter", new Color(0xFF_D3_5C)), null,
-			SUPPORTER_TIP, this::openSupporter));
 		redraw(settingsPanel);
 	}
 
@@ -789,15 +790,13 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		return capH(onClick(row, open));
 	}
 
-	static final String SUPPORTER_TIP = "Name colours, profile banners, clan boosts — and it keeps Soulrend running";
 
 	/** What the settings tab last drew from (settingsKey), so an unchanged refresh skips the rebuild. */
 	String settingsShown;
 
 	String settingsKey(PanelActions actions) {
 		var k = new StringBuilder()
-			.append(actions.canSyncProfile).append('|').append(actions.canSyncRoster).append('|').append(actions.rosterNote)
-			.append('|').append(isSupporter());
+			.append(actions.canSyncProfile).append('|').append(actions.canSyncRoster).append('|').append(actions.rosterNote);
 		for (var clip : data.sounds(BANNER)) k.append('|').append(clip).append(data.bannerSoundOn(clip) ? '+' : '-');
 		return k.append("|m").append(data.sounds(MISSION).size()).toString();
 	}
@@ -839,7 +838,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		if (signInInFlight) return;
 		var show = api.needsSignIn();
 		signInRow.setVisible(show);
-		if (show) setSignInStatus("Connects to " + SetupNudge.SITE_HOST + ".");
+		if (show && !signInStatus.isVisible()) setSignInStatus("Connects to " + SetupNudge.SITE_HOST + ".");
 		redraw(signInRow);
 	}
 
@@ -870,7 +869,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 	}
 
 	/** Run the device sign-in (async, every step on the shared executor); on success store the token —
-	 * onConfigChanged does the rest. Both callbacks arrive off the EDT, so they marshal via invokeLater. */
+	 * onConfigChanged does the rest. Callbacks arrive off the EDT, so they marshal via invokeLater. */
 	void startSignIn() {
 		if (signInInFlight) return;
 		signInInFlight = true;
@@ -880,20 +879,21 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		signIn = new DeviceSignIn(api, executor);
 		signIn.run(
 			line -> invokeLater(() -> setSignInStatus(line)),
+			code -> invokeLater(() -> showSignInCode(code)),
 			result -> invokeLater(() -> {
 				signInInFlight = false;
 				signInButton.setEnabled(true);
+				showSignInCode("");
 				if (result.outcome == DeviceSignIn.Outcome.SIGNED_IN) {
 					// Storing the token fires the plugin's onConfigChanged → client reconfigure,
-					// identity stamp + greet, and a sidebar refresh — the same path as a manual paste.
+					// identity stamp + greet, and a sidebar refresh.
 					setToken(result.token);
 
 					// Read it straight back. A signed-in-but-empty config is the one failure mode a
 					// member can't diagnose: the site says they approved, the panel keeps asking them
 					// to sign in, and nothing explains why. It happens when the config write doesn't
 					// take — a synced RuneLite profile clobbered by a second client, most often — and
-					// it MUST NOT look like the sign-in itself failed. Say what happened and give them
-					// the manual route, which always works.
+					// it MUST NOT look like the sign-in itself failed. Explain what happened.
 					var stored = configManager.getConfiguration("soulrendbingo", "playerToken");
 					if (stored == null || stored.isEmpty()) {
 						log.warn("Token did not persist");
@@ -926,35 +926,8 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		return onClick(link, action);
 	}
 
-	/** The manual route: paste the token from the site. Storing it runs the same path as Sign in. */
-	void pasteToken() {
-		if (signInInFlight) return;
-		// Masked: the token signs in as the member, and a stream or a screenshot must not show it.
-		var field = new JPasswordField();
-		field.addHierarchyListener(e -> invokeLater(field::requestFocusInWindow));
-		if (showConfirmDialog(this, new Object[]{"Paste an existing Soulrend bearer token (advanced):", field},
-			"Soulrend", OK_CANCEL_OPTION, PLAIN_MESSAGE) != OK_OPTION) return;
-		var token = new String(field.getPassword()).trim();
-		if (token.isEmpty()) return;
-		setToken(token);
-		setSignInStatus("");
-		refreshSignInRow();
-		refresh();
-	}
-
 	void setToken(String token) {
 		configManager.setConfiguration("soulrendbingo", "playerToken", token);
-	}
-
-	/** The tracked character wears Supporter flair (any tier), so the link offers perks, not a pitch. */
-	boolean isSupporter() {
-		var me = data.myRsn();
-		var e = me == null ? null : data.flairOf(me);
-		return e != null && Boolean.TRUE.equals(e.s);
-	}
-
-	void openSupporter() {
-		LinkBrowser.browse(api.siteLink(isSupporter() ? "/settings/supporter" : "/supporter"));
 	}
 
 	void showAccountMenu(Component anchor) {
@@ -967,7 +940,6 @@ public class SoulrendSidebarPanel extends PluginPanel {
 				invokeLater(() -> selectTab(YOU));
 			} else ProfileLookup.open(row.rsn);
 		});
-		item(menu, isSupporter() ? "Your Supporter perks" : "Become a Supporter", SUPPORTER_TIP, this::openSupporter);
 		if (tracking && !accountActionInFlight) {
 			item(menu, "Not my account…", "Someone else plays " + row.rsn + " here — stop tracking it on this computer", this::onAccountButton);
 			menu.addSeparator();
@@ -994,7 +966,13 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		refresh();
 	}
 
-	/** The line under the sign-in button — most importantly the one carrying the approval code. */
+	private void showSignInCode(String code) {
+		signInCode.setText(code);
+		signInCode.setVisible(!code.isEmpty());
+		capH(signInRow).revalidate();
+	}
+
+	/** Instructions and errors shown below the approval code. */
 	void setSignInStatus(String text) {
 		var show = setStatus(signInStatus, text, signInRow);
 		signInStatus.setToolTipText(show ? text : null);
@@ -1623,9 +1601,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		var card = column();
 		addAll(card, small("New here?", BRAND_ORANGE), gap(6));
 		card.setBorder(createEmptyBorder(8, 0, 0, 0));
-		card.add(note("Soulrend tracks your OSRS progress — collection log, personal bests, records — and"
-			+ " your clan's bingo boards. Press Sign in with Discord above to make your free account"
-			+ " and connect this client in one step."));
+		card.add(note("Connect your Soulrend account to see your bingo events, team progress and notifications in RuneLite."));
 		card.add(gap(6));
 		card.add(note("You don't need a clan: your profile is your own. If you run one, starting it"
 			+ " there is free too."));
