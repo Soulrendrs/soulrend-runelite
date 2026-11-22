@@ -147,6 +147,7 @@ public class SoulrendPlugin extends Plugin {
 	@Inject
 	PendingSubmissionStore pendingSubmissionStore;
 	final AutomaticEvidence automaticEvidence = new AutomaticEvidence(this);
+	final InstallationIdentity installationIdentity = new InstallationIdentity();
 
 	@Inject
 	Gson gson;
@@ -1108,6 +1109,8 @@ public class SoulrendPlugin extends Plugin {
 		// the plugin — overlay, tracking, submissions over the network — never touches disk at all.
 		try {
 			var pluginDir = getPluginDirectory();
+			installationIdentity.setDirectory(pluginDir.join("identity"));
+			apiClient.setInstallationIdentity(installationIdentity);
 			pendingSubmissionStore.setRoot(pluginDir);
 			bannerSound.setOnClipsChanged(this::repaintSidebar); // a poll wouldn't redraw for it
 			bannerSound.setRoot(pluginDir.join("sounds"));
