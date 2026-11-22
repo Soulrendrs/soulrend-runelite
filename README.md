@@ -1,4 +1,4 @@
-# Soulrend Bingo — RuneLite plugin
+# Soulrend — RuneLite plugin
 
 Official RuneLite companion for the [Soulrend Bingo Portal](https://soulrend.events).
 
