@@ -19,6 +19,25 @@ public class SessionGainsTest {
     }
 
     @Test
+    public void matchesPunctuatedBossesAndKeepsRaidVariantsSeparate() {
+        SessionGains gains = new SessionGains();
+        gains.boss("Player", "account", "Barrows", 10);
+        gains.boss("Player", "account", "Barrows Chests", 11);
+        gains.boss("Player", "account", "K'ril Tsutsaroth", 20);
+        gains.boss("Player", "account", "K'ril Tsutsaroth", 21);
+        gains.boss("Player", "account", "Tombs of Amascut", 4);
+        gains.boss("Player", "account", "Tombs of Amascut (Expert Mode)", 9);
+        gains.boss("Player", "account", "Tombs of Amascut (Expert Mode)", 10);
+        gains.skill("Player", "account", "Runecraft", 100);
+        gains.skill("Player", "account", "Runecraft", 105);
+        gains.skill("Player", "account", "Sailing", 9);
+        gains.skill("Player", "account", "Sailing", 11);
+        assertEquals(Map.of("boss_kc:barrows_chests", 1L, "boss_kc:kril_tsutsaroth", 1L,
+            "boss_kc:tombs_of_amascut_expert", 1L, "skill_xp:runecrafting", 5L, "skill_xp:sailing", 2L),
+            gains.snapshot("Player", "account"));
+    }
+
+    @Test
     public void excludesOtherCharactersAndWebsiteSessions() {
         SessionGains gains = new SessionGains();
         gains.skill("First", "account", "Mining", 100);
