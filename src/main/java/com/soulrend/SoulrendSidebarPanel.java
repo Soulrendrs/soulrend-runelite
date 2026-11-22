@@ -1170,6 +1170,15 @@ public class SoulrendSidebarPanel extends PluginPanel {
     String panelToken, panelCharacter;
     long generation;
     boolean reading;
+    String lastBingoRenderKey;
+
+    /** Prefer the active bingo, but retain an explicit choice while it is eligible. */
+    static BingoApiClient.EventSummary selectBingoEvent(List<BingoApiClient.EventSummary> events, int selected) {
+        if (events == null || events.isEmpty()) return null;
+        for (var event : events) if (event.id == selected) return event;
+        for (var event : events) if ("active".equals(event.status)) return event;
+        return events.get(0);
+    }
 
     void readBingos(boolean manual) {
         clanPicker.setVisible(false);
@@ -1183,6 +1192,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
             nextRead = 0;
             panelToken = token;
             panelCharacter = character;
+            lastBingoRenderKey = null;
             connectedWebsiteUser = null;
             renderLoading();
         }
@@ -1196,8 +1206,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
         reading = true;
         interactive().execute(() -> {
             var list = api.bingoRead("", token, character, BingoApiClient.EventList.class);
-            var event = list == null || list.events == null ? null : list.events.stream()
-                .filter(e -> e.id == selected).findFirst().orElse(null);
+            var event = selectBingoEvent(list == null ? null : list.events, selected);
             var board = event == null ? null : api.bingoRead("/" + event.id + "/board", token, character, BingoApiClient.TeamBoard.class);
             invokeLater(() -> {
                 if (generation != version) return;
@@ -1207,7 +1216,13 @@ public class SoulrendSidebarPanel extends PluginPanel {
                 boolean failed = list == null || list.events == null || (event != null && board == null);
                 retrySeconds = failed ? Math.min(240, retrySeconds * 2) : 30;
                 nextRead = System.currentTimeMillis() + retrySeconds * 1000L;
-                if (list == null || list.events == null) rows.add(new JLabel("Unable to load bingos"));
+                selectedEvent = event == null ? 0 : event.id;
+                // Keep the existing Swing cards in place when polling returns unchanged data.
+                // The key includes the selected board and its authorized server projection.
+                String renderKey = api.gson.toJson(list) + "|" + selectedEvent + "|" + api.gson.toJson(board);
+                if (!manual && Objects.equals(renderKey, lastBingoRenderKey)) return;
+                lastBingoRenderKey = renderKey;
+                if (list == null || list.events == null) rows.add(new JLabel("Unable to load bingos — check your connection or reconnect to Soulrend"));
                 else {
                     connectedWebsiteUser = list.username;
                     refreshAccountRow();
@@ -1215,6 +1230,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
                     for (var e : list.events) {
                         JButton button = new JButton(e.name);
                         button.putClientProperty("html.disable", Boolean.TRUE);
+                        button.setEnabled(e.id != selectedEvent);
                         button.addActionListener(a -> {
                             if (reading) return;
                             selectedEvent = e.id;
