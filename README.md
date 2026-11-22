@@ -1,5 +1,7 @@
 # Soulrend — RuneLite plugin
 
+![Soulrend official plugin icon](icon.png)
+
 Official RuneLite companion for the [Soulrend Bingo Portal](https://soulrend.events).
 
 > **Status: development foundation.** The plugin has not been released, tested against production, or submitted to the RuneLite Plugin Hub. Do not install a development build expecting working Soulrend authentication or proof submission.

@@ -156,12 +156,20 @@ def run(upstream: Path, destination: Path) -> None:
             target.write_bytes(file.read_bytes())
         copied.append(target.relative_to(destination).as_posix())
 
-    # Never ship old logos. Keep resource names used by the compiled Java code.
-    (destination / "icon.png").write_bytes(icon_png(40))
-    for basename in ("sidebar_icon.png", "clog_banner.png"):
-        file = destination / "src/main/resources/com/soulrend" / basename
-        if file.exists():
-            file.write_bytes(icon_png(32))
+    # The approved Soulrend emblem is checked in as brand source. Never use the
+    # bootstrap's generic S placeholder or copy Anvil's icons into a real release.
+    brand_root = destination / "branding/pluginhub-48x72.png"
+    brand_sidebar = destination / "branding/sidebar-32x32.png"
+    if not brand_root.is_file() or not brand_sidebar.is_file():
+        raise RuntimeError("Soulrend branding source assets must exist before source import")
+    (destination / "icon.png").write_bytes(brand_root.read_bytes())
+    sidebar_icon = destination / "src/main/resources/com/soulrend/sidebar_icon.png"
+    sidebar_icon.parent.mkdir(parents=True, exist_ok=True)
+    sidebar_icon.write_bytes(brand_sidebar.read_bytes())
+    # This is a 178x100 text panel background, not a plugin icon. Keep separate.
+    banner = destination / "src/main/resources/com/soulrend/clog_banner.png"
+    if banner.exists():
+        banner.write_bytes(icon_png(32))
 
     (destination / "UPSTREAM.md").write_text(
         "# Fork origin and license\n\n"
