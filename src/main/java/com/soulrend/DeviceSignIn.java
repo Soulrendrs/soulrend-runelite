@@ -107,7 +107,7 @@ public final class DeviceSignIn {
 				switch (poll.status) {
 					case "complete":
 						if (poll.token != null && !poll.token.isEmpty()) {
-							status.accept("Signed in.");
+							status.accept("Authorization approved. Completing connection…");
 							done.accept(new Result(Outcome.SIGNED_IN, poll.token));
 						} else fail(status, done, "Sign-in did not return a session. Try again.", Outcome.UNAVAILABLE);
 						return;
