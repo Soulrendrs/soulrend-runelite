@@ -3444,9 +3444,6 @@ public class SoulrendPlugin extends Plugin {
 				var firstSeen = !killCounts.containsKey(kcKey);
 				int kc = Integer.parseInt(kcMatcher.group("count").replace(",", ""));
 				killCounts.put(kcKey, kc);
-				if (!statsUnsettled && loggedIn() && !statsAreArtificial() && apiClient != null && !apiClient.isAccountPaused()) {
-					sessionGains.boss(getLocalPlayerName(), apiClient.playerToken, kcName, kc);
-				}
 				lastKcName = kcName;
 				lastKcValue = kc;
 				lastKcAtMs = now();
@@ -7607,6 +7604,9 @@ public class SoulrendPlugin extends Plugin {
 	 * volume is nothing, and the value is absolute, so a repeat is a no-op server-side.
 	 */
 	void maybeQueueKcPush(String bossName, int kc) {
+		if (!statsUnsettled && loggedIn() && !statsAreArtificial() && apiClient != null && !apiClient.isAccountPaused()) {
+			sessionGains.boss(getLocalPlayerName(), apiClient.playerToken, bossName, kc);
+		}
 		// A KC line is one kill (one clear, one chest), so the first one after login still moves the
 		// tile by one; after that the absolute count says how many, in case a line was missed.
 		var prevKc = lastSeenKc.put(RuleEngine.key(bossName), kc);
