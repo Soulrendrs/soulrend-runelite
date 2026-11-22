@@ -143,6 +143,9 @@ final class AutomaticEvidence {
             }
             try {
                 int status = plugin.apiClient.uploadEvidence(proof, token, screenshot);
+                if (status >= 200 && status < 300 && sameSession(session, character)) {
+                    plugin.sendChatMessage(ChatPalette.Tone.DONE, "Bingo evidence sent for review.");
+                }
                 if ((status >= 200 && status < 300) || status == 400 || status == 404 || status == 413) {
                     plugin.pendingSubmissionStore.remove(proof);
                     held--;
