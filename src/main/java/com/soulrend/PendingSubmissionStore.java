@@ -35,6 +35,12 @@ public class PendingSubmissionStore {
 	}
 
 	static class PendingSubmission {
+		String runeliteCaptureId;
+		String runeliteSession;
+		String evidenceKind;
+		int evidenceId;
+		String evidenceSource;
+		boolean evidenceRepeat;
 		int eventId;
 		int tileId;
 		int teamId;
@@ -93,7 +99,8 @@ public class PendingSubmissionStore {
 	String save(PendingSubmission sub, byte[] pngBytes) {
 		var dir = dir();
 		if (dir == null) return null;
-		var id = sub.tileId + "-" + sub.timestamp;
+		var id = sub.runeliteCaptureId == null ? sub.tileId + "-" + sub.timestamp
+			: "runelite-" + sub.tileId + "-" + UUID.fromString(sub.runeliteCaptureId);
 
 		// Both atomic: a client killed mid-write leaves no half file for the retry loop to choke on.
 		var ext = BingoApiClient.isJpeg(pngBytes) ? ".jpg" : ".png";
@@ -139,7 +146,7 @@ public class PendingSubmissionStore {
 				remove(sub);
 				continue;
 			}
-			if (sub.facts == null && !sub.manual) sub.facts = legacyFacts(sub);
+			if (sub.facts == null && !sub.manual && sub.runeliteCaptureId == null) sub.facts = legacyFacts(sub);
 			result.add(sub);
 		}
 		return result;

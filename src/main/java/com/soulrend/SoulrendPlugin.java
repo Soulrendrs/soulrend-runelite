@@ -146,6 +146,7 @@ public class SoulrendPlugin extends Plugin {
 
 	@Inject
 	PendingSubmissionStore pendingSubmissionStore;
+	final AutomaticEvidence automaticEvidence = new AutomaticEvidence(this);
 
 	@Inject
 	Gson gson;
@@ -1495,6 +1496,7 @@ public class SoulrendPlugin extends Plugin {
 	}
 
 	protected void shutDown() {
+		automaticEvidence.clear();
 		sessionGains.reset();
 		keyManager.unregisterKeyListener(eventChatKey);
 		clientThread.invokeLater(this::unflairAll);
@@ -1667,6 +1669,9 @@ public class SoulrendPlugin extends Plugin {
 		var prevXp = lastSkillXp.put(skill, xp);
 		var realGain = prevXp != null && xp > prevXp;
 		if (realGain) {
+			if (!statsUnsettled && loggedIn() && config != null && config.automaticEvidence()) {
+				automaticEvidence.observeSkill(skill.getName(), client.getTickCount());
+			}
 			// What a duplicate skilling pet came from: the game's line names nothing (DuplicateInference).
 			lastXpSkill = name;
 			lastXpAt = now();
@@ -2458,6 +2463,7 @@ public class SoulrendPlugin extends Plugin {
 			gameValueCounters.onLoading();
 		} else if (off || hop || gs == GameState.CONNECTION_LOST) {
 			gameValueCounters.onSessionEnd();
+			automaticEvidence.clearSkillObservations();
 			sessionGains.reset();
 			movedFrom = null;
 			movedTick = -1;
@@ -2988,12 +2994,14 @@ public class SoulrendPlugin extends Plugin {
 		// same-tick deaths is counted in full (NpcLootReceived under-fires those). See serverNpcLootSeen.
 		if (firstServerLoot && name != null && name.equalsIgnoreCase(fallbackKillName)
 			&& client.getTickCount() - fallbackKillTick <= 2 /* FALLBACK_KILL_TICKS */) return; // the client-side fallback already counted this very kill (see fallbackKillName)
+		automaticEvidence.npcKill(event.getComposition().getId());
 		processValueTiles(name, event.getItems(), "npc");
 		processNpcKill(name);
 	}
 
 	/** A kill's loot: its vestige rolls, then the drop tiles for whatever no chat line already credited. */
 	void npcLoot(String name, Collection<ItemStack> items) {
+		automaticEvidence.drop(items, "npc");
 		trackVestigeRolls(name, items);
 		processLoot(name, chatCredits.unclaimed(items, now()), "npc");
 	}
@@ -3011,6 +3019,7 @@ public class SoulrendPlugin extends Plugin {
 		if (!serverNpcLootSeen) {
 			fallbackKillName = name;
 			fallbackKillTick = client.getTickCount();
+			automaticEvidence.npcKill(event.getNpc().getId());
 			processValueTiles(name, event.getItems(), "npc");
 			processNpcKill(name);
 		}
@@ -3064,6 +3073,7 @@ public class SoulrendPlugin extends Plugin {
 		// raid twice. Restricted to EVENT loot — NPC kills come through onNpcLootReceived, and
 		// loot keys were re-typed to "pvp" above.
 		if ("event".equals(kind)) processNpcKill(source);
+		if (!isInventoryDiffLoot(source, event.getType())) automaticEvidence.drop(items, kind);
 		processLoot(source, chatCredits.unclaimed(items, now()), kind);
 		processValueTiles(source, items, kind);
 		recordEventLoot(source, items, kind);
@@ -3544,6 +3554,7 @@ public class SoulrendPlugin extends Plugin {
 				maybeNotifyDiaryCompletion(area, tier);
 				recordFeedMoment(new Moment("diary", null, area, 1, null, null, null, null, null, tier,
 						now(), ("diary|" + area + "|" + tier).toLowerCase(ROOT)));
+				automaticEvidence.named("diary", area + " " + tier);
 				creditDiaryTiles(area, tier);
 			}
 		}
@@ -3614,6 +3625,7 @@ public class SoulrendPlugin extends Plugin {
 		var t = now();
 		recentClogUnlocks.values().removeIf(at -> t - at > 15_000 /* CLOG_UNLOCK_SAME_MS */);
 		if (recentClogUnlocks.putIfAbsent(item.toLowerCase(ROOT), t) != null) return; // the other line for this unlock got here first
+		automaticEvidence.named("clog", item);
 		// A pet drop moments ago is still waiting to learn WHICH pet it was — this line is the
 		// only thing that says so. It takes the name and both clog posts stand down, or the same
 		// pet lands twice, once as 🐾 and once as 📕.
@@ -4377,9 +4389,14 @@ public class SoulrendPlugin extends Plugin {
 		// open, a recent ground Take or telegrab, an interface just closed, or emptied from storage:
 		// record only.
 		int tick = client.getTickCount();
-		if (previous == null || !rules.has("gain") || !live() || rules.blackout() || gainSuppressingInterfaceOpen()
+		if (previous == null || gainSuppressingInterfaceOpen()
 				|| tick - lastGroundTakeTick <= 2 || tick - lastTelegrabTick <= 8 /* TELEGRAB_GUARD_TICKS */
 				|| tick - lastSuppressCloseTick <= 2 || tick - lastStorageMoveTick <= 2) return;
+
+		if (automaticEvidence.hasGatheringRules()) {
+			automaticEvidence.gathering(previous, counts, tick);
+		}
+		if (!rules.has("gain") || !live() || rules.blackout()) return;
 
 		for (var e : counts.entrySet()) {
 			int delta = e.getValue() - previous.getOrDefault(e.getKey(), 0);
@@ -4919,12 +4936,13 @@ public class SoulrendPlugin extends Plugin {
 	 * Retries any pending submissions with exponential backoff.
 	 */
 	void retryPendingSubmissions() {
+		automaticEvidence.sync();
 		if (!apiClient.isConfigured()) return;
 
 		if (!proofBackoff.ready(now())) return; // the last pass failed; wait out the backoff (the site coming back cuts it short)
 		var pending = pendingSubmissionStore.loadAll();
 		// Saved manual proofs never upload; don't log a "retry" for them every 30s.
-		pending.removeIf(sub -> sub.manual);
+		pending.removeIf(sub -> sub.manual || sub.runeliteCaptureId != null);
 		if (pending.isEmpty()) return;
 
 		log.info("Retrying {} proof(s)", pending.size());
@@ -8946,6 +8964,7 @@ public class SoulrendPlugin extends Plugin {
 			if (threshold > 0 && before < threshold && threshold <= total) cleared = t; // values() ascend, so the last match is the highest tier crossed
 		}
 		if (cleared != null && !tiers.isEmpty()) postCaTierClear(cleared);
+		automaticEvidence.combatBatch(batch, caPointsInitialized, before, total);
 
 		// Individual tasks: post each FIRST-seen task at/above the configured floor, but only when
 		// this tick's completions actually raised the CA point total. Already-owned tasks re-fire the
