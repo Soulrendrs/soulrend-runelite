@@ -232,7 +232,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		header.setBackground(DARK_GRAY_COLOR);
 		header.setBorder(createEmptyBorder(0, 0, 8, 0));
 
-		var title = label("Soulrend Progress", BOLD, BRAND_ORANGE);
+		var title = label("Soulrend", BOLD, BRAND_ORANGE);
 
 		styleFlatButton(refreshButton, WHITE);
 		refreshButton.addActionListener(e -> refresh(true));
@@ -241,16 +241,17 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		refreshButton.setPreferredSize(refreshButton.getPreferredSize());
 		refreshing(false);
 
-		var titleRow = left(new JPanel(new BorderLayout()));
+		var titleRow = left(new JPanel(new BorderLayout(6, 0)));
 		titleRow.setBackground(DARK_GRAY_COLOR);
-		titleRow.add(title, WEST);
+		titleRow.add(title, CENTER);
 		styleFlatButton(inboxButton, WHITE);
+		inboxButton.setBorder(createEmptyBorder(5, 6, 5, 6));
 		inboxButton.setToolTipText("Notifications");
 		inboxButton.addActionListener(e -> selectTab(NOTIFICATIONS));
-		var headerActions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 2, 0));
+		var headerActions = new JPanel(new BorderLayout(4, 0));
 		headerActions.setBackground(DARK_GRAY_COLOR);
-		headerActions.add(inboxButton);
-		headerActions.add(refreshButton);
+		headerActions.add(inboxButton, WEST);
+		headerActions.add(refreshButton, EAST);
 		titleRow.add(headerActions, EAST);
 		capH(titleRow);
 
@@ -1239,7 +1240,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
         refreshSignInRow();
         refreshAccountRow();
         if (api.needsSignIn()) { setContent(firstRunCard()); return; }
-        if (api.isAccountPaused()) { setContent(new JLabel("Paused for this character")); return; }
+        if (api.isAccountPaused()) { setContent(boardText("Paused for this character")); return; }
         if (reading || (!manual && System.currentTimeMillis() < nextRead)) return;
         long version = ++generation;
         int selected = selectedEvent;
@@ -1263,35 +1264,35 @@ public class SoulrendSidebarPanel extends PluginPanel {
                 if (!manual && Objects.equals(renderKey, lastBingoRenderKey)) return;
                 lastBingoRenderKey = renderKey;
                 if (list == null || list.events == null) {
-                    rows.add(new JLabel(api.lastBingoHttpStatus == 401
+                    rows.add(boardText(api.lastBingoHttpStatus == 401
                         ? "Soulrend session expired or revoked. Sign out and connect again."
                         : "Unable to load bingos — check your connection or reconnect to Soulrend"));
                 }
                 else {
                     connectedWebsiteUser = list.username;
                     refreshAccountRow();
-                    if (list.events.isEmpty()) rows.add(new JLabel("No eligible bingos"));
+                    if (list.events.isEmpty()) rows.add(boardText("No eligible bingos"));
                     for (var e : list.events) {
-                        JButton button = new JButton(e.name);
-                        button.putClientProperty("html.disable", Boolean.TRUE);
-                        button.setEnabled(e.id != selectedEvent);
-                        button.addActionListener(a -> {
-                            if (reading) return;
-                            selectedEvent = e.id;
-                            renderLoading();
-                            readBingos(true);
-                        });
-                        rows.add(button);
+                        if (e.id == selectedEvent) {
+                            rows.add(boardText(e.name, BOLD, BRAND_ORANGE));
+                        } else {
+                            rows.add(fullWidthButton(Ui.plainText(e.name), Ui.plainText(e.name), () -> {
+                                if (reading) return;
+                                selectedEvent = e.id;
+                                renderLoading();
+                                readBingos(true);
+                            }));
+                        }
                         rows.add(boardText(("active".equals(e.status) ? "Active" : "Upcoming")
                             + (e.team == null ? "" : " · " + e.team)));
                         if (e.characters != null) rows.add(boardText("Characters: " + String.join(", ", e.characters)));
                     }
                     if (event != null) {
                         rows.add(Box.createVerticalStrut(10));
-                        JButton link = new JButton("Open event on Soulrend");
-                        link.addActionListener(a -> LinkBrowser.browse(BingoApiClient.CANONICAL_SITE + "/events/" + event.id + "/"));
-                        rows.add(link);
-                        if (board == null) rows.add(new JLabel("Board unavailable"));
+                        rows.add(fullWidthButton("View on website", "Open this bingo on Soulrend",
+                            () -> LinkBrowser.browse(BingoApiClient.CANONICAL_SITE + "/events/" + event.id + "/")));
+                        rows.add(gap(6));
+                        if (board == null) rows.add(boardText("Board unavailable"));
                         else {
                             if (board.captain != null) rows.add(boardText("Captain: " + board.captain));
                             if (board.progress != null) {
@@ -1300,7 +1301,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
                             }
                             if (board.standings != null && !board.standings.isEmpty()) {
                                 rows.add(Box.createVerticalStrut(8));
-                                rows.add(boardText("Standings"));
+                                rows.add(boardText("Standings", BOLD, WHITE));
                                 for (var rank : board.standings) {
                                     rows.add(boardText(rank.rank + ". " + rank.team + " · "
                                         + rank.points + " pts · " + rank.completed + " objectives"));
@@ -1311,15 +1312,16 @@ public class SoulrendSidebarPanel extends PluginPanel {
                                     .filter(t -> t.name != null && !"hidden".equals(t.status) && !"locked".equals(t.status))
                                     .collect(java.util.stream.Collectors.toList());
                                 long credited = available.stream().filter(t -> t.credited).count();
+                                rows.add(gap(8));
                                 rows.add(boardText(available.isEmpty() ? "No objectives available yet"
-                                    : "Objectives · " + credited + " completed"));
+                                    : "Objectives · " + credited + " completed", BOLD, WHITE));
                                 for (var tile : available) {
                                     rows.add(Box.createVerticalStrut(4));
-                                    JTextArea card = boardText(tile.label());
+                                    JLabel card = boardText(tile.label(), REGULAR, WHITE);
                                     card.setBackground(DARKER_GRAY_COLOR);
                                     card.setOpaque(true);
                                     card.setBorder(createEmptyBorder(6, 8, 6, 8));
-                                    rows.add(card);
+                                    rows.add(capH(card));
                                 }
                             }
                         }
@@ -1330,16 +1332,15 @@ public class SoulrendSidebarPanel extends PluginPanel {
         });
     }
 
-    private JTextArea boardText(String text) {
-        JTextArea label = new JTextArea(text);
-        label.setFont(getFont());
-        label.setForeground(getForeground());
-        label.setLineWrap(true);
-        label.setWrapStyleWord(true);
-        label.setEditable(false);
-        label.setFocusable(false);
-        label.setOpaque(false);
-        return label;
+    private static JLabel boardText(String text) {
+        return boardText(text, SMALL, MUTED);
+    }
+
+    static JLabel boardText(String text, Font font, Color color) {
+        var label = new ClipLabel(wrapHtml(esc(fontSafe(text)), STATUS_WRAP_PX));
+        label.setFont(font);
+        label.setForeground(color);
+        return left(label);
     }
 
     void refresh(boolean manual) {
