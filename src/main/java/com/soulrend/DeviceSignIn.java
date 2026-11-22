@@ -11,7 +11,7 @@ import net.runelite.client.util.LinkBrowser;
  * The plugin's "Connect to Soulrend" — the home-native device-code flow (site: /api/runelite/v1/device/*).
  * Start → open the home's /runelite/connect/ page in the member's browser → poll until approved → hand the
  * account token to the caller to store. Asynchronous: every step runs on the scheduler (approval polls
- * paced by delayed rescheduling, never a sleeping thread) and BOTH callbacks arrive on that executor
+ * paced by delayed rescheduling, never a sleeping thread) and the callbacks arrive on that executor
  * thread — marshal to the EDT before touching Swing. {@code done} fires exactly once.
  *
  * <p><b>Security:</b> no local listener — completion is detected purely by polling the home. The
@@ -56,16 +56,16 @@ public final class DeviceSignIn {
 
 	/** Test seam — injectable browser opener + scheduler so the flow runs offline and fast. */
 
-	/** Run the whole flow. {@code status} receives short human-readable progress lines for the UI;
-	 * {@code done} the terminal {@link Result}. Both called on the executor thread. */
-	void run(Consumer<String> status, Consumer<Result> done) {
+	/** Send progress text and the display code separately. Callbacks run on the executor. */
+	void run(Consumer<String> status, Consumer<String> displayCode, Consumer<Result> done) {
 		// The first step runs on the executor too — authStart is network I/O, keep it off the EDT.
-		schedule(() -> start(status, done), 0, status, done);
+		schedule(() -> start(status, displayCode, done), 0, status, done);
 	}
 
-	void start(Consumer<String> status, Consumer<Result> done) {
+	void start(Consumer<String> status, Consumer<String> displayCode, Consumer<Result> done) {
 		var start = apiClient.authStart();
-		if (start == null || start.device_code == null || start.device_code.isEmpty()) {
+		if (start == null || start.device_code == null || start.device_code.isEmpty()
+			|| start.user_code == null || start.user_code.isBlank()) {
 			fail(status, done, "Couldn't reach " + SetupNudge.SITE_HOST + " — check your connection and try again.", Outcome.UNAVAILABLE);
 			return;
 		}
@@ -84,7 +84,8 @@ public final class DeviceSignIn {
 		// (see browse), and the failure mode of assuming success is a player staring at a code with
 		// nowhere to type it — while the cost of saying both is one extra clause.
 		browserOpener.accept(url);
-		status.accept("Enter code " + start.user_code + " at soulrend.events/runelite/connect/");
+		displayCode.accept(start.user_code);
+		status.accept("Enter this code at " + SetupNudge.SITE_HOST + LINK_PATH);
 
 		var intervalMs = Math.max(1, start.interval > 0 ? start.interval : DEFAULT_INTERVAL_S) * 1000L;
 		var deadline = System.currentTimeMillis()
@@ -108,7 +109,7 @@ public final class DeviceSignIn {
 						if (poll.token != null && !poll.token.isEmpty()) {
 							status.accept("Signed in.");
 							done.accept(new Result(Outcome.SIGNED_IN, poll.token));
-						} else done.accept(new Result(Outcome.UNAVAILABLE, null));
+						} else fail(status, done, "Sign-in did not return a session. Try again.", Outcome.UNAVAILABLE);
 						return;
 					case "denied":
 						fail(status, done, "Sign-in denied on the site.", Outcome.DENIED);
