@@ -337,11 +337,23 @@ public class BingoApiClient {
             return name + " · " + status + (target == null ? "" : " · " + value + "/" + target + " " + scope);
         }
     }
+    /** Most recent read-only bingo status. 401 means the saved device session is no longer valid. */
+    volatile int lastBingoHttpStatus;
+
     <T> T bingoRead(String path, String token, String character, Class<T> type) {
         var url = HttpUrl.parse(authUrl("/api/runelite/v1/events" + path)).newBuilder();
         if (character != null) url.addQueryParameter("character", character);
-        return getOrNull(plainRequest(url.build().toString())
-            .header("Authorization", "Bearer " + token).get(), type);
+        var request = plainRequest(url.build().toString())
+            .header("Authorization", "Bearer " + token).get();
+        try {
+            return execute(readClient, request, (response, body) -> {
+                lastBingoHttpStatus = response.code();
+                return response.isSuccessful() ? gson.fromJson(body, type) : null;
+            });
+        } catch (IOException | JsonParseException e) {
+            lastBingoHttpStatus = 0; // Offline/invalid response is not a revoked session.
+            return null;
+        }
     }
 
     static final class RuneLiteIdentity {
