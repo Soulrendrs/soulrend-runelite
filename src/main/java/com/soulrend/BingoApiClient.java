@@ -365,6 +365,39 @@ public class BingoApiClient {
         }
     }
 
+    /** One account inbox across the website and RuneLite; no clan routes or gameplay actions. */
+    static final class NotificationInbox {
+        List<NotificationItem> items;
+        int unread_count;
+        String next_cursor;
+    }
+    static final class NotificationItem {
+        long id;
+        String category, kind, title, description, created_at, read_at, url;
+        boolean mention, critical;
+    }
+
+    NotificationInbox readNotifications(String tab, String cursor) {
+        var token = playerToken;
+        if (token == null || token.trim().isEmpty() || accountPaused) return null;
+        var url = HttpUrl.parse(authUrl("/api/runelite/v1/notifications")).newBuilder();
+        url.addQueryParameter("tab", tab == null ? "all" : tab);
+        if (cursor != null && !cursor.isEmpty()) url.addQueryParameter("cursor", cursor);
+        return getOrNull(plainRequest(url.build().toString())
+            .header("Authorization", "Bearer " + token.trim()).get(), NotificationInbox.class);
+    }
+
+    NotificationInbox markNotificationRead(Long id) {
+        var token = playerToken;
+        if (token == null || token.trim().isEmpty() || accountPaused) return null;
+        var data = new HashMap<String, Object>();
+        data.put("action", id == null ? "read_all" : "read");
+        if (id != null) data.put("id", id);
+        return getOrNull(plainRequest(authUrl("/api/runelite/v1/notifications"))
+            .header("Authorization", "Bearer " + token.trim())
+            .post(RequestBody.create(JSON, gson.toJson(data))), NotificationInbox.class);
+    }
+
     static final class RuneLiteIdentity {
 		String username;
 	}
