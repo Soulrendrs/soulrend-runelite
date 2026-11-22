@@ -1209,10 +1209,11 @@ public class SoulrendSidebarPanel extends PluginPanel {
                     if (list.events.isEmpty()) rows.add(new JLabel("No eligible bingos"));
                     for (var e : list.events) {
                         JButton button = new JButton(e.name);
+                        button.putClientProperty("html.disable", Boolean.TRUE);
                         button.addActionListener(a -> {selectedEvent = e.id; readBingos(true);});
                         rows.add(button);
                         rows.add(new JLabel(e.status + " · " + (e.team == null ? "Unassigned" : e.team)));
-                        if (e.characters != null) rows.add(new JLabel(String.join(", ", e.characters)));
+                        if (e.characters != null) rows.add(new JLabel("Characters: " + String.join(", ", e.characters)));
                     }
                     if (event != null) {
                         JButton link = new JButton("Open event on Soulrend");
@@ -1221,7 +1222,15 @@ public class SoulrendSidebarPanel extends PluginPanel {
                         if (board == null) rows.add(new JLabel("Board unavailable"));
                         else {
                             if (board.captain != null) rows.add(new JLabel("Captain: " + board.captain));
-                            if (board.tiles != null) for (var tile : board.tiles) rows.add(new JLabel(tile.label()));
+                            if (board.tiles != null) {
+                                long credited = board.tiles.stream().filter(t -> t.credited).count();
+                                rows.add(new JLabel("Team progress: " + credited + "/" + board.tiles.size()));
+                                for (var tile : board.tiles) {
+                                    JLabel label = new JLabel(tile.label());
+                                    label.putClientProperty("html.disable", Boolean.TRUE);
+                                    rows.add(label);
+                                }
+                            }
                         }
                     }
                 }
