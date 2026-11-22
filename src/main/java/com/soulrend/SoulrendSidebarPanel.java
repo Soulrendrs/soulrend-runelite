@@ -810,6 +810,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 	public void onActivate() {
 		onScreen = true;
 		refreshNotificationCountIfDue();
+		refreshDeviceSessionIfDue();
 		feedRead();
 		data.feedOnScreen(tab == FEED);
 		refresh();
@@ -880,7 +881,6 @@ public class SoulrendSidebarPanel extends PluginPanel {
 					refreshAccountRow();
 				} else if (identity != null && identity.username != null) {
 					connectedWebsiteUser = identity.username;
-										connectedDeviceName = identity.device != null ? identity.device.name : null;
 					connectedDeviceName = identity.device != null ? identity.device.name : null;
 					refreshAccountRow();
 				}
@@ -947,6 +947,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 								invokeLater(() -> {
 									if (result.token.equals(configManager.getConfiguration("soulrendbingo", "playerToken"))) {
 										connectedWebsiteUser = identity.username;
+										connectedDeviceName = identity.device != null ? identity.device.name : null;
 										refreshAccountRow();
 									}
 								});
