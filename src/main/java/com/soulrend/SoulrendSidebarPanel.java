@@ -861,7 +861,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 							var identity = api.identityForToken(result.token);
 							if (identity != null && identity.username != null)
 								invokeLater(() -> {
-									if (!api.needsSignIn()) {
+									if (result.token.equals(configManager.getConfiguration("soulrendbingo", "playerToken"))) {
 										connectedWebsiteUser = identity.username;
 										refreshAccountRow();
 									}
