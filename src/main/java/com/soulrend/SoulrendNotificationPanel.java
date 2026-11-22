@@ -35,12 +35,17 @@ final class SoulrendNotificationPanel extends JPanel {
         top.setBackground(DARK_GRAY_COLOR);
         heading.setForeground(Color.WHITE);
         heading.setFont(heading.getFont().deriveFont(Font.BOLD, 15f));
-        top.add(heading, BorderLayout.NORTH);
+        var headingRow = Ui.row(4);
+        headingRow.add(heading, BorderLayout.CENTER);
+        headingRow.add(SoulrendSidebarPanel.flatButton("Back", "Back to bingo overview", Color.WHITE,
+            () -> owner.selectTab(SoulrendSidebarPanel.Tab.CLAN)), BorderLayout.EAST);
+        top.add(headingRow, BorderLayout.NORTH);
 
         var tabs = new JPanel(new GridLayout(1, 3, 4, 0));
         tabs.setBackground(DARK_GRAY_COLOR);
         for (var tab : List.of("all", "unread", "mentions")) {
             var button = new JButton(tab.substring(0, 1).toUpperCase(Locale.ROOT) + tab.substring(1));
+            button.setMargin(new Insets(4, 3, 4, 3));
             button.addActionListener(e -> {
                 selectedTab = tab;
                 styleTabs();
@@ -91,8 +96,9 @@ final class SoulrendNotificationPanel extends JPanel {
     }
 
     private void setMessage(String text) {
-        message.setText(text);
-        message.setVisible(text != null && !text.isEmpty());
+        boolean show = text != null && !text.isEmpty();
+        message.setText(show ? Ui.wrapHtml(Ui.esc(Ui.fontSafe(text)), SoulrendSidebarPanel.STATUS_WRAP_PX) : "");
+        message.setVisible(show);
     }
 
     /** Once on entry; the shared sidebar timer makes no notification network calls while closed. */
