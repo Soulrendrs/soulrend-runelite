@@ -131,7 +131,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 	final ConfigManager configManager;
 	/** RuneLite's shared client-lifetime scheduler — paces the sign-in flow's approval polls. */
 	final ScheduledExecutorService executor;
-	final JButton signInButton = new JButton("Connect to Soulrend";
+	final JButton signInButton = new JButton("Connect to Soulrend");
 	final JLabel signInStatus = small("", MUTED);
 	final JPanel signInRow = new JPanel(new BorderLayout(0, 2));
 	// The token isn't in RuneLite's settings (SoulrendConfig.playerToken is hidden), so the panel carries
