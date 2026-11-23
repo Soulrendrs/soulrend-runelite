@@ -141,6 +141,7 @@ public class SoulrendPlugin extends Plugin {
 	final BingoCompletionMonitor bingoCompletions = new BingoCompletionMonitor(this);
 	final BingoStartReminder bingoStartReminder = new BingoStartReminder();
 	final AutomaticEvidence automaticEvidence = new AutomaticEvidence(this);
+	final NpcKillEvidenceSignals npcKillEvidenceSignals = new NpcKillEvidenceSignals();
 	final InstallationIdentity installationIdentity = new InstallationIdentity();
 
 	@Inject
@@ -1422,6 +1423,7 @@ public class SoulrendPlugin extends Plugin {
 	protected void shutDown() {
 		bingoCompletions.clear();
 		automaticEvidence.clear();
+		npcKillEvidenceSignals.clear();
 		sessionGains.reset();
 		clientThread.invokeLater(this::unflairAll);
 		invokeLater(() -> GradientLabel.watch(null));
@@ -1944,6 +1946,8 @@ public class SoulrendPlugin extends Plugin {
 	@Subscribe
 	void onGameTick(GameTick event) {
 		lastWornItemIds = wornItemIds();
+		// Fallback only when RuneLite did not supply the canonical server NPC-loot event.
+		for (int npcId : npcKillEvidenceSignals.expire(client.getTickCount())) automaticEvidence.npcKill(npcId);
 		maybeSettleStats();
 		tickGameCounters();
 		if (movedTick >= 0 && client.getTickCount() >= movedTick) movesSettled();
@@ -2159,6 +2163,7 @@ public class SoulrendPlugin extends Plugin {
 		} else if (off || hop || gs == GameState.CONNECTION_LOST) {
 			gameValueCounters.onSessionEnd();
 			automaticEvidence.clearSkillObservations();
+			npcKillEvidenceSignals.clear();
 			sessionGains.reset();
 			movedFrom = null;
 			movedTick = -1;
@@ -2680,8 +2685,11 @@ public class SoulrendPlugin extends Plugin {
 		maybeNotifyRareDrop(name, event.getItems(), "npc");
 		// Count kills + value off the SERVER event — it fires once per real kill, so a barraged clump of
 		// same-tick deaths is counted in full (NpcLootReceived under-fires those). See serverNpcLootSeen.
-		if (firstWasClientFallback) return; // the client-side fallback already counted this very kill (see fallbackKillName)
-		automaticEvidence.npcKill(event.getComposition().getId());
+		// This server event is authoritative, but client-only events must still count
+		// even when another monster produced an earlier ServerNpcLoot event.
+		if (npcKillEvidenceSignals.server(event.getComposition().getId(), client.getTickCount()))
+			automaticEvidence.npcKill(event.getComposition().getId());
+		if (firstWasClientFallback) return; // the legacy name-based counter already counted the client fallback
 		processValueTiles(name, event.getItems(), "npc");
 		processNpcKill(name);
 	}
@@ -2698,6 +2706,9 @@ public class SoulrendPlugin extends Plugin {
 	@Subscribe
 	void onNpcLootReceived(NpcLootReceived event) {
 		var name = event.getNpc().getName();
+		// Queue a client-only NPC kill; a matching server event cancels this fallback.
+		// Do not use serverNpcLootSeen: that flag describes the whole session, not this kill.
+		npcKillEvidenceSignals.client(event.getNpc().getId(), client.getTickCount());
 		npcLoot(name, event.getItems(), !serverNpcLootSeen);
 		recordEventLoot(name, event.getItems(), "npc");
 		maybeNotifyRareDrop(name, event.getItems(), "npc");
@@ -2708,7 +2719,6 @@ public class SoulrendPlugin extends Plugin {
 		if (!serverNpcLootSeen) {
 			fallbackKillName = name;
 			fallbackKillTick = client.getTickCount();
-			automaticEvidence.npcKill(event.getNpc().getId());
 			processValueTiles(name, event.getItems(), "npc");
 			processNpcKill(name);
 		}
