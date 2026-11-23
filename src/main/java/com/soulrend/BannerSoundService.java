@@ -217,6 +217,78 @@ public class BannerSoundService {
 		return out;
 	}
 
+
+	/**
+	 * Stable, bundled bingo cues. The three normalized WAV resources are intentionally distinct
+	 * from the existing user-imported banner/mission clip folders. Playback uses RuneLite AudioPlayer,
+	 * never raw Java Sound, and never downloads during gameplay.
+	 */
+	enum BingoCue {
+		TEAM_PROGRESS("sounds/mixkit-happy-bell-alert-601-normalized.wav"),
+		SELF_PROGRESS("sounds/mixkit-retro-game-notification-212-normalized.wav"),
+		COMPLETION("sounds/mixkit-small-win-2020-normalized.wav");
+
+		final String resource;
+
+		BingoCue(String resource) { this.resource = resource; }
+
+		boolean enabled(SoulrendConfig settings) {
+			switch (this) {
+				case TEAM_PROGRESS: return settings.teammateProgressSound();
+				case SELF_PROGRESS: return settings.ownProgressSound();
+				case COMPLETION: return settings.bingoCompletionSound();
+				default: return false;
+			}
+		}
+	}
+
+	private long lastProgressSound;
+	private long lastCompletionSound;
+	private static final long PROGRESS_SOUND_COOLDOWN_MS = 1750L;
+	private static final long COMPLETION_SOUND_COOLDOWN_MS = 1400L;
+
+	/** Queue the category's existing resource on the shared audio worker, without blocking UI. */
+	void playBingoCue(BingoCue cue) {
+		if (cue == null || !config.bannerSound() || !cue.enabled(config) || config.bannerSoundVolume() <= 0) return;
+		try {
+			executor().execute(() -> playBingoCueBlocking(cue, false));
+		} catch (RejectedExecutionException ignored) {
+		}
+	}
+
+	/** Used by the sidebar's Preview buttons: ignores a category mute, but respects volume. */
+	void previewBingoCue(BingoCue cue) {
+		if (cue == null || config.bannerSoundVolume() <= 0) return;
+		try {
+			executor().execute(() -> playBingoCueBlocking(cue, true));
+		} catch (RejectedExecutionException ignored) {
+		}
+	}
+
+	/** Serialized by audioExecutor; debounce noisy progress and coalesce rapid completions. */
+	private void playBingoCueBlocking(BingoCue cue, boolean preview) {
+		long now = System.currentTimeMillis();
+		if (!preview) {
+			if (cue == BingoCue.COMPLETION) {
+				if (now - lastCompletionSound < COMPLETION_SOUND_COOLDOWN_MS) return;
+				lastCompletionSound = now;
+			} else {
+				if (now - lastProgressSound < PROGRESS_SOUND_COOLDOWN_MS
+					|| now - lastCompletionSound < COMPLETION_SOUND_COOLDOWN_MS) return;
+				lastProgressSound = now;
+			}
+		}
+		try {
+			// A bundled WAV needs no file-system permission, no download, and no user import.
+			if (BannerSoundService.class.getResource(cue.resource) != null)
+				audioPlayer.play(BannerSoundService.class, cue.resource, gainDb());
+			else if (!preview)
+				playBlocking(Kind.BANNER); // Preserve existing imported sounds until resources ship.
+		} catch (Exception e) {
+			log.warn("Unable to play Soulrend {} cue: {}", cue, e.getMessage());
+		}
+	}
+
 	void play(Kind kind) {
 		if (!config.bannerSound()) return;
 		try {
