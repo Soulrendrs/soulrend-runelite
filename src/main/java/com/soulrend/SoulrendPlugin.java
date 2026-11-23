@@ -68,6 +68,10 @@ import net.runelite.api.clan.ClanMember;
 )
 
 public class SoulrendPlugin extends Plugin {
+	// These inherited features are disabled in Soulrend, so they are never read from RuneLite config.
+	private static final SoulrendConfig.Relay CHAT_RELAY_MODE = SoulrendConfig.Relay.Off;
+	private static final boolean EVENT_CHAT_ENABLED = false;
+	private static final boolean COLLECTION_LOG_PROFILE_SYNC_ENABLED = false;
 
 	@Inject
 	Client client;
@@ -1776,7 +1780,7 @@ public class SoulrendPlugin extends Plugin {
 		configureApiClient();
 		if ("profileLookupMenu".equals(key) || "lookupPlayers".equals(key)) profileLookup.syncPlayerItem();
 		if ("trackerOnePanel".equals(key)) tileTracker.setOnePanel(config.trackerOnePanel());
-		if ("chatFeed".equals(key) || "soulrendChat".equals(key)) {
+		if ("chatFeed".equals(key)) {
 			syncPush();
 			submit(() -> safely("pushGuestChannel", this::pushGuestChannel));
 		}
@@ -1934,7 +1938,7 @@ public class SoulrendPlugin extends Plugin {
 			// Opt-in until the trick has been proven on a real client: an unguarded version of this
 			// recursed through the interface scripts and crashed the game. The button asks for the
 			// same thing deliberately, which is the safe way to try it.
-			if (id == COLLECTION_LOG_SETUP && (config.autoFullClogSync() || clogSyncRequested)) requestFullClogTransmit();
+			if (id == COLLECTION_LOG_SETUP && COLLECTION_LOG_PROFILE_SYNC_ENABLED && clogSyncRequested) requestFullClogTransmit();
 		}
 	}
 
@@ -2049,8 +2053,8 @@ public class SoulrendPlugin extends Plugin {
 	 * has to page through anything.
 	 */
 	void syncProfileNow() {
-		if (!config.syncClog()) {
-			sendChatMessage("Collection log sync is off — turn it on in Configuration → Soulrend → Profile sync.");
+		if (!COLLECTION_LOG_PROFILE_SYNC_ENABLED) {
+			sendChatMessage("Collection log profile sync is unavailable.");
 			return;
 		}
 		if (!apiClient.isConfigured()) {
@@ -5980,11 +5984,6 @@ public class SoulrendPlugin extends Plugin {
 	 */
 	void migrateChatSettings() {
 		var g = "soulrendbingo";
-		var show = cfgGet("relayShow");
-		var send = cfgGet("relaySend");
-		var pm = cfgGet("relayPm");
-		if (show != null || send != null || pm != null) configManager.setConfiguration(g, "soulrendChat", "false".equals(show) ? SoulrendConfig.Relay.Off : "true".equals(pm) ? SoulrendConfig.Relay.See_send_PMs
-				: "true".equals(send) ? SoulrendConfig.Relay.See_send : SoulrendConfig.Relay.See_others);
 		var chat = cfgGet("supporterChatFlair");
 		var menus = cfgGet("menuNameFlair");
 		var names = cfgGet("supporterNames");
@@ -6844,7 +6843,7 @@ public class SoulrendPlugin extends Plugin {
 	 */
 	int relayPresence() {
 		var p = pushSocket;
-		if (!config.relayWho() || config.soulrendChat().compareTo(SoulrendConfig.Relay.See_send) < 0) return 0;
+		if (CHAT_RELAY_MODE.compareTo(SoulrendConfig.Relay.See_send) < 0) return 0;
 		if (p == null) return 1;
 		return p.live() && p.relayOk ? 2 : 1;
 	}
@@ -6863,7 +6862,7 @@ public class SoulrendPlugin extends Plugin {
 	void relayHeal() {
 		var p = pushSocket;
 		var cfg = pluginConfig;
-		if (p == null || !loggedIn() || config.soulrendChat() == SoulrendConfig.Relay.Off || cfg == null || !cfg.serverSupports("chat-relay")) return;
+		if (CHAT_RELAY_MODE == SoulrendConfig.Relay.Off || p == null || !loggedIn() || cfg == null || !cfg.serverSupports("chat-relay")) return;
 		var world = client.getWorld();
 		if (p.relayOk) relayRenewMs = 10_000;
 		var rsn = apiClient.getCurrentRsn();
@@ -6969,7 +6968,7 @@ public class SoulrendPlugin extends Plugin {
 		// socket just for the Feed, and only while it's on screen.
 		// The chat relay (either half on) listens too, on the world it is on: a hop or another character
 		// re-tickets, since the ticket names both (docs/PLUGIN_WIRE.md chat-relay).
-		int world = config.soulrendChat() != SoulrendConfig.Relay.Off && loggedIn()
+		int world = CHAT_RELAY_MODE != SoulrendConfig.Relay.Off && loggedIn()
 				&& (cfg != null ? cfg.serverSupports("chat-relay") : apiClient.siteAdvertises("chat-relay")) ? client.getWorld() : 0;
 		var rows = eventId > 0 || feed || feedWatching || world > 0;
 		if (p != null) p.scope(rows && apiClient.isConfigured() && pushEnabled()
@@ -9863,7 +9862,7 @@ public class SoulrendPlugin extends Plugin {
 	/** Our own line out; true when it went (the line then wears the icon: you can see you're connected). */
 	boolean relaySay(String c, String text, String to) {
 		var p = pushSocket;
-		var on = config.soulrendChat();
+		var on = CHAT_RELAY_MODE;
 		if (!("pm".equals(c) ? on == SoulrendConfig.Relay.See_send_PMs : on.compareTo(SoulrendConfig.Relay.See_send) >= 0) || p == null || text.startsWith("::")) return false;
 		return p.say(gson.toJson(BingoApiClient.obj("t", "say", "c", c, "x", text, "to", to)));
 	}
@@ -9871,7 +9870,7 @@ public class SoulrendPlugin extends Plugin {
 	/** A relay control message (not a chat line): our private chat setting, a who, a friend's yes. */
 	void relaySend(Object... kv) {
 		var p = pushSocket;
-		if (p != null && config.soulrendChat() != SoulrendConfig.Relay.Off) p.say(gson.toJson(BingoApiClient.obj(kv)));
+		if (p != null && CHAT_RELAY_MODE != SoulrendConfig.Relay.Off) p.say(gson.toJson(BingoApiClient.obj(kv)));
 	}
 
 	/** The private chat setting last told to the relay ("" after a reconnect: tell it again). */
@@ -10031,7 +10030,7 @@ public class SoulrendPlugin extends Plugin {
 
 	/** Client thread: a relayed line. If the game already showed it, add the icon to that copy; otherwise print the line at once. */
 	void showRelay(JsonObject m) {
-		if (config.soulrendChat() == SoulrendConfig.Relay.Off || !loggedIn() || client.getLocalPlayer() == null) return;
+		if (CHAT_RELAY_MODE == SoulrendConfig.Relay.Off || !loggedIn() || client.getLocalPlayer() == null) return;
 		var n = m.get("n").getAsString();
 		var c = m.get("c").getAsString();
 		var key = c + relayKey(n, m.get("x").getAsString());
@@ -10109,7 +10108,7 @@ public class SoulrendPlugin extends Plugin {
 		// "chat:<event>:<channel>": where "Reply in" posts, and the line's colours.
 		var feed = m.getAsJsonArray("feeds").get(0).getAsString().split(":");
 		// Off here, or this board switched off on the site: the panel's Feed tab gets a dot instead.
-		if (!config.eventChatbox() || chatboxOff.contains(feed[1])) {
+		if (!EVENT_CHAT_ENABLED || chatboxOff.contains(feed[1])) {
 			var panel = sidebarPanel;
 			if (panel != null) panel.feedUnread();
 			return;
@@ -10405,7 +10404,7 @@ public class SoulrendPlugin extends Plugin {
 	 * Whether profile data can be synced now — drives the in-tab "Sync profile" row.
 	 */
 	boolean supportsProfileSync() {
-		return config.syncClog() && apiClient.isConfigured() && siteKnown();
+		return COLLECTION_LOG_PROFILE_SYNC_ENABLED && apiClient.isConfigured() && siteKnown();
 	}
 
 	// Whether the collection log is on screen, as last seen on a tick. The panel's "Sync profile" can

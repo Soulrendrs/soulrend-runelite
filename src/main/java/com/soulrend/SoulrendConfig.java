@@ -101,12 +101,6 @@ public interface SoulrendConfig extends Config {
 		}
 	}
 
-	default Relay soulrendChat() { return Relay.Off; }
-
-	default boolean relayWho() { return false; }
-
-	default boolean eventChatbox() { return false; }
-
 	// ---- Setup ----
 
 	// No Site URL: the plugin only talks to https://soulrend.events (BingoApiClient.CANONICAL_SITE).
@@ -344,10 +338,6 @@ public interface SoulrendConfig extends Config {
 	default boolean syncClanCoffer() {
 		return true;
 	}
-
-	default boolean syncClog() { return false; }
-
-	default boolean autoFullClogSync() { return false; }
 
 	@ConfigItem(
 		keyName = "syncPersonalBests",
