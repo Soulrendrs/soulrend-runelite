@@ -28,3 +28,6 @@ boss-loot/
 
 # Parked source kept out of the build on purpose (see .attic/*/RESTORE.md)
 .attic/
+
+# Locally supplied Mixkit recordings are packaged by Gradle, but stay out of source control.
+/src/main/resources/com/soulrend/sounds/mixkit-*-normalized.wav

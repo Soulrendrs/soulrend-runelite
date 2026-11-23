@@ -1239,6 +1239,8 @@ public class SoulrendSidebarPanel extends PluginPanel {
     String panelToken, panelCharacter;
     long generation;
     boolean reading;
+    private boolean caReminderDismissed;
+    private final Map<Integer, Icon> objectiveItems = BingoApiClient.capped(64, true);
     String lastBingoRenderKey;
     private final Map<JLabel, BingoApiClient.BoardTile> observedRows = new LinkedHashMap<>();
     private final Timer observedGainsTimer = new Timer(1000, e -> refreshObservedGains());
@@ -1261,6 +1263,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
             generation++;
             reading = false;
             selectedEvent = 0;
+            caReminderDismissed = false;
             nextRead = 0;
             panelToken = token;
             panelCharacter = character;
@@ -1297,7 +1300,11 @@ public class SoulrendSidebarPanel extends PluginPanel {
                 boolean failed = list == null || list.events == null || (event != null && board == null);
                 retrySeconds = failed ? Math.min(240, retrySeconds * 2) : 30;
                 nextRead = System.currentTimeMillis() + retrySeconds * 1000L;
-                selectedEvent = event == null ? 0 : event.id;
+                int resolvedEvent = event == null ? 0 : event.id;
+                if (!failed && selectedEvent != resolvedEvent) {
+                    caReminderDismissed = false;
+                }
+                selectedEvent = resolvedEvent;
                 // Keep the existing Swing cards in place when polling returns unchanged data.
                 // The key includes the selected board and its authorized server projection.
                 String renderKey = api.gson.toJson(list) + "|" + selectedEvent + "|" + api.gson.toJson(board);
@@ -1325,6 +1332,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
                                 "active".equals(e.status) ? "Switch to live bingo" : "View upcoming bingo", () -> {
                                     if (reading) return;
                                     selectedEvent = e.id;
+                                    caReminderDismissed = false;
                                     observedRows.clear();
                                     renderLoading();
                                     readBingos(true);
@@ -1338,8 +1346,9 @@ public class SoulrendSidebarPanel extends PluginPanel {
                             if (board.progress != null || board.captain != null) {
                                 var overview = bingoCard(BINGO_PURPLE);
                                 if (board.progress != null) {
+                                    overview.add(boardText("My Objectives", BOLD, WHITE));
                                     overview.add(boardText(board.progress.completed + " / " + board.progress.visible
-                                        + " objectives complete", BOLD, WHITE));
+                                        + " complete", SMALL, BINGO_TEXT));
                                     overview.add(bingoMeter(board.progress.completed, board.progress.visible, BINGO_GREEN));
                                 }
                                 if (board.captain != null) overview.add(boardText("Captain: " + board.captain, SMALL, BINGO_TEXT));
@@ -1347,12 +1356,14 @@ public class SoulrendSidebarPanel extends PluginPanel {
                             }
                             if (board.tiles != null) {
                                 var available = board.tiles.stream()
-                                    .filter(t -> t.name != null && !"hidden".equals(t.status) && !"locked".equals(t.status))
+                                    .filter(SoulrendSidebarPanel::visibleBingoTile)
                                     .collect(java.util.stream.Collectors.toList());
-                                long credited = available.stream().filter(t -> t.credited).count();
                                 rows.add(gap(8));
-                                rows.add(boardText(available.isEmpty() ? "No objectives available yet"
-                                    : "Objectives · " + credited + " completed", BOLD, WHITE));
+                                if (available.isEmpty()) rows.add(boardText("No objectives available yet"));
+                                if (available.stream().anyMatch(SoulrendSidebarPanel::visibleCombatAchievement)) {
+                                    rows.add(combatAchievementReminder(available.stream()
+                                        .anyMatch(tile -> visibleCombatAchievement(tile) && tile.allow_repeat)));
+                                }
                                 boolean linked = "active".equals(event.status) && character != null
                                     && event.characters != null && event.characters.stream().anyMatch(rsn -> Rsn.same(rsn, character));
                                 for (var tile : available) {
@@ -1360,18 +1371,21 @@ public class SoulrendSidebarPanel extends PluginPanel {
                                     var accent = tile.credited ? BINGO_GREEN : "pending".equals(tile.status) ? BINGO_GOLD
                                         : "rejected".equals(tile.status) ? BINGO_RED : BINGO_PURPLE;
                                     var card = bingoCard(accent);
-                                    card.add(boardText(tile.name, BOLD, WHITE));
+                                    card.add(objectiveHeading(tile));
                                     String status = tile.credited ? "Completed" : "pending".equals(tile.status) ? "Pending approval"
                                         : "rejected".equals(tile.status) ? "Rejected"
                                         : tile.value_amount != null && tile.value_amount > 0 ? "In progress" : "Available";
                                     card.add(boardText(status, SMALL, accent));
+                                    String scope = "solo".equals(tile.scope) ? "Solo" : "Team";
+                                    card.add(boardText(tile.target == null ? scope
+                                        : scope + " · " + tile.value + " / " + tile.target, SMALL, BINGO_TEXT));
                                     if (tile.target != null) {
-                                        String scope = "solo".equals(tile.scope) ? "Solo" : "Team";
-                                        card.add(boardText(scope + " · " + tile.value + " / " + tile.target, SMALL, BINGO_TEXT));
                                         if (tile.value_amount != null && tile.target_amount != null) {
                                             card.add(bingoMeter(tile.value_amount, tile.target_amount, accent));
                                         }
                                     }
+                                    card.add(flatButton("Details", tile.name, BINGO_TEXT,
+                                        () -> showObjectiveDetails(tile, status, scope)));
                                     rows.add(card);
                                     if (linked && tile.metric != null && ("skill_xp".equals(tile.objective_type)
                                         || "boss_kc".equals(tile.objective_type))) {
@@ -1394,6 +1408,101 @@ public class SoulrendSidebarPanel extends PluginPanel {
                 setContent(rows);
             });
         });
+    }
+
+    private static boolean visibleBingoTile(BingoApiClient.BoardTile tile) {
+        return tile.name != null && !"hidden".equals(tile.status) && !"locked".equals(tile.status);
+    }
+
+    static boolean visibleCombatAchievement(BingoApiClient.BoardTile tile) {
+        return visibleBingoTile(tile) && "ca".equals(tile.objective_type);
+    }
+
+    static final String CA_REPEAT_GUIDANCE = "Already completed this Combat Achievement? "
+        + "In OSRS, open Settings (wrench), search for Repeat completion and enable the "
+        + "Combat Achievement notifications. Attempt the task again while Soulrend is connected.\n\n"
+        + "The objective must allow repeats and the game must send a completion message. "
+        + "Some tasks may send no repeat message. Only new attempts can count, and the website handles approval.";
+
+    private JPanel combatAchievementReminder(boolean allowsRepeats) {
+        var reminder = bingoCard(BINGO_GOLD);
+        var info = flatButton("Combat Achievement info", "Open OSRS repeat-completion instructions", BINGO_GOLD,
+            () -> showBingoDetails("Combat Achievements", CA_REPEAT_GUIDANCE));
+        info.setIcon(new GlyphIcon(STAR, 12, BINGO_GOLD));
+        reminder.add(info);
+        var setting = boardText("Repeat notifications: Not verified", SMALL, BINGO_GOLD);
+        setting.setVisible(!caReminderDismissed);
+        reminder.add(setting);
+        var dismiss = new JButton("Got it");
+        styleFlatButton(dismiss, BINGO_TEXT);
+        dismiss.addActionListener(e -> {
+            caReminderDismissed = true;
+            setting.setVisible(false);
+            dismiss.setVisible(false);
+            capH(reminder).revalidate();
+        });
+        dismiss.setVisible(!caReminderDismissed);
+        reminder.add(dismiss);
+        if (allowsRepeats) info.setToolTipText("A visible objective allows repeat completions. Open OSRS setup instructions.");
+        return capH(reminder);
+    }
+
+    private JComponent objectiveHeading(BingoApiClient.BoardTile tile) {
+        var header = new JPanel(new BorderLayout(5, 0));
+        header.setOpaque(false);
+        var icon = new JLabel(new GlyphIcon(tile.credited ? CHECK : STAR, 15, BINGO_GOLD));
+        icon.setPreferredSize(new Dimension(27, 25));
+        header.add(icon, WEST);
+        if (tile.item_id > 0 && clanView.items != null) {
+            var cached = objectiveItems.get(tile.item_id);
+            if (cached != null) icon.setIcon(cached);
+            else {
+                var item = clanView.items.getImage(tile.item_id);
+                item.onLoaded(() -> invokeLater(() -> {
+                    var scaled = objectiveItems.computeIfAbsent(tile.item_id, id ->
+                        new ImageIcon(item.getScaledInstance(24, -1, Image.SCALE_SMOOTH)));
+                    icon.setIcon(scaled);
+                }));
+            }
+        } else if ("skill_xp".equals(tile.objective_type) && tile.metric != null && clanView.skills != null) {
+            try {
+                var skill = net.runelite.api.Skill.valueOf(tile.metric.toUpperCase(Locale.ROOT));
+                icon.setIcon(new ImageIcon(clanView.skills.getSkillImage(skill, true)));
+            } catch (IllegalArgumentException ignored) {
+                // Unknown metrics retain the default icon.
+            }
+        } else if (BingoApiClient.isBingoIconPath(tile.icon_path)) {
+            uiHost().image(tile.icon_path, 24, 24, false, loaded -> {
+                if (loaded != null) icon.setIcon(loaded);
+            });
+        }
+        var title = new ClipLabel(wrapHtml(esc(fontSafe(tile.name)), STATUS_WRAP_PX - 44));
+        title.setFont(BOLD);
+        title.setForeground(WHITE);
+        title.setVerticalAlignment(SwingConstants.CENTER);
+        title.setToolTipText(wrapHtml(esc(tile.name), STATUS_WRAP_PX));
+        header.add(title, CENTER);
+        return capH(header);
+    }
+
+    private void showObjectiveDetails(BingoApiClient.BoardTile tile, String status, String scope) {
+        String text = status + " · " + scope;
+        if (tile.target != null) text += "\n" + tile.value + " / " + tile.target;
+        if (tile.description != null && !tile.description.isBlank()) text += "\n\n" + tile.description;
+        if (visibleCombatAchievement(tile)) {
+            text += tile.allow_repeat ? "\n\nThis objective allows repeat completions."
+                : "\n\nThis objective requires a first-time completion.";
+        }
+        showBingoDetails(tile.name, text);
+    }
+
+    private void showBingoDetails(String title, String text) {
+        var details = new JTextArea(text, 7, 25);
+        details.setEditable(false);
+        details.setLineWrap(true);
+        details.setWrapStyleWord(true);
+        details.setCaretPosition(0);
+        showMessageDialog(this, new JScrollPane(details), title, INFORMATION_MESSAGE);
     }
 
     private static final Color BINGO_PURPLE = new Color(0xa981ed);

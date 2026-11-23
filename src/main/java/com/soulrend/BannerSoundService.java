@@ -242,48 +242,37 @@ public class BannerSoundService {
 		}
 	}
 
-	private long lastProgressSound;
-	private long lastCompletionSound;
-	private static final long PROGRESS_SOUND_COOLDOWN_MS = 1750L;
-	private static final long COMPLETION_SOUND_COOLDOWN_MS = 1400L;
+	// AudioPlayer starts a clip and returns. The bundled cues are at most two seconds long.
+	private long bingoAudioReady;
+	private static final long BINGO_CUE_SPACING_NS = TimeUnit.MILLISECONDS.toNanos(2100);
 
-	/** Queue the category's existing resource on the shared audio worker, without blocking UI. */
 	void playBingoCue(BingoCue cue) {
-		if (cue == null || !config.bannerSound() || !cue.enabled(config) || config.bannerSoundVolume() <= 0) return;
-		try {
-			executor().execute(() -> playBingoCueBlocking(cue, false));
-		} catch (RejectedExecutionException ignored) {
-		}
+		queueBingoCue(cue, false);
 	}
 
-	/** Used by the sidebar's Preview buttons: ignores a category mute, but respects volume. */
+	/** Preview ignores the category switch and uses the current master volume. */
 	void previewBingoCue(BingoCue cue) {
-		if (cue == null || config.bannerSoundVolume() <= 0) return;
+		queueBingoCue(cue, true);
+	}
+
+	private void queueBingoCue(BingoCue cue, boolean preview) {
+		if (!config.bannerSound() || config.bannerSoundVolume() <= 0 || !preview && !cue.enabled(config)) return;
+		if (BannerSoundService.class.getResource(cue.resource) == null) return;
 		try {
-			executor().execute(() -> playBingoCueBlocking(cue, true));
+			executor().execute(() -> playBingoCueOnWorker(cue, preview));
 		} catch (RejectedExecutionException ignored) {
 		}
 	}
 
-	/** Serialized by audioExecutor; debounce noisy progress and coalesce rapid completions. */
-	private void playBingoCueBlocking(BingoCue cue, boolean preview) {
-		long now = System.currentTimeMillis();
-		if (!preview) {
-			if (cue == BingoCue.COMPLETION) {
-				if (now - lastCompletionSound < COMPLETION_SOUND_COOLDOWN_MS) return;
-				lastCompletionSound = now;
-			} else {
-				if (now - lastProgressSound < PROGRESS_SOUND_COOLDOWN_MS
-					|| now - lastCompletionSound < COMPLETION_SOUND_COOLDOWN_MS) return;
-				lastProgressSound = now;
-			}
-		}
+	private void playBingoCueOnWorker(BingoCue cue, boolean preview) {
 		try {
-			// A bundled WAV needs no file-system permission, no download, and no user import.
-			if (BannerSoundService.class.getResource(cue.resource) != null)
-				audioPlayer.play(BannerSoundService.class, cue.resource, gainDb());
-			else if (!preview)
-				playBlocking(Kind.BANNER); // Preserve existing imported sounds until resources ship.
+			long remaining = bingoAudioReady - System.nanoTime();
+			if (remaining > 0) TimeUnit.NANOSECONDS.sleep(remaining);
+			if (!config.bannerSound() || config.bannerSoundVolume() <= 0 || !preview && !cue.enabled(config)) return;
+			audioPlayer.play(BannerSoundService.class, cue.resource, gainDb());
+			bingoAudioReady = System.nanoTime() + BINGO_CUE_SPACING_NS;
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
 		} catch (Exception e) {
 			log.warn("Unable to play Soulrend {} cue: {}", cue, e.getMessage());
 		}
