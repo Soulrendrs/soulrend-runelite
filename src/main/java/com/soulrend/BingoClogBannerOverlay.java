@@ -3,6 +3,10 @@ package com.soulrend;
 import net.runelite.api.Client;
 import net.runelite.api.gameval.InterfaceID;
 import net.runelite.client.ui.FontManager;
+import net.runelite.api.Skill;
+import net.runelite.client.game.ItemManager;
+import net.runelite.client.game.SkillIconManager;
+import javax.swing.ImageIcon;
 import net.runelite.client.ui.overlay.*;
 
 import javax.imageio.ImageIO;
@@ -69,6 +73,17 @@ public class BingoClogBannerOverlay extends Overlay {
 	Client client;
 
 	@Inject
+	ItemManager items;
+
+	@Inject
+	BingoApiClient api;
+
+	@Inject
+	SkillIconManager skills;
+
+	BingoBannerQueue.Card lastBingoCard;
+
+	@Inject
 	BingoClogBannerOverlay(SoulrendPlugin plugin) {
 		super(plugin);
 		setPosition(OverlayPosition.TOP_CENTER);
@@ -110,7 +125,10 @@ public class BingoClogBannerOverlay extends Overlay {
 
 	/** Called on the client thread when the signed-in bingo scope changes. */
 	void removeBanners(String title) {
-		if (BingoCompletionMonitor.TITLE.equals(title)) bingoCards.clear();
+		if (BingoCompletionMonitor.TITLE.equals(title)) {
+			bingoCards.clear();
+			lastBingoCard = null;
+		}
 		queue.removeIf(banner -> title.equals(banner[0]));
 		if (active != null && title.equals(active[0])) {
 			active = null;
@@ -134,16 +152,32 @@ public class BingoClogBannerOverlay extends Overlay {
 		if (active == null || now - startedAt >= total) {
 			var bingo = bingoCards.current(now);
 			if (bingo != null) {
+				if (lastBingoCard != bingo) {
+					lastBingoCard = bingo;
+					if (bingo.icon == null && bingo.itemId > 0) {
+						bingo.icon = new ImageIcon(items.getImage(bingo.itemId));
+					} else if (bingo.icon == null && bingo.skill != null) {
+						try {
+							var skill = Skill.valueOf(bingo.skill.toUpperCase(Locale.ROOT));
+							bingo.icon = new ImageIcon(skills.getSkillImage(skill, true));
+						} catch (IllegalArgumentException ignored) {
+							// Unrecognized metrics use the default card icon.
+						}
+					} else if (bingo.icon == null && BingoApiClient.isBingoIconPath(bingo.iconPath)) {
+						api.thumb(bingo.iconPath, 32, 32, false, icon -> bingo.icon = icon);
+					}
+				}
 				var cardGraphics = (Graphics2D) g.create();
 				try {
 					var offset = dodge(BingoCompletionCard.WIDTH, BingoCompletionCard.HEIGHT);
 					if (offset != null) cardGraphics.translate(offset.x, offset.y);
-					BingoCompletionCard.paint(cardGraphics, bingo);
+					BingoCompletionCard.paint(cardGraphics, bingo, bingoCards.elapsed(now));
 				} finally {
 					cardGraphics.dispose();
 				}
 				return new Dimension(BingoCompletionCard.WIDTH, BingoCompletionCard.HEIGHT);
 			}
+			lastBingoCard = null;
 			if (background == null) return null;
 			active = queue.poll();
 			int n = active == null ? folded.getAndSet(0) : 0;

@@ -155,21 +155,26 @@ final class BingoCompletionMonitor {
         if (!permits(tile.self)) return;
         var contributor = tile.contributor == null || tile.contributor.isBlank()
             ? "Team completion" : "By: " + tile.contributor;
-        var card = new BingoBannerQueue.Card(event.id + ":" + tile.id, tile.name,
-            event.team == null ? "Unassigned" : event.team, contributor, true);
-        if (plugin.clogBanner.bingoCards.offer(card)) plugin.playBannerSound();
+        var detail = tile.value == null || tile.target == null ? contributor
+            : String.format(Locale.ROOT, "%,d / %,d · %s", tile.value, tile.target, contributor);
+        var card = new BingoBannerQueue.Card(event.id + ":" + tile.id, tile.name, event.team,
+            detail, true, () -> plugin.bannerSound.playBingoCue(BannerSoundService.BingoCue.COMPLETION),
+            tile.item_id, tile.icon_path, tile.skill);
+        plugin.clogBanner.bingoCards.offer(card);
         plugin.sendChatMessage(ChatPalette.Tone.DONE, "Bingooooo! " + tile.name + " · " + contributor);
     }
 
     private void showProgress(EventSummary event, ProgressTile tile) {
-        if (!permits(tile.self)) return;
+        if (!permits(tile.self) || !tile.self && "solo".equals(tile.scope)) return;
         var progress = String.format(Locale.ROOT, "%,d / %,d %s", tile.value, tile.target,
             "kills".equals(tile.unit) ? "kills" : "items");
         var contributor = tile.contributor == null ? "Progress recorded" : "Latest: " + tile.contributor;
         if (tile.quantity > 0) contributor += "  +" + tile.quantity;
         if ("solo".equals(tile.scope)) contributor += "  ·  Best solo";
+        var cue = tile.self ? BannerSoundService.BingoCue.SELF_PROGRESS
+            : BannerSoundService.BingoCue.TEAM_PROGRESS;
         plugin.clogBanner.bingoCards.offer(new BingoBannerQueue.Card(event.id + ":" + tile.id,
-            progress + "  ·  " + tile.name, event.team == null ? "Unassigned" : event.team,
-            contributor, false));
+            tile.name, event.team, progress + " · " + contributor, false,
+            () -> plugin.bannerSound.playBingoCue(cue), tile.item_id, tile.icon_path, null));
     }
 }

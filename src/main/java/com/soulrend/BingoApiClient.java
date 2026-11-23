@@ -347,12 +347,15 @@ public class BingoApiClient {
     static final class ProgressTile {
         int id;
         long revision, value, target, quantity;
-        String name, contributor, unit, scope;
+        String name, contributor, unit, scope, icon_path;
+        int item_id;
         boolean self;
     }
     static final class ConfirmedTile {
         int id;
-        String name, contributor;
+        String name, contributor, icon_path, skill;
+        int item_id;
+        Long value, target;
         boolean self;
     }
     static final class TeamBoard {
@@ -369,7 +372,9 @@ public class BingoApiClient {
         String team;
     }
     static final class BoardTile {
-        String name, status, value, target, scope, objective_type, metric;
+        String name, status, value, target, scope, objective_type, metric, description, icon_path;
+        int item_id;
+        boolean allow_repeat;
         Long value_amount, target_amount;
         boolean credited;
         String label() {
@@ -378,6 +383,10 @@ public class BingoApiClient {
             return name + " · " + status + (target == null ? "" : " · " + value + "/" + target + " " + scope);
         }
     }
+    static boolean isBingoIconPath(String path) {
+        return path != null && path.matches("/static/(?:runelite-items|wom-metrics)/[a-z0-9_]+\\.png");
+    }
+
     /** Most recent read-only bingo status. 401 means the saved device session is no longer valid. */
     volatile int lastBingoHttpStatus;
 

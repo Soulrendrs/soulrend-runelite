@@ -226,15 +226,16 @@ public interface SoulrendConfig extends Config {
 		return true;
 	}
 
+	@Range(min = 0, max = 100)
 	@ConfigItem(
 		keyName = "bannerSoundVolume",
 		name = "Banner volume",
-		description = "Volume of your banner and mission clips (0–100).",
+		description = "Volume of Soulrend notification sounds (0–100). Default 40%.",
 		position = 6,
 		section = "bingoSection"
 	)
 	default int bannerSoundVolume() {
-		return 70;
+		return 40;
 	}
 
 	@ConfigItem(
@@ -283,6 +284,33 @@ public interface SoulrendConfig extends Config {
 	default boolean trackerOnePanel() {
 		return true;
 	}
+
+	@ConfigItem(
+		keyName = "ownProgressSound",
+		name = "My objective progress sound",
+		description = "Play the bundled Retro Game Notification when my objective progress is confirmed.",
+		position = 11,
+		section = "bingoSection"
+	)
+	default boolean ownProgressSound() { return true; }
+
+	@ConfigItem(
+		keyName = "teammateProgressSound",
+		name = "Teammate progress sound",
+		description = "Play the bundled Happy Bell when a teammate contributes to a shared objective.",
+		position = 12,
+		section = "bingoSection"
+	)
+	default boolean teammateProgressSound() { return true; }
+
+	@ConfigItem(
+		keyName = "bingoCompletionSound",
+		name = "Bingo completion sound",
+		description = "Play the bundled Small Win sound when an objective is completed.",
+		position = 13,
+		section = "bingoSection"
+	)
+	default boolean bingoCompletionSound() { return true; }
 
 	@ConfigItem(
 		keyName = "shareActivity",

@@ -42,4 +42,20 @@ public class BannerSoundServiceTest
 		}
 		sound.shutdown();
 	}
+	@Test
+	public void defaultVolumeIsFortyPercent() {
+		org.junit.Assert.assertEquals(40, new SoulrendConfig() {}.bannerSoundVolume());
+	}
+
+	@Test
+	public void bundledCuesHaveDistinctResourcesAndEnabledDefaults() {
+		SoulrendConfig settings = new SoulrendConfig() {};
+		java.util.Set<String> resources = new java.util.HashSet<>();
+		for (BannerSoundService.BingoCue cue : BannerSoundService.BingoCue.values()) {
+			org.junit.Assert.assertTrue(cue.enabled(settings));
+			org.junit.Assert.assertTrue(cue.resource.endsWith("-normalized.wav"));
+			org.junit.Assert.assertTrue(resources.add(cue.resource));
+		}
+	}
+
 }

@@ -5,7 +5,7 @@ import static org.junit.Assert.*;
 
 public class BingoBannerQueueTest {
     private static BingoBannerQueue.Card card(String tile, String detail, boolean completed) {
-        return new BingoBannerQueue.Card(tile, "Coins", "Team", detail, completed);
+        return new BingoBannerQueue.Card(tile, "Coins", "Team", detail, completed, () -> {}, 0, null, null);
     }
 
     @Test
@@ -31,8 +31,9 @@ public class BingoBannerQueueTest {
         assertSame(partial, queue.current(10L));
         assertTrue(queue.offer(complete));
         assertFalse(queue.offer(partial));
-        assertSame(complete, queue.current(20L));
-        assertNull(queue.current(3521L));
+        assertSame(partial, queue.current(20L));
+        assertSame(complete, queue.current(3510L));
+        assertNull(queue.current(7010L));
     }
 
     @Test
@@ -41,9 +42,25 @@ public class BingoBannerQueueTest {
         for (int i = 0; i < 8; i++) queue.offer(card("1:" + i, "partial", false));
         var completion = card("2:1", "By: Teammate", true);
         assertTrue(queue.offer(completion));
-        for (int i = 0; i < 7; i++) assertFalse(queue.current(1L + i * 3500).completed);
-        assertSame(completion, queue.current(24501L));
+        assertSame(completion, queue.current(1L));
+        assertFalse(queue.current(3501L).completed);
         queue.clear();
-        assertNull(queue.current(24502L));
+        assertNull(queue.current(3502L));
+    }
+    @Test
+    public void everyCompletionIsShownAndStartsAudioOnce() {
+        var queue = new BingoBannerQueue();
+        var starts = new java.util.concurrent.atomic.AtomicInteger();
+        for (int i = 0; i < 12; i++) {
+            assertTrue(queue.offer(new BingoBannerQueue.Card("3:" + i, "Coins", "Team",
+                "Complete", true, starts::incrementAndGet, 0, null, null)));
+        }
+        assertEquals(0, starts.get());
+        for (int i = 0; i < 12; i++) {
+            long now = 1 + i * 3500L;
+            assertEquals("3:" + i, queue.current(now).key);
+            queue.current(now + 100);
+            assertEquals(i + 1, starts.get());
+        }
     }
 }
