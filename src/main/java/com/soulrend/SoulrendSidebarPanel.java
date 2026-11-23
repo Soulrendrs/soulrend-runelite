@@ -1306,7 +1306,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
                 sounds.setIcon(new GlyphIcon(GEAR, 13));
                 sounds.getAccessibleContext().setAccessibleName("Bingo notification sounds");
                 account.add(sounds, EAST);
-                rows.add(capH(account));
+                rows.add(left(capH(account)));
                 boolean failed = list == null || list.events == null || (event != null && board == null);
                 retrySeconds = failed ? Math.min(240, retrySeconds * 2) : 30;
                 nextRead = System.currentTimeMillis() + retrySeconds * 1000L;
@@ -1394,8 +1394,8 @@ public class SoulrendSidebarPanel extends PluginPanel {
                                             card.add(bingoMeter(tile.value_amount, tile.target_amount, accent));
                                         }
                                     }
-                                    card.add(flatButton("Details", tile.name, BINGO_TEXT,
-                                        () -> showObjectiveDetails(tile, status, scope)));
+                                    card.add(left(flatButton("Details", tile.name, BINGO_TEXT,
+                                        () -> showObjectiveDetails(tile, status, scope))));
                                     rows.add(card);
                                     if (linked && tile.metric != null && ("skill_xp".equals(tile.objective_type)
                                         || "boss_kc".equals(tile.objective_type))) {
@@ -1492,7 +1492,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
         title.setVerticalAlignment(SwingConstants.CENTER);
         title.setToolTipText(wrapHtml(esc(tile.name), STATUS_WRAP_PX));
         header.add(title, CENTER);
-        return capH(header);
+        return left(capH(header));
     }
 
     private void showObjectiveDetails(BingoApiClient.BoardTile tile, String status, String scope) {
@@ -1521,13 +1521,21 @@ public class SoulrendSidebarPanel extends PluginPanel {
     private static final Color BINGO_RED = new Color(0xf09192);
     private static final Color BINGO_TEXT = new Color(0xd7caeb);
 
-    private static JPanel bingoCard(Color accent) {
-        var card = column();
+    static JPanel bingoCard(Color accent) {
+        // Rows and session-progress labels are added after construction. Measure the card
+        // when its parent lays it out, so a once-empty card cannot clip its own contents.
+        var card = new JPanel() {
+            @Override
+            public Dimension getMaximumSize() {
+                return new Dimension(Integer.MAX_VALUE, getPreferredSize().height);
+            }
+        };
+        card.setLayout(new BoxLayout(card, BoxLayout.Y_AXIS));
         card.setOpaque(true);
         card.setBackground(new Color(0x20172c));
         card.setBorder(createCompoundBorder(createMatteBorder(1, 3, 1, 1, accent),
             createEmptyBorder(7, 8, 7, 8)));
-        return capH(card);
+        return left(card);
     }
 
     private static JProgressBar bingoMeter(long value, long target, Color accent) {
@@ -1538,7 +1546,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
         meter.setBorderPainted(false);
         meter.setPreferredSize(new Dimension(0, 5));
         meter.getAccessibleContext().setAccessibleName(value + " of " + target);
-        return capH(meter);
+        return left(capH(meter));
     }
 
     private void refreshObservedGains() {
