@@ -3572,7 +3572,7 @@ public class SoulrendPlugin extends Plugin {
 				maybeNotifyDiaryCompletion(area, tier);
 				recordFeedMoment(new Moment("diary", null, area, 1, null, null, null, null, null, tier,
 						now(), ("diary|" + area + "|" + tier).toLowerCase(ROOT)));
-				automaticEvidence.named("diary", area + " " + tier);
+				// Retired as a RuneLite bingo evidence source; historical site records remain unchanged.
 				creditDiaryTiles(area, tier);
 			}
 		}
@@ -3643,7 +3643,7 @@ public class SoulrendPlugin extends Plugin {
 		var t = now();
 		recentClogUnlocks.values().removeIf(at -> t - at > 15_000 /* CLOG_UNLOCK_SAME_MS */);
 		if (recentClogUnlocks.putIfAbsent(item.toLowerCase(ROOT), t) != null) return; // the other line for this unlock got here first
-		automaticEvidence.named("clog", item);
+		// Retired as a RuneLite bingo evidence source; historical site records remain unchanged.
 		// A pet drop moments ago is still waiting to learn WHICH pet it was — this line is the
 		// only thing that says so. It takes the name and both clog posts stand down, or the same
 		// pet lands twice, once as 🐾 and once as 📕.
