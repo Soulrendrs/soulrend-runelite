@@ -147,6 +147,7 @@ public class SoulrendPlugin extends Plugin {
 	@Inject
 	PendingSubmissionStore pendingSubmissionStore;
 	final BingoCompletionMonitor bingoCompletions = new BingoCompletionMonitor(this);
+	final BingoStartReminder bingoStartReminder = new BingoStartReminder();
 	final AutomaticEvidence automaticEvidence = new AutomaticEvidence(this);
 	final InstallationIdentity installationIdentity = new InstallationIdentity();
 
@@ -2463,6 +2464,7 @@ public class SoulrendPlugin extends Plugin {
 		boolean on = gs == GameState.LOGGED_IN, off = gs == GameState.LOGIN_SCREEN, hop = gs == GameState.HOPPING;
 		if (off) {
 			bingoCompletions.clear();
+			clogBanner.removeBanners(BingoStartReminder.TITLE);
 			lastCaPoints = -1;
 			caPointsInitialized = false;
 			pendingCaTasks.clear();
