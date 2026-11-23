@@ -157,7 +157,7 @@ final class BingoCompletionMonitor {
             ? "Team completion" : "By: " + tile.contributor;
         var card = new BingoBannerQueue.Card(event.id + ":" + tile.id, tile.name,
             event.team == null ? "Unassigned" : event.team, contributor, true);
-        if (plugin.clogBanner.bingoCards.offer(card)) plugin.playBannerSound();
+        if (plugin.clogBanner.bingoCards.offer(card)) plugin.bannerSound.playBingoCue(BannerSoundService.BingoCue.COMPLETION);
         plugin.sendChatMessage(ChatPalette.Tone.DONE, "Bingooooo! " + tile.name + " · " + contributor);
     }
 
@@ -168,8 +168,10 @@ final class BingoCompletionMonitor {
         var contributor = tile.contributor == null ? "Progress recorded" : "Latest: " + tile.contributor;
         if (tile.quantity > 0) contributor += "  +" + tile.quantity;
         if ("solo".equals(tile.scope)) contributor += "  ·  Best solo";
-        plugin.clogBanner.bingoCards.offer(new BingoBannerQueue.Card(event.id + ":" + tile.id,
+        if (plugin.clogBanner.bingoCards.offer(new BingoBannerQueue.Card(event.id + ":" + tile.id,
             progress + "  ·  " + tile.name, event.team == null ? "Unassigned" : event.team,
-            contributor, false));
+            contributor, false)))
+            plugin.bannerSound.playBingoCue(tile.self ? BannerSoundService.BingoCue.SELF_PROGRESS
+                : BannerSoundService.BingoCue.TEAM_PROGRESS);
     }
 }
