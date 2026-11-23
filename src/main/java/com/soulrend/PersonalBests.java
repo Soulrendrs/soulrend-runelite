@@ -140,28 +140,33 @@ final class PersonalBests {
 		lastChangeAt = 0;
 	}
 
-	/**
-	 * The delivered bests as one config string: {@code <centis>|<activity>} per line.
-	 *
-	 * <p>Value first for the same reason as the collection log's state: activity names contain
-	 * colons and spaces, an integer can't contain a pipe, so the parse needs no escaping.
-	 */
+	/** The delivered bests as one config string, with {@code <centis>|<activity>} per line. */
 	String serializeState() {
-		return ClogSync.writeLines(sent, String::valueOf);
+		var out = new StringBuilder(sent.size() * 24);
+		for (var entry : sent.entrySet()) {
+			var activity = entry.getKey();
+			if (activity == null || activity.indexOf('\n') >= 0) continue;
+			if (out.length() > 0) out.append('\n');
+			out.append(entry.getValue()).append('|').append(activity);
+		}
+		return out.toString();
 	}
 
-	/**
-	 * Restore delivered state. These count as known bests too — otherwise every login would re-push
-	 * the whole set to tell the server what it already stored.
-	 */
+	/** Keep delivered records as known bests so switching characters does not re-send them. */
 	void restoreState(String raw) {
-		// A truncated or hand-edited line is dropped; the next kill re-establishes it.
-		ClogSync.readLines(raw, (value, activity) -> {
-			int centis = Integer.parseInt(value);
-			if (centis > 0) {
+		if (raw == null || raw.isEmpty()) return;
+		for (var line : raw.split("\n")) {
+			int pipe = line.indexOf('|');
+			if (pipe <= 0 || pipe == line.length() - 1) continue;
+			try {
+				int centis = Integer.parseInt(line.substring(0, pipe));
+				if (centis <= 0) continue;
+				var activity = line.substring(pipe + 1);
 				sent.put(activity, centis);
 				best.merge(activity, centis, Math::min);
+			} catch (NumberFormatException ignored) {
+				// The next kill can re-establish a truncated or hand-edited config entry.
 			}
-		});
+		}
 	}
 }

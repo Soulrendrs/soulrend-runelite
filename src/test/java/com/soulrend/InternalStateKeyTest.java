@@ -13,7 +13,6 @@ public class InternalStateKeyTest
 		assertTrue(SoulrendPlugin.isInternalStateKey("recapCounterMinutes"));
 		assertTrue(SoulrendPlugin.isInternalStateKey("recapCounterBiggestHit"));
 		assertTrue(SoulrendPlugin.isInternalStateKey("vestigeRolls:zezima"));
-		assertTrue(SoulrendPlugin.isInternalStateKey("clogSyncState:zezima"));
 	}
 
 	@Test

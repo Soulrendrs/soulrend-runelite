@@ -245,7 +245,7 @@ public class RacePanelRenderTest {
 		SoulrendSidebarDataSource ds = new SoulrendSidebarDataSource(() -> null, null) {
 			@Override
 			public PanelActions actionsFor() {
-				return new PanelActions(true, true, null);
+				return new PanelActions(true, null);
 			}
 
 			@Override

@@ -686,13 +686,6 @@ public class SoulrendSidebarPanel extends PluginPanel {
 	/** The list the next Feed-tab open shows (a board's feed or chat from its buttons); empty = the default. */
 	Map<String, String> feedArgs = emptyMap();
 
-	/** Event chat came in while its chatbox copy is off: a dot on the Feed tab until it's looked at. Any thread. */
-	void feedUnread() {
-		invokeLater(() -> {
-			if (!onScreen || tab != FEED) tabLabels.get(FEED).setText("Feed \u2022");
-		});
-	}
-
 	void feedRead() {
 		var l = tabLabels.get(FEED);
 		if (onScreen && tab == FEED && l != null) l.setText("Feed");
@@ -800,7 +793,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 
 	String settingsKey(PanelActions actions) {
 		var k = new StringBuilder()
-			.append(actions.canSyncProfile).append('|').append(actions.canSyncRoster).append('|').append(actions.rosterNote);
+			.append(actions.canSyncRoster).append('|').append(actions.rosterNote);
 		for (var clip : data.sounds(BANNER)) k.append('|').append(clip).append(data.bannerSoundOn(clip) ? '+' : '-');
 		return k.append("|m").append(data.sounds(MISSION).size()).toString();
 	}
@@ -1728,18 +1721,13 @@ public class SoulrendSidebarPanel extends PluginPanel {
 	 *
 	 * <p>A roster is scraped from the clan channel you're standing in, so the button is absent for
 	 * any clan but your own — an admin elsewhere still can't see a roster they aren't in — and it
-	 * says why rather than vanishing without explanation. Both buttons carry the same limits as
-	 * their in-game counterparts, which live in the plugin, not here.
+	 * says why when the clan channel is unavailable.
 	 */
 	JPanel buildPanelActions(PanelActions actions) {
 		var panel = column();
 		// Nothing this account can do here: no empty card either.
-		if (!actions.canSyncRoster && !actions.canSyncProfile && actions.rosterNote == null) return panel;
+		if (!actions.canSyncRoster && actions.rosterNote == null) return panel;
 		panel.add(cardTitle("Syncing"));
-		if (actions.canSyncProfile) {
-			addAll(panel, fullWidthButton("Sync profile", "Send your collection log and best times to Soulrend", data::syncProfile), gap(4), note("Send your collection log and best times to Soulrend", 165));
-		}
-		if (actions.canSyncProfile && (actions.canSyncRoster || actions.rosterNote != null)) panel.add(gap(8));
 		if (actions.canSyncRoster) {
 			addAll(panel, fullWidthButton("Sync clan roster", "Push the in-game clan member list to the site", data::syncRoster), gap(4), note("Clan admins: push the in-game member list to the site", 165));
 		} else if (actions.rosterNote != null) panel.add(note(actions.rosterNote, 165));

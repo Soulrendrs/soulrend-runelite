@@ -28,7 +28,6 @@ public class SidebarActionsTest
 		// Tests and the pre-wiring window: the panel must render rather than blow up.
 		SoulrendSidebarDataSource.PanelActions home = source().actionsFor();
 		assertFalse(home.canSyncRoster);
-		assertFalse(home.canSyncProfile);
 		assertNull(home.rosterNote);
 	}
 
