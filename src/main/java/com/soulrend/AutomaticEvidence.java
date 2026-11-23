@@ -15,12 +15,14 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.TimeUnit;
 import java.util.function.IntUnaryOperator;
 
 /** Reuses the gameplay signals, next game frame, and durable proof store from Anvil. */
 final class AutomaticEvidence {
     private static final long RULE_TTL_MS = 90_000;
-    private static final long CAPTURE_COOLDOWN_MS = 12_000;
+    private static final long CA_CAPTURE_COOLDOWN_MS = 12_000;
     private static final int MAX_ACTIVE_BOARDS = 5;
     private static final int MAX_PENDING_FOR_SESSION = 40;
 
@@ -35,13 +37,13 @@ final class AutomaticEvidence {
 
         boolean matchesDrop(Map<Integer, Integer> items, String actualSource) {
             return "drop".equals(kind) && item_id != null
-                && items.getOrDefault(item_id, 0) >= (quantity == null ? 1 : quantity)
+                && items.getOrDefault(item_id, 0) > 0
                 && (source == null || source.isEmpty() || source.equals(actualSource));
         }
 
         boolean matchesGain(String skill, Map<Integer, Integer> gains) {
             return "gain".equals(kind) && item_id != null && skill.equals(source)
-                && gains.getOrDefault(item_id, 0) >= (quantity == null ? 1 : quantity);
+                && gains.getOrDefault(item_id, 0) > 0;
         }
 
         Integer namedId(String type, String name) {
@@ -85,7 +87,9 @@ final class AutomaticEvidence {
 
     private final SoulrendPlugin plugin;
     private final AtomicBoolean syncing = new AtomicBoolean();
-    private final Map<Integer, Long> attempted = new HashMap<>(); // client thread
+    private final Map<Integer, Long> attempted = new HashMap<>(); // CA de-dup only, client thread
+    private final AtomicInteger queuedThisSync = new AtomicInteger();
+    private final AtomicBoolean flushScheduled = new AtomicBoolean();
     private volatile BoardRules rules;
     private final Map<String, Integer> skillTicks = new HashMap<>(); // client thread
 
@@ -95,6 +99,7 @@ final class AutomaticEvidence {
 
     void clear() {
         rules = null;
+        queuedThisSync.set(0);
     }
 
     private boolean enabled() {
@@ -161,7 +166,7 @@ final class AutomaticEvidence {
             && session.equals(proof.runeliteSession)).count();
         for (var proof : pending) {
             if (proof.runeliteCaptureId == null || !session.equals(proof.runeliteSession)) continue;
-            if (sent >= 8 || !Rsn.same(character, proof.capturedRsn) || !sameSession(session, character)
+            if (sent >= 32 || !Rsn.same(character, proof.capturedRsn) || !sameSession(session, character)
                 || !reachable.contains(proof.eventId)) continue;
             ++sent;
             var screenshot = plugin.pendingSubmissionStore.readScreenshot(proof);
@@ -189,8 +194,11 @@ final class AutomaticEvidence {
                 break; // Leave stable capture IDs on disk for the next retry pass.
             }
         }
-        if (sameSession(session, character)) rules = new BoardRules(session, character,
-            System.currentTimeMillis() + RULE_TTL_MS, List.copyOf(matches), held);
+        if (sameSession(session, character)) {
+            rules = new BoardRules(session, character,
+                System.currentTimeMillis() + RULE_TTL_MS, List.copyOf(matches), held);
+            queuedThisSync.set(0);
+        }
     }
 
     private boolean sameSession(String session, String character) {
