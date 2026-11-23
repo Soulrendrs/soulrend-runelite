@@ -64,13 +64,12 @@ public class SoulrendSidebarDataSource {
 	PanelActions actionsFor() {
 		var p = plugin;
 		if (p == null) return PanelActions.NONE;
-		var profile = p.canSyncProfileFromPanel();
-		if (!p.isAdmin()) return new PanelActions(false, profile, null);
+		if (!p.isAdmin()) return PanelActions.NONE;
 		// Admin — but the roster comes from the clan channel, so it has to be readable. The CACHED
 		// answer: this runs while the panel paints, on the EDT, where asking the client directly is a
 		// thread violation.
 		var scrape = p.isClanRosterReadable();
-		return new PanelActions(scrape, profile, scrape ? null : "Join your clan channel to sync the roster");
+		return new PanelActions(scrape, scrape ? null : "Join your clan channel to sync the roster");
 	}
 
 	/** The logged-in character's row, or {@code null} to hide it (logged out, not signed in). */
@@ -91,11 +90,6 @@ public class SoulrendSidebarDataSource {
 	/** Push the in-game clan roster to the home site. */
 	void syncRoster() {
 		withPlugin(SoulrendPlugin::syncClanRosterFromPanel);
-	}
-
-	/** Send this account's collection log + bests to the home site. */
-	void syncProfile() {
-		withPlugin(SoulrendPlugin::syncProfileNow);
 	}
 
 	/** Is this clip in the play cycle? */
@@ -317,16 +311,14 @@ public class SoulrendSidebarDataSource {
 	 * What the panel may DO for the addressed clan.
 	 *
 	 * <p>A roster sync scrapes the clan channel you are standing in, so it needs an admin with that
-	 * channel readable. A profile sync goes to the site the plugin is authenticated against.
+	 * channel readable.
 	 */
 	@RequiredArgsConstructor
 	static final class PanelActions {
-		static final PanelActions NONE = new PanelActions(false, false, null);
+		static final PanelActions NONE = new PanelActions(false, null);
 
 		/** Show "Sync clan roster": admin, at home, with a readable clan channel. */
 		final boolean canSyncRoster;
-		/** Show "Sync profile": the site takes profile data and it's the one we're signed in to. */
-		final boolean canSyncProfile;
 		/** Why the roster button is absent, when the reason is worth saying. Null when it isn't. */
 		final String rosterNote;
 	}

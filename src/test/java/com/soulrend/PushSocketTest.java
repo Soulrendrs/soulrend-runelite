@@ -31,7 +31,6 @@ public class PushSocketTest
 		volatile boolean ticketsAvailable = true;
 		volatile int ticketsAsked;
 		volatile boolean lastFeed;
-		volatile int lastRelay;
 
 		FakeApi()
 		{
@@ -39,11 +38,10 @@ public class PushSocketTest
 		}
 
 		@Override
-		PushTicket fetchPushTicket(boolean feed, boolean rows, int relay, String fc)
+		PushTicket fetchPushTicket(boolean feed)
 		{
 			ticketsAsked++;
 			lastFeed = feed;
-			lastRelay = relay;
 			if (!ticketsAvailable)
 			{
 				return null;
@@ -125,30 +123,28 @@ public class PushSocketTest
 	public void aTicketForAnOldScopeIsDropped() throws Exception
 	{
 		api.ticketsAvailable = false;
-		push.scope("5:2:c302#1@");
+		push.scope("5:2:f");
 		settle();
 		assertEquals(0, api.opened.size());
 		BingoApiClient.PushTicket t = new BingoApiClient.PushTicket();
 		t.url = "wss://soulrend.events/api/plugin/push/ws";
 		t.ticket = "old";
-		// Asked before a hop: the scope has moved on, so this ticket opens nothing.
-		push.withTicket("5:2:c301#1@", t);
+		// The scope moved to another board, so the old ticket opens nothing.
+		push.withTicket("6:2:f", t);
 		assertEquals(0, api.opened.size());
-		push.withTicket("5:2:c302#1@", t);
+		push.withTicket("5:2:f", t);
 		assertEquals(1, api.opened.size());
 	}
 
 	@Test
-	public void scopeFlagsAskForFeedAndRelayWorld() throws Exception
+	public void scopeFlagsAskForFeed() throws Exception
 	{
-		push.scope("0:0:f:r:c302#77");
+		push.scope("0:0:f");
 		settle();
 		assertTrue(api.lastFeed);
-		assertEquals(302, api.lastRelay);
-		push.scope("5:2:r");
+		push.scope("5:2");
 		settle();
 		assertFalse(api.lastFeed);
-		assertEquals(0, api.lastRelay);
 	}
 
 	@Test

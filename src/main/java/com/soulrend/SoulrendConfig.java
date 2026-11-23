@@ -92,15 +92,6 @@ public interface SoulrendConfig extends Config {
 		return Names.Animated;
 	}
 
-	/** Soulrend chat: off, see others' lines, also send your own, also your private messages. */
-	enum Relay {
-		Off, See_others, See_send, See_send_PMs;
-
-		public String toString() {
-			return this == See_others ? "See others" : name().replace("_", " + ");
-		}
-	}
-
 	// ---- Setup ----
 
 	// No Site URL: the plugin only talks to https://soulrend.events (BingoApiClient.CANONICAL_SITE).

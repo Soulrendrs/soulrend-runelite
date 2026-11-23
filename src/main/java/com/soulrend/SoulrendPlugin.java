@@ -34,7 +34,6 @@ import net.runelite.client.events.*;
 import net.runelite.client.game.*;
 import net.runelite.client.plugins.*;
 import net.runelite.client.plugins.loottracker.LootReceived;
-import net.runelite.api.widgets.WidgetUtil;
 import net.runelite.http.api.loottracker.LootRecordType;
 import net.runelite.client.ui.*;
 import net.runelite.client.ui.overlay.OverlayManager;
@@ -68,11 +67,6 @@ import net.runelite.api.clan.ClanMember;
 )
 
 public class SoulrendPlugin extends Plugin {
-	// These inherited features are disabled in Soulrend, so they are never read from RuneLite config.
-	private static final SoulrendConfig.Relay CHAT_RELAY_MODE = SoulrendConfig.Relay.Off;
-	private static final boolean EVENT_CHAT_ENABLED = false;
-	private static final boolean COLLECTION_LOG_PROFILE_SYNC_ENABLED = false;
-
 	@Inject
 	Client client;
 
@@ -81,12 +75,6 @@ public class SoulrendPlugin extends Plugin {
 
 	@Inject
 	ChatIconManager chatIconManager;
-
-	@Inject
-	net.runelite.client.input.KeyManager keyManager;
-
-	@Inject
-	net.runelite.client.game.chatbox.ChatboxPanelManager chatboxPanelManager;
 
 	@Inject
 	SoulrendConfig config;
@@ -339,14 +327,6 @@ public class SoulrendPlugin extends Plugin {
 	// landed on. Chat + loot events both run on the client thread, so no synchronisation needed.
 	final Map<String, Integer> killCounts = new HashMap<>();
 	final SessionGains sessionGains = new SessionGains();
-
-	/**
-	 * The "Soulrend" button in the collection log header.
-	 *
-	 * Built in startUp rather than here: `client` arrives by injection, so a field initialiser would
-	 * capture null. Enabled on the same condition the sidebar's Sync profile is — a site and a token
-	 * — because a button that can only produce "you are not signed in" is worse than no button.
-	 */
 
 	/**
 	 * The "Soulrend" button in the CLAN window's header, beside other plugins' buttons.
@@ -799,14 +779,8 @@ public class SoulrendPlugin extends Plugin {
 	static final String CFG_COUNTER_MINUTES = "recapCounterMinutes";
 	static final String CFG_COUNTER_CATASKS = "recapCounterCaTasks";
 
-	// ── Profile sync (collection log + personal bests) ──────────────────────────────────────
-	// Both are per-ACCOUNT facts, so their state keys carry the RSN the same way vestige rolls do —
-	// an alt's log must never be filed as the main's. What's stored is only what the server has
-	// already accepted, so a restart resumes instead of re-sending a log that hasn't moved.
-	static final String CFG_CLOG_STATE = "clogSyncState";
+	// Delivered personal bests are stored per character.
 	static final String CFG_PB_STATE = "pbSyncState";
-	/** Fingerprint of the last whole log we pushed, per RSN — so a relog doesn't re-send 1,700 items. */
-	static final String CFG_CLOG_FINGERPRINT = "clogFingerprint";
 	static final String CFG_PB_IMPORTED = "pbImportedFromRuneLite";
 	/** RuneLite's own chat-commands store, read once to seed a profile (see importRuneLitePersonalBests). */
 	static final String RUNELITE_PB_GROUP = "personalbest";
@@ -834,19 +808,16 @@ public class SoulrendPlugin extends Plugin {
 	 *
 	 * <p>The first one of a session always speaks, even to say nothing moved: that line is how you
 	 * know the plugin is talking to your site at all, and its absence is what made a working sync
-	 * look broken. Every one after it speaks only for news — a "nothing changed" every world hop, or
-	 * every time the collection log is opened, is the noise the silence was protecting against.
+	 * look broken. Every one after it speaks only when the roster changes.
 	 */
 	volatile boolean autoRosterReportedThisLogin;
-	volatile boolean autoClogReportedThisLogin;
 	static final long AUTO_ROSTER_MIN_GAP_MS = 30 * 60 * 1000;
 	/**
 	 * When another roster push is allowed.
 	 *
 	 * <p>A roster push rewrites every member row on the site, and the button is right there in two
 	 * places — so it was one impatient double-click away from doing that twice, and nothing but the
-	 * in-flight guard stood between a bored admin and a push per second. The collection log has had
-	 * this cooldown since the site started refusing them; the roster deserves the same manners.
+	 * in-flight guard limited repeated requests.
 	 */
 	volatile long rosterPushAllowedAt;
 	static final long ROSTER_PUSH_COOLDOWN_MS = 60_000L;
@@ -854,40 +825,9 @@ public class SoulrendPlugin extends Plugin {
 	final SyncBackoff rosterBackoff = new SyncBackoff();
 	/** The clan list lands a moment after the channel does; give it time rather than racing it. */
 	static final long AUTO_ROSTER_DELAY_MS = 5_000;
-	final ClogSync clogSync = new ClogSync();
-	/** Whole-log sync: the accumulator for a server transmit (see ClogFullSync). */
-	final ClogFullSync clogFullSync = new ClogFullSync();
-	/** True from asking for a transmit until it has settled, so the re-init we fire can't re-trigger it. */
-	volatile boolean clogTransmitInFlight;
-	/** Game tick the transmit was asked for — the guard is held relative to this. */
-	volatile int clogTransmitTick;
-	/** Wall clock of the last request, for the cooldown that backstops the guard. */
-	volatile long lastClogTransmitAt;
-	/** The player pressed "Sync profile" — the next log open pushes even if nothing has changed. */
-	volatile boolean clogSyncRequested;
-	// A failing push must not become a request every 30 seconds for the rest of the session. One
-	// backoff per path, so a site refusing personal bests doesn't also slow the collection log down.
-	final SyncBackoff clogBackoff = new SyncBackoff();
-	final SyncBackoff clogFullBackoff = new SyncBackoff();
-	/** One in-flight immediate flush at a time — game ticks are 600ms and the push is not. */
-	volatile boolean clogFlushQueued;
-	/** Fingerprint of the last log we successfully pushed, so an unchanged one isn't sent again. */
-	volatile long lastClogFingerprint;
-	/** When a button-press sync began, so one that never delivers says so instead of hanging silently. */
-	volatile long manualSyncStartedAt;
-	/**
-	 * When the site will accept another whole-log push. The server allows one a minute per member,
-	 * and a client that fires into that anyway learns nothing and spends somebody's server time —
-	 * so we hold the number it gives us and wait instead of guessing.
-	 */
-	volatile long clogPushAllowedAt;
-	/** The site's limit, used to hold off BEFORE a request rather than after a refusal. */
-	static final long SERVER_CLOG_COOLDOWN_MS = 60_000L;
-	/** How long a pressed sync may take before we admit it didn't work. */
-	// MANUAL_SYNC_TIMEOUT_MS = 15_000L, inlined at its one use.
 	final SyncBackoff pbBackoff = new SyncBackoff();
 	final PersonalBests personalBests = new PersonalBests();
-	/** The account the two above belong to, so a character switch reloads rather than merges. */
+	/** The account the personal-best state belongs to, so a character switch reloads rather than merges. */
 	String profileSyncRsn;
 	// The server allowlist lowercased, rebuilt with the drop index.
 	volatile Set<String> alwaysNotifyLower = emptySet();
@@ -1135,21 +1075,6 @@ public class SoulrendPlugin extends Plugin {
 			log.warn("No soulrend_text.json", e);
 		}
 
-		// The window's TITLE BAR, not the entry pane's header the log also calls a header — that one
-		// is the strip naming the boss you have selected, which is where this button spent its first
-		// release squeezed against the item count. The bar is where other plugins put
-		// theirs, and where somebody looking for a sync button looks.
-		//
-		// The action is the verb ALONE: the game renders a menu entry as "<action> <name>", and the
-		// name is "Soulrend", so spelling it in both produced "Sync to Soulrend Soulrend".
-		// UNIVERSE, not the entry pane's HEADER the button spent its first release in — that is the
-		// strip naming the boss you have selected, halfway down the interface. UNIVERSE is the
-		// container other plugins draw into, which is what puts us in the title bar
-		// beside them and in the same stacking order rather than behind them.
-		//
-		// The offset walks left from the bar's right edge: the close button ends at 28, WikiSync
-		// takes 33..104, and we take the next slot along. An absolute-right offset holds at any
-		// window size, where measuring off a neighbour moves the moment they move.
 		clanSyncButton = new HeaderButton(
 				client, InterfaceID.ClansInfo.UNIVERSE, InterfaceID.ClansInfo.CLOSE,
 				33 /* CLAN_BUTTON_OFFSET */, "Soulrend", "Sync roster to",
@@ -1196,9 +1121,6 @@ public class SoulrendPlugin extends Plugin {
 				.build();
 		clientToolbar.addNavigation(sidebarNavButton);
 		migrateChatSettings();
-		// Registered now: a chat icon's index only exists once it has loaded, and the first line drawn
-		// before that went without it.
-		relayIcon();
 
 		resetCompletionBaseline();
 		executor = Executors.newSingleThreadScheduledExecutor();
@@ -1274,7 +1196,7 @@ public class SoulrendPlugin extends Plugin {
 
 			safely("pruneDedupMap", this::pruneDedupMap);
 			safely("importRuneLitePbs", this::retryPersonalBestImport);
-			flushProfileSyncs();
+			safely("flushPersonalBests", this::flushPersonalBests);
 			safely("pushAccountProgress", this::pushAccountProgress);
 			safely("pushGameClan", this::pushGameClan);
 			safely("pushGuestChannel", this::pushGuestChannel);
@@ -1752,8 +1674,7 @@ public class SoulrendPlugin extends Plugin {
 			CFG_COUNTER_BIGHIT, CFG_COUNTER_MINUTES, CFG_COUNTER_CATASKS, "settingsMovedNoted");
 	// Per-RSN state keys are stored as "<prefix>:<rsn>".
 	static final List<String> INTERNAL_STATE_PREFIXES = List.of(
-			CFG_VESTIGE_ROLLS + ":", CFG_CLOG_STATE + ":", CFG_PB_STATE + ":",
-			CFG_CLOG_FINGERPRINT + ":", CFG_PB_IMPORTED + ":");
+			CFG_VESTIGE_ROLLS + ":", CFG_PB_STATE + ":", CFG_PB_IMPORTED + ":");
 
 	static boolean isInternalStateKey(String key) {
 		return key != null && (INTERNAL_STATE_KEYS.contains(key) || INTERNAL_STATE_PREFIXES.stream().anyMatch(key::startsWith));
@@ -1884,32 +1805,6 @@ public class SoulrendPlugin extends Plugin {
 		apiClient.setWorld(WorldInfo.types(client.getWorldType()), WorldInfo.activity(w == null ? null : w.getActivity()));
 	}
 
-	// --- Whole-log collection sync ---------------------------------------------------------------
-	// Opening the collection log and toggling its Search makes the SERVER transmit every entry, one
-	// script fire per item — the whole log without the player clicking a single page.
-
-	/** Fires once the collection log interface has finished setting itself up. */
-	static final int COLLECTION_LOG_SETUP = 7797;
-	// Where our title-bar buttons sit, measured from each bar's RIGHT edge. The collection log's
-	// close button ends at 28 and WikiSync's button takes 33..104, so we start after it; the clan
-	// window has only its close button, so we sit straight beside that.
-	// CLOG_BUTTON_OFFSET = 109, inlined at its one use.
-	// The slot WikiSync would occupy (33..104), taken when it is not running. Without this the far
-	// offset was unconditional and the button sat a slot-width from the close button with an empty
-	// gap between, reserved for a plugin that was not there.
-	// CLOG_BUTTON_NEAR_OFFSET = 33, inlined at its one use.
-	// CLAN_BUTTON_OFFSET = 33, inlined at its one use.
-	/** One fire per transmitted item: args[1] = item id, args[2] = quantity. */
-	// COLLECTION_DELAYED_TRANSMIT = 4100, inlined at its one use.
-	/** Re-initialises the log's own view, which closes the search we opened to trigger the transmit. */
-	// COLLECTION_INIT = 2240, inlined at its one use.
-	/** Hold the guard at least this long: the re-fire of the setup script arrives a tick or two later. */
-	static final int CLOG_TRANSMIT_MIN_TICKS = 4;
-	/** And no longer than this, so a transmit that yields nothing can't wedge the guard on. */
-	// CLOG_TRANSMIT_MAX_TICKS = 50, inlined at its one use.
-	/** Hard floor between two transmit requests, whatever the guard believes. */
-	static final long CLOG_TRANSMIT_COOLDOWN_MS = 10_000L;
-
 	@Subscribe
 	void onScriptPostFired(ScriptPostFired event) {
 		int id = event.getScriptId();
@@ -1924,183 +1819,6 @@ public class SoulrendPlugin extends Plugin {
 				flairClanTitleGroup(InterfaceID.CLANS_SIDEPANEL);
 				flairClanTitleGroup(InterfaceID.CLANS_GUEST_SIDEPANEL);
 			}
-			return;
-		}
-		if (id == ScriptID.COLLECTION_DRAW_LIST || id == COLLECTION_LOG_SETUP) {
-			// The title-bar button, before the next frame (onBeforeRender) rather than right here or a
-			// client tick later. A neighbouring plugin clears every dynamic child of this container before
-			// adding its own, on the setup script, each time the game redraws the log: drawing inline would
-			// depend on which plugin the event bus reaches first, and a tick later left frames without the
-			// button (it flickered). BeforeRender is after every subscriber, whatever the load order. Idempotent:
-			// render() returns on an identity scan when ours is still attached.
-			headerDue = true;
-			if (id == ScriptID.COLLECTION_DRAW_LIST) captureClogPage();
-			// Opt-in until the trick has been proven on a real client: an unguarded version of this
-			// recursed through the interface scripts and crashed the game. The button asks for the
-			// same thing deliberately, which is the safe way to try it.
-			if (id == COLLECTION_LOG_SETUP && COLLECTION_LOG_PROFILE_SYNC_ENABLED && clogSyncRequested) requestFullClogTransmit();
-		}
-	}
-
-	@Subscribe
-	void onScriptPreFired(ScriptPreFired event) {
-		if (event.getScriptId() != 4100 /* COLLECTION_DELAYED_TRANSMIT */) return;
-		// Viewing someone else's log through a POH adventure log fires the same script with THEIR
-		// items. Storing those would overwrite this account's log with a stranger's.
-		if (client.getVarbitValue(VarbitID.COLLECTION_POH_HOST_BOOK_OPEN) == 1) {
-			clogFullSync.reset();
-			return;
-		}
-		var args = event.getScriptEvent().getArguments();
-		if (args == null || args.length < 3) return;
-		try {
-			clogFullSync.onItem((int) args[1], (int) args[2], now());
-		} catch (ClassCastException e) {
-			// A game update changed the script's shape — stop rather than file nonsense as a log.
-			clogFullSync.reset();
-		}
-	}
-
-	/** What a transmit request did, so the button can say something true about it. */
-	enum TransmitResult { STARTED, BUSY, COOLING_DOWN, LOG_CLOSED, UNAVAILABLE }
-
-	/**
-	 * Ask the server for the whole collection log, now that the interface is open.
-	 *
-	 * <p>The Search toggle is what makes the server send every entry; re-running the log's init
-	 * script puts the view back as it was, so the player sees their log open normally. Runs on the
-	 * client thread (it's a script hook) and only ever while their OWN log is open.
-	 */
-	TransmitResult requestFullClogTransmit() {
-		// The POH varbit: someone else's log, via a POH adventure log.
-		if (!supportsProfileSync() || client.getVarbitValue(VarbitID.COLLECTION_POH_HOST_BOOK_OPEN) == 1) return TransmitResult.UNAVAILABLE;
-		// THE GUARD THAT MATTERS. The init script below re-fires the setup script that got us here,
-		// and it does so on a LATER tick — so a flag cleared at the end of this method is already
-		// false when the re-fire lands, and we ask again, and again: toggle search, re-init, setup,
-		// toggle search. That recursion crashed a client with an ArrayIndexOutOfBounds inside the
-		// interface scripts. The flag therefore lives until onGameTick decides the transmit is over.
-		if (clogTransmitInFlight) return TransmitResult.BUSY;
-		// Second belt, because the first one failing crashed someone's game: never fire twice inside
-		// this window whatever the flag says. A missed sync waits for the next open; a loop does not.
-		var now = now();
-		if (now - lastClogTransmitAt < CLOG_TRANSMIT_COOLDOWN_MS) return TransmitResult.COOLING_DOWN;
-		// Only with the log actually on screen — the ops below address ITS widgets.
-		if (client.getWidget(InterfaceID.Collection.FRAME) == null) return TransmitResult.LOG_CLOSED;
-
-		clogTransmitInFlight = true;
-		lastClogTransmitAt = now;
-		clogTransmitTick = client.getTickCount();
-		clogFullSync.begin(clogSyncRequested);
-		clogSyncRequested = false;
-		return TransmitResult.STARTED;
-	}
-
-	/**
-	 * Push a settled transmit AS SOON AS it settles, rather than at the next 30-second tick.
-	 *
-	 * <p>A background trickle can wait for the scheduler; a sync somebody pressed a button for
-	 * cannot. Waiting made a two-second job take up to thirty, which is the difference between
-	 * "synced" and "did that work?". The tick is 600ms, so this costs a flag check per tick and
-	 * gets the push away within one of them.
-	 */
-	void flushFullClogSyncWhenSettled() {
-		if (clogFlushQueued || !execLive() || !clogFullSync.isDue(now())) return;
-		clogFlushQueued = true;
-		submit(() -> {
-			try {
-				safely("flushFullClogSync", this::flushFullClogSync);
-			} finally {
-				clogFlushQueued = false;
-			}
-		});
-	}
-
-	/**
-	 * A manual sync that produced nothing has to say so.
-	 *
-	 * <p>If the search toggle doesn't make the server transmit — a game update moving the script, an
-	 * interface closed mid-flight — the batch never reaches the minimum and nothing is ever pushed.
-	 * The player, who pressed a button and was told "Syncing...", would otherwise wait forever.
-	 */
-	void tickManualSyncWatchdog() {
-		if (manualSyncStartedAt == 0) return;
-		if (now() - manualSyncStartedAt < 15_000L /* MANUAL_SYNC_TIMEOUT_MS */) return;
-		manualSyncStartedAt = 0;
-		// A push in flight or already sent clears the batch, so anything still here never landed.
-		sendChatMessage(WARN, clogFullSync.size() == 0 ? "The game didn't send your collection log. Close and reopen it, then try again."
-				: "Only part of your collection log arrived — reopen it and sync again.");
-		clogFullSync.reset();
-	}
-
-	/**
-	 * Stand the transmit guard down once the items have stopped arriving (or never started).
-	 *
-	 * <p>Held for at least {@link #CLOG_TRANSMIT_MIN_TICKS} so the re-fire of the setup script — the
-	 * one our own init causes — always lands while the flag is still up, and released after that so a
-	 * later, genuine open can sync again. The absolute ceiling covers the case where the toggle
-	 * yielded nothing at all, so a failed attempt can't wedge the flag on for the session.
-	 */
-	void tickClogTransmitGuard() {
-		if (!clogTransmitInFlight) return;
-		int elapsed = client.getTickCount() - clogTransmitTick;
-		if (elapsed < CLOG_TRANSMIT_MIN_TICKS) return;
-		if (elapsed >= 50 /* CLOG_TRANSMIT_MAX_TICKS */ || clogFullSync.isDue(now())) clogTransmitInFlight = false;
-	}
-
-	/**
-	 * "Sync profile" — the button. If their log is already open the transmit is triggered on the
-	 * spot; otherwise we arm it, and opening the log finishes the job. Either way the player never
-	 * has to page through anything.
-	 */
-	void syncProfileNow() {
-		if (!COLLECTION_LOG_PROFILE_SYNC_ENABLED) {
-			sendChatMessage("Collection log profile sync is unavailable.");
-			return;
-		}
-		if (!apiClient.isConfigured()) {
-			sendChatMessage("Sign in first — open the Soulrend panel (the soulrend icon on the right) and press \"Sign in with Discord\".");
-			return;
-		}
-		var wait = clogPushAllowedAt - now();
-		if (wait > 0) {
-			sendChatMessage("Your log was synced less than a minute ago — try again in "
-					+ secs(wait) + "s.");
-			return;
-		}
-		clogSyncRequested = true;
-		// Everything below reads widgets and runs interface scripts, which only the client thread
-		// may do. The in-game button is already on it; the side panel's is on Swing's EDT, where
-		// this threw before saying anything — a button that silently does nothing.
-		clientThread.invoke(this::reportTransmitAttempt);
-	}
-
-	/** Ask for a transmit and say what happened. Client thread only. */
-	void reportTransmitAttempt() {
-		var r = requestFullClogTransmit();
-		if (r == TransmitResult.STARTED) manualSyncStartedAt = now();
-		sendChatMessage(r == TransmitResult.STARTED ? "Syncing your collection log..."
-				: r == TransmitResult.BUSY ? "Already syncing — give it a couple of seconds."
-				: r == TransmitResult.COOLING_DOWN ? "Just asked the game for your log — give it "
-						+ secs(CLOG_TRANSMIT_COOLDOWN_MS - (now() - lastClogTransmitAt)) + "s."
-				: r == TransmitResult.LOG_CLOSED ? "Open your collection log and your profile will sync itself."
-				: "Profile sync isn't available right now — check that you're signed in to Soulrend.");
-	}
-
-	/**
-	 * Read the collection-log page the game just drew, if it's one of the game's own.
-	 *
-	 * <p>On the client thread by definition (this is a script hook), so it stays a widget read and a
-	 * hash compare — no JSON, no HTTP, no allocation in the overwhelmingly common case where the
-	 * page hasn't changed since we last sent it. The push happens on the shared executor's next tick.
-	 *
-	 */
-	void captureClogPage() {
-		var sync = supportsProfileSync();
-		if (!sync && !rules.has("page")) return;
-		var page = ClogPageReader.read(client);
-		if (page != null) {
-			if (sync) clogSync.offer(page, now());
-			proveClogPage(page);
 		}
 	}
 
@@ -2144,15 +1862,7 @@ public class SoulrendPlugin extends Plugin {
 	@Subscribe
 	void onVarbitChanged(VarbitChanged event) {
 		if (!trackedActivityKeys.isEmpty() && ActivityStats.isTrigger(event.getVarbitId(), event.getVarpId())) maybeQueueActivityPush();
-		// The chatbox went transparent or opaque: event chat lines take that surface's colours.
-		if (event.getVarbitId() == VarbitID.CHATBOX_TRANSPARENCY && !eventNodes.isEmpty()) {
-			opaqueChatbox();
-			eventNodes.forEach((id, p) -> {
-				var n = client.getMessages().get(id);
-				if (n != null) n.setValue(eventText(p));
-			});
-			client.refreshChat();
-		}
+
 	}
 
 	/**
@@ -2233,14 +1943,7 @@ public class SoulrendPlugin extends Plugin {
 
 	@Subscribe
 	void onGameTick(GameTick event) {
-		// Joined, left or changed friends chat: the relay's friends chat room follows (a new ticket).
-		if (!fcSeen.equals(fcOwner())) {
-			fcSeen = fcOwner();
-			pushSoon();
-		}
 		lastWornItemIds = wornItemIds();
-		relayHeal();
-		relayPmMode();
 		maybeSettleStats();
 		tickGameCounters();
 		if (movedTick >= 0 && client.getTickCount() >= movedTick) movesSettled();
@@ -2253,24 +1956,11 @@ public class SoulrendPlugin extends Plugin {
 		var sp = cfgNow == null ? null : cfgNow.startProof;
 		startSpotMarker.update(here != null && config.startSpotGuide() && cfgNow != null ? StartSpotMarker.target(sp) : null, sp != null ? sp.location : null);
 		resolveDuplicateScroll();
-		trackClogOpen();
 		flushModeLines();
-		// KEEP THE TITLE-BAR BUTTONS HONEST WHILE THE WINDOW IS OPEN.
-		//
-		// They were drawn on two scripts and never reconsidered, so anything that changed while the
-		// interface stayed open was invisible to them: enabling WikiSync stacked its button on top of
-		// ours, disabling it left ours in the far slot with a gap beside it, and turning our own sync
-		// setting off left a button that no longer did anything. WikiSync's own button appears and
-		// disappears instantly because it is re-evaluated, not because it is drawn more cleverly.
-		//
-		// A tick is 600ms and render() returns on an identity scan when nothing has moved, so this is
-		// cheap; it only runs at all while the relevant window is open.
+		// Keep the roster button current while the clan window is open.
 		if (clanSyncButton != null) clanSyncButton.refresh();
 		pollClanCoffer();
-		tickClogTransmitGuard();
-		tickManualSyncWatchdog();
 		updateClanRosterReadable();
-		flushFullClogSyncWhenSettled();
 		// Play time for the recap. Counted from ticks rather than wall-clock so it measures time
 		// actually in-game — a client left open on the login screen doesn't earn anyone an award.
 		recordEventTick();
@@ -2361,7 +2051,7 @@ public class SoulrendPlugin extends Plugin {
 		trackLmsTick();
 	}
 
-	/** The relay's rooms, re-sent from the executor. */
+	/** Re-evaluate push scope from the executor. */
 	void pushSoon() {
 		submit(() -> safely("push", this::syncPush));
 	}
@@ -2463,7 +2153,6 @@ public class SoulrendPlugin extends Plugin {
 			notifiedCaTasks.clear();
 		}
 		if (on || off) markSeasonalWorld();
-		// The relay's public room is the world: a hop (or a log in) re-tickets it.
 		if (on) pushSoon();
 		if (gs == GameState.LOADING) {
 			gameValueCounters.onLoading();
@@ -2473,10 +2162,6 @@ public class SoulrendPlugin extends Plugin {
 			sessionGains.reset();
 			movedFrom = null;
 			movedTick = -1;
-			// Chat line ids start over with the session, so an old mark would land on a stranger's line.
-			relayMarked.clear();
-			relaySeen.clear();
-			relayNodes.clear();
 		}
 		// SESSION CLOCK for the starting shot (StartProofRules). Only the login screen starts a new
 		// session: LOGGED_IN also fires on every loading zone, and a world hop reconnects without the
@@ -2524,7 +2209,6 @@ public class SoulrendPlugin extends Plugin {
 			unsettleStats();
 			helloSent = false;
 			identityStampPending = false;
-			clogOpen = false;
 			// Refreshed on game ticks, and none run at the login screen — so the last in-game answer
 			// would stand and keep "Sync clan roster" on offer while logged out. There is no clan
 			// channel to read here.
@@ -2557,14 +2241,9 @@ public class SoulrendPlugin extends Plugin {
 			startProofFiled = false;
 			startProofNudged = false;
 			startProofCreditWarned = false;
-			// A half-received collection log belongs to the account that was logged in.
-			clogFullSync.reset();
-			clogSyncRequested = false;
-			lastClogFingerprint = 0;
 			// Next login gets its one line back: "it ran and agreed with the site" is worth saying
 			// once per session, and only once.
 			autoRosterReportedThisLogin = false;
-			autoClogReportedThisLogin = false;
 			recentClogUnlocks.clear();
 			// Nothing is attacking a logged-out player, and whatever was is not attacking the next
 			// account either.
@@ -3640,18 +3319,6 @@ public class SoulrendPlugin extends Plugin {
 		// A pet drop moments ago is still waiting to learn WHICH pet it was — this line is the
 		// only thing that says so. It takes the name and both clog posts stand down, or the same
 		// pet lands twice, once as 🐾 and once as 📕.
-		// Tell the server the killcount this unlock happened at, while we still know it.
-		//
-		// The site stamps kcAtUnlock when the collection log next syncs, and had nothing better
-		// to read than the hiscores snapshot — which only flushes on logout, so it was routinely
-		// a kill or more behind. That is how an Ancestral bottom taken on the 80th Chambers was
-		// filed as "at 79 KC" while the Discord post, reading killCounts, said 80.
-		//
-		// Pushed even when no tile tracks this boss (maybeQueueKcPush deliberately won't) and
-		// regardless of whether an event is running: a collection log is a profile, not a board.
-		// Once per unlock, which is once per account per item, ever.
-		pushKcForUnlock();
-		sendClogUnlock(item);
 		var claimedPet = claimPetName(item);
 		// Not a pet, so this is the ungated route to the clan's feed for an unlock that the
 		// loot path can't see: an untradeable with no GE price to clear a floor, or anything
@@ -3673,17 +3340,6 @@ public class SoulrendPlugin extends Plugin {
 		creditClogUnlock(item);
 		// Collection-log tiles: the line is a new slot (once per account per item); the site checks it.
 		if (!trackingOff()) emit(rules.event("clog", RuleEngine.named(RuleEngine.key(item)), 0, null, null, "what", item));
-	}
-
-	/**
-	 * A whole-page clog tile waits for a screenshot of the finished page: take it when the player
-	 * opens one. The site takes one per member while it is live; the window only stops one open's redraws.
-	 */
-	void proveClogPage(ClogPage page) {
-		if (trackingOff() || page.itemIds == null) return;
-		var got = new HashSet<Integer>();
-		for (int id : page.itemIds) got.add(id);
-		emit(rules.event("page", r -> r.keys.contains(page.name) && got.containsAll(r.need), 0, null, t -> claim(lastSubmittedAt, "page:" + t, now(), DEDUP_WINDOW_MS), "what", page.name, "pg", true));
 	}
 
 	/**
@@ -5232,8 +4888,6 @@ public class SoulrendPlugin extends Plugin {
 	 */
 	void onSiteRecovered() {
 		log.info("Site back");
-		clogBackoff.reset();
-		clogFullBackoff.reset();
 		pbBackoff.reset();
 		rosterBackoff.reset();
 		proofBackoff.reset();
@@ -5248,14 +4902,8 @@ public class SoulrendPlugin extends Plugin {
 		if (outbox != null) outbox.kick();
 		submit(() -> {
 			safely("retryPendingSubmissions", this::retryPendingSubmissions);
-			flushProfileSyncs();
+			safely("flushPersonalBests", this::flushPersonalBests);
 		});
-	}
-
-	void flushProfileSyncs() {
-		safely("flushClogSync", this::flushClogSync);
-		safely("flushFullClogSync", this::flushFullClogSync);
-		safely("flushPersonalBests", this::flushPersonalBests);
 	}
 
 	void configureApiClient() {
@@ -6830,63 +6478,6 @@ public class SoulrendPlugin extends Plugin {
 		}
 	}
 
-	boolean friendOnline(String name) {
-		var friends = client.getFriendContainer();
-		var f = friends == null ? null : friends.findByName(name);
-		return f != null && f.getWorld() > 0;
-	}
-
-	/**
-	 * The connected status on right-click: 0 = no line (not asked for, or the site gave us no relay),
-	 * 1 = our own connection is down (it reopens by itself: every ten minutes, on a hop, on a deploy),
-	 * 2 = live, so we know who is here. The line used to vanish in state 1, which read as a bug.
-	 */
-	int relayPresence() {
-		var p = pushSocket;
-		if (CHAT_RELAY_MODE.compareTo(SoulrendConfig.Relay.See_send) < 0) return 0;
-		if (p == null) return 1;
-		return p.live() && p.relayOk ? 2 : 1;
-	}
-
-	long relayRetried;
-	int relayWorldSeen;
-	String relayRsnSeen;
-	/** How long before forcing another relay socket the site keeps refusing (doubles to 5 min). */
-	long relayRenewMs = 10_000;
-
-	/**
-	 * Client thread, each tick: logged in with Soulrend chat on, the socket must be a relay one on this
-	 * world. A log in or a hop changes the world, and a socket opened before we knew it has no relay
-	 * at all: either way, a new ticket (at most every 10s). Before, only a settings toggle fixed it.
-	 */
-	void relayHeal() {
-		var p = pushSocket;
-		var cfg = pluginConfig;
-		if (CHAT_RELAY_MODE == SoulrendConfig.Relay.Off || p == null || !loggedIn() || cfg == null || !cfg.serverSupports("chat-relay")) return;
-		var world = client.getWorld();
-		if (p.relayOk) relayRenewMs = 10_000;
-		var rsn = apiClient.getCurrentRsn();
-		if (world != relayWorldSeen || !Objects.equals(rsn, relayRsnSeen)) {
-			relayWorldSeen = world;
-			relayRsnSeen = rsn;
-			relayRetried = now();
-			pushSoon();
-			return;
-		}
-		// A live socket the site gave no relay: the same scope won't ask again, so start it afresh.
-		if (!p.live() || p.relayOk || now() - relayRetried < relayRenewMs) return;
-		relayRetried = now();
-		relayRenewMs = Math.min(relayRenewMs * 2, 300_000);
-		log.debug("relay renew: a socket without the relay");
-		p.renew();
-	}
-
-	/** The relay presence set uses the same loose RuneScape-name shape as chat dedupe. */
-	boolean relayConnected(String name) {
-		var who = Text.standardize(Text.removeTags(String.valueOf(name))).replaceAll("[ _-]+", " ");
-		return relayHere.contains(who) || who.equals(Text.standardize(String.valueOf(getLocalPlayerName())));
-	}
-
 	/** Config-poll thread only — never the client thread: it may hit disk and the network. */
 	void maybeRefreshChatPatterns(PluginConfigResponse cfg) {
 		if (cfg == null) return;
@@ -6959,30 +6550,14 @@ public class SoulrendPlugin extends Plugin {
 		var p = pushSocket;
 		var cfg = pluginConfig;
 		int eventId = cfg == null ? 0 : cfg.event != null ? cfg.event.id : cfg.homeBoard != null ? cfg.homeBoard.eventId : 0;
-		// The chat feed listens with no board too (":f" asks the ticket for feed lines).
 		var feed = config.chatFeed();
-		// One socket carries everything, rows included — but the site only sends panel rows (Feed and
-		// chat lines) to a socket whose ticket ASKED for them (?rows=1), so a socket held for a board or
-		// the chat feed must ask too: without it, a board player's chat and Feed only filled in when
-		// something else redrew the panel. A player with neither a board nor the chat feed opens a
-		// socket just for the Feed, and only while it's on screen.
-		// The chat relay (either half on) listens too, on the world it is on: a hop or another character
-		// re-tickets, since the ticket names both (docs/PLUGIN_WIRE.md chat-relay).
-		int world = CHAT_RELAY_MODE != SoulrendConfig.Relay.Off && loggedIn()
-				&& (cfg != null ? cfg.serverSupports("chat-relay") : apiClient.siteAdvertises("chat-relay")) ? client.getWorld() : 0;
-		var rows = eventId > 0 || feed || feedWatching || world > 0;
+		var rows = eventId > 0 || feed || feedWatching;
 		if (p != null) p.scope(rows && apiClient.isConfigured() && pushEnabled()
-				? eventId + ":" + (cfg != null && cfg.team != null ? cfg.team.id : 0) + (feed ? ":f" : "") + (rows ? ":r" : "")
-				// The seat too: the ticket's clan room is read when it's issued, and the clan can arrive after log in.
-				// The name too: the site grants the relay only to a request that names the character, and a
-				// ticket asked for in the second after log in (before it was stamped) had none, for good.
-				// Before the '@': PushSocket reads everything after it as the friends chat and guest clan.
-				+ (world > 0 ? ":c" + world + "#" + client.getAccountHash() + (Boolean.TRUE.equals(knownMember) ? "m" : "") + "/" + apiClient.getCurrentRsn() + "@" + fcOwner() : "") : null);
+				? eventId + ":" + (cfg != null && cfg.team != null ? cfg.team.id : 0) + (feed ? ":f" : "") : null);
 	}
 
 	/** A view from the live push (docs/PLUGIN_WIRE.md), applied off the socket's thread. */
 	void onPush(JsonObject m) {
-		if ("relay".equals(m.get("t").getAsString())) return;
 		if (execLive()) executor.execute(() -> safely("push", () -> applyPush(m)));
 	}
 
@@ -7002,35 +6577,12 @@ public class SoulrendPlugin extends Plugin {
 			case "look":
 				refreshLook();
 				return;
-			// Presence (relay sockets only): who else beside us has the relay on.
+			case "relay":
 			case "here":
-				for (var n : m.getAsJsonArray("n")) relayHere.add(n.getAsString());
-				clientThread.invoke(this::relayMenuRefresh);
-				return;
 			case "gone":
-				var gone = m.get("n").getAsString();
-				relayHere.remove(gone);
-				// Gone may be a reconnect or a changed setting: the next menu asks again.
-				clientThread.invoke(() -> {
-					relayAsked.keySet().removeIf(k -> k.replaceAll("[ _-]+", " ").equals(gone));
-					relayMenuRefresh();
-				});
-				return;
-			// Someone asked whether we're connected while our private chat is on Friends: yes, only to a friend.
 			case "ask":
-				var asker = m.get("n").getAsString();
-				clientThread.invoke(() -> {
-					// Only where the game shows us to them anyway: on their screen (we're on each other's), in our group, or our
-					// friend while we're on Friends. Otherwise we stay offline to them, as the game keeps us.
-					if (inScene(asker) || inGroup(asker) || ("friends".equals(pmModeSent) && client.isFriended(asker, false))) relaySend("t", "ok", "n", asker);
-				});
 				return;
 			case "hello":
-				relayHere.clear();
-				clientThread.invoke(() -> {
-					pmModeSent = "";
-					relayAsked.clear();
-				});
 			// The Supporter list: a delta, or (on connecting: one may have been missed) a version check.
 			case "flair":
 				if ((flairOn() || menusFlair()) && apiClient.isConfigured()) {
@@ -7535,22 +7087,6 @@ public class SoulrendPlugin extends Plugin {
 	 */
 	static String normalizeBossName(String s) {
 		return SearchAliases.fold(s);
-	}
-
-	/**
-	 * Push the killcount an unlock just happened at, bypassing the tracked-boss gate.
-	 *
-	 * {@link #maybeQueueKcPush} only pushes bosses some tile tracks, which is right for board
-	 * scoring and wrong here: a clog unlock is worth dating whatever the board happens to be about,
-	 * and the boss it came from usually isn't on it. The kill line always precedes the loot, so the
-	 * most recent one is the kill that produced this unlock — with a window on it, so an unlock that
-	 * arrives with no recent kill (a shop-bought minigame reward, a gamble pet) pushes nothing
-	 * rather than attributing itself to whatever was killed an hour ago.
-	 */
-	void pushKcForUnlock() {
-		if (!statPushAllowed() || lastKcName == null) return;
-		if (now() - lastKcAtMs > KC_ATTRIBUTION_WINDOW_MS) return;
-		kcPush.queue(lastKcName, lastKcValue);
 	}
 
 	/**
@@ -9769,15 +9305,13 @@ public class SoulrendPlugin extends Plugin {
 	 * Re-read the chat colours alone (no lines): the player changed them on the site (a {"t":"look"}
 	 * push), or pressed Refresh. Without this they only took effect at the next login.
 	 */
-	/** The site's chat look: line colours, the [Soulrend] tag's colour, and boards kept out of the chatbox. */
+	/** The site's chat look: line colours and the [Soulrend] tag's colour. */
 	void adoptLook(BingoApiClient.Look l) {
 		chatPalette = ChatPalette.from(l.palette, l.colors);
 		chatTag = l.tag != null && ChatPalette.HEX.matcher(l.tag).matches() ? l.tag : null;
-		chatboxOff = l.off != null ? l.off : List.of();
 	}
 
 	volatile String chatTag;
-	volatile List<String> chatboxOff = List.of();
 
 	void refreshLook() {
 		var b = apiClient.fetchBrief();
@@ -9809,486 +9343,6 @@ public class SoulrendPlugin extends Plugin {
 	 * achievement, or another team's tile. The site already decided this player wants it; the cap here
 	 * only keeps a busy minute from burying the chatbox.
 	 */
-	// -- Chat relay + event chat in the chatbox (docs/PLUGIN_WIRE.md chat-relay) ----------------------
-	//
-	// Outgoing chat is never touched: the relay READS the local player's own line as the client shows it
-	// (the local player's own line, as the client shows it) and sends a copy. Others' lines arrive pre-built by the site and
-	// are only printed: one the game didn't show is added at once as normal chat of its type (so tab
-	// filters, chat plugins and timestamps treat it as one); if the game's own copy turns up after all,
-	// ours is removed and the game's kept. Either way the line carries the Soulrend icon at the start of its
-	// text — never in the name, which the game's own menu options and clan rank icon read. Nothing about
-	// who is around is ever sent.
-
-	// Lines are remembered by MESSAGE ID, never by MessageNode: the game keeps 100 lines per chat type
-	// and reuses the oldest node for the next line (with a new id), so a node held here would later be
-	// some stranger's line wearing our icon.
-	/** Client thread: others' public/clan lines the game showed in the last 10 s, by relayKey: {id, seconds}. */
-	final Map<String, int[]> relaySeen = new HashMap<>();
-	/** Client thread: ids of lines the relay added, by relayKey: dropped if the game's own copy arrives later. */
-	final Map<String, Integer> relayNodes = capped(50, false);
-	static final Set<ChatMessageType> RELAYED = EnumSet.of(PUBLICCHAT, MODCHAT, CLAN_CHAT, CLAN_GUEST_CHAT, FRIENDSCHAT, PRIVATECHAT, PRIVATECHATOUT);
-
-	/** Client thread: we are adding a relayed line (its own ChatMessage must not count as the game's). */
-	boolean injecting;
-	/** Event chat lines printed in the chatbox, by their shown text: the board and channel to reply in. */
-	final Map<String, String> eventLines = capped(50, false);
-	static final Pattern LEVEL = Pattern.compile("\\s*\\(level.*$");
-
-	/** Characters beside us (our world, clan, friends chat) with Soulrend chat on, as the site names them. */
-	final Set<String> relayHere = ConcurrentHashMap.newKeySet();
-	/** Where the chatbox event chat input may post, in its key's order; null until fetched. */
-	volatile JsonArray chatChans;
-	volatile boolean chatOne = true;
-	int eventChatAt;
-	net.runelite.client.game.chatbox.ChatboxTextInput eventChatInput;
-	int relayIcon = -1;
-
-
-
-	static String relayKey(String name, String text) {
-		return Text.standardize(name).replaceAll("[ _-]+", " ") + "\n" + Text.standardize(text).replaceAll("\\s+", " ");
-	}
-
-	/** The friends chat owner and guest clan we sit in ("owner~clan", either may be empty): their relay rooms. */
-	String fcOwner() {
-		var fc = client.getFriendsChatManager();
-		var g = client.getGuestClanChannel();
-		return (fc == null || fc.getOwner() == null ? "" : Text.standardize(fc.getOwner())) + "~" + (g == null ? "" : Text.standardize(g.getName()));
-	}
-
-	/** The friends chat owner the push scope was last built with: a change re-tickets (onGameTick). */
-	String fcSeen = "";
-
-	/** Our own line out; true when it went (the line then wears the icon: you can see you're connected). */
-	boolean relaySay(String c, String text, String to) {
-		var p = pushSocket;
-		var on = CHAT_RELAY_MODE;
-		if (!("pm".equals(c) ? on == SoulrendConfig.Relay.See_send_PMs : on.compareTo(SoulrendConfig.Relay.See_send) >= 0) || p == null || text.startsWith("::")) return false;
-		return p.say(gson.toJson(BingoApiClient.obj("t", "say", "c", c, "x", text, "to", to)));
-	}
-
-	/** A relay control message (not a chat line): our private chat setting, a who, a friend's yes. */
-	void relaySend(Object... kv) {
-		var p = pushSocket;
-		if (p != null && CHAT_RELAY_MODE != SoulrendConfig.Relay.Off) p.say(gson.toJson(BingoApiClient.obj(kv)));
-	}
-
-	/** The private chat setting last told to the relay ("" after a reconnect: tell it again). */
-	String pmModeSent = "";
-
-	/**
-	 * Client thread, each tick: our private chat setting, told to the relay when it changes. It decides
-	 * who past our shared channels may see us connected and PM us: On anyone, Friends our friends, Off nobody.
-	 */
-	void relayPmMode() {
-		var f = client.getWidget(InterfaceID.Chatbox.CHAT_PRIVATE_FILTER);
-		if (f == null || pushSocket == null || !pushSocket.relayOk) return;
-		var t = Text.removeTags(f.getText());
-		var mode = t.contains("Off") ? "off" : t.contains("Friends") ? "friends" : t.contains("On") ? "on" : null;
-		if (mode == null || mode.equals(pmModeSent)) return;
-		pmModeSent = mode;
-		relaySend("t", "pm", "m", mode);
-	}
-
-	/** Names we asked the relay about, and when (ms): once every 10s each at most. */
-	final Map<String, Long> relayAsked = capped(200, false);
-
-	/** Whether a player of that name is in our group ironman group (the game lists them to us). */
-	boolean inGroup(String name) {
-		var g = client.getClanChannel(ClanID.GROUP_IRONMAN);
-		return g != null && g.findMember(name) != null;
-	}
-
-	/** Whether a player of that name is in our scene (the game shows them to us). */
-	boolean inScene(String name) {
-		var k = relayKey(name, "");
-		for (var q : client.getPlayers()) if (q != null && q.getName() != null && k.equals(relayKey(q.getName(), ""))) return true;
-		return false;
-	}
-
-	/** Players the game shows us (on screen, or online friends) not known as connected: ask; their own client decides. */
-	void relayWho(Collection<String> names) {
-		var ask = new ArrayList<String>();
-		long t = now();
-		for (var n : names) {
-			var k = Text.standardize(n);
-			var was = relayAsked.get(k);
-			if (relayConnected(n) || !(friendOnline(n) || inScene(n) || inGroup(n)) || (was != null && t - was < 10_000)) continue;
-			relayAsked.put(k, t);
-			ask.add(n);
-		}
-		if (!ask.isEmpty()) relaySend("t", "who", "n", gson.toJsonTree(ask));
-	}
-
-	/** Client thread (onChatMessage): our own line goes out; someone else's is remembered for dedupe. */
-	void relayHeard(ChatMessage e) {
-		var ct = e.getType();
-		// A line we added ourselves is never "the game's copy" of anything.
-		if (!RELAYED.contains(ct) || e.getName() == null || injecting) return;
-		var name = Text.removeTags(e.getName());
-		var text = Text.removeTags(e.getMessage());
-		var c = ct == CLAN_CHAT ? "clan" : ct == CLAN_GUEST_CHAT ? "guest" : ct == FRIENDSCHAT ? "fc" : ct == PRIVATECHAT || ct == PRIVATECHATOUT ? "pm" : "public";
-		// Our own line (a PM we sent names its recipient instead).
-		if (ct == PRIVATECHATOUT || Text.standardize(name).equals(Text.standardize(String.valueOf(getLocalPlayerName())))) {
-			// A PM only to someone the relay says is connected: otherwise nothing leaves the client.
-			if (ct != PRIVATECHATOUT || relayConnected(name)) if (relaySay(c, text, ct == PRIVATECHATOUT ? name : null)) relayMark(e.getMessageNode(), "");
-			return;
-		}
-		var key = c + relayKey(name, text);
-		var id = relayNodes.remove(key);
-		var ours = id == null ? null : client.getMessages().get(id);
-		var now = (int) (now() / 1000);
-		// The game's copy came just after ours after all: one line, the game's, with the icon. (Ours from
-		// longer ago was another line: the same words said again.)
-		if (ours != null && now - ours.getTimestamp() <= 10) {
-			client.getChatLineMap().get(ours.getType().getType()).removeMessageNode(ours);
-			relayMark(e.getMessageNode(), "");
-			return;
-		}
-		relaySeen.values().removeIf(n -> now - n[1] > 10);
-		relaySeen.put(key, new int[]{e.getMessageNode().getId(), now});
-	}
-
-	/** Client thread: game lines the relay also brought; their name gets the icon as the chatbox is built. */
-	final Map<Integer, String> relayMarked = capped(100, false);
-
-	/** Mark a line for the Soulrend icon after its name, and {@code icon} (an account type) before it. */
-	void relayMark(MessageNode n, String icon) {
-		if (n == null) return;
-		relayMarked.put(n.getId(), icon);
-		client.refreshChat();
-	}
-
-	/**
-	 * The chatbox building a line's name, after RuneLite's own channel plugin has put the rank icon in
-	 * front (it looks the sender up by the node's plain name, so ours stays plain): a marked line gets
-	 * its account-type icon after the leading icons and the Soulrend icon after the name. Before the game
-	 * lays the line out, so it wraps and aligns as its own.
-	 */
-	@Subscribe(priority = -1)
-	void onScriptCallbackEvent(ScriptCallbackEvent e) {
-		if (relayMarked.isEmpty() || !"chatMessageBuilding".equals(e.getEventName())) return;
-		var node = client.getIntStack()[client.getIntStackSize() - 1];
-		var icon = relayMarked.get(node);
-		if (icon == null) return;
-		var os = client.getObjectStack();
-		int at = client.getObjectStackSize() - 3;
-		os[at] = relayName(String.valueOf(os[at]), null, icon) + relayIcon();
-	}
-
-	/**
-	 * A relayed line's name as the chatbox draws it. A clan line we added has no rank to the game, which
-	 * draws its default orb: {@code rank} (the sender's real rank icon, "" for none, null to leave it)
-	 * goes in its place, and {@code icon} (an account type) before the name. The name may already be
-	 * wrapped in a colour tag by the player's chat colours, so leading tags are stepped over: anchored
-	 * on a bare {@code <img>}, a coloured name kept the default orb and read as a guest.
-	 */
-	static String relayName(String name, String rank, String icon) {
-		if (rank != null) name = name.replaceFirst("^((?:<(?!img=)[^>]*>)*)<img=\\d+>", "$1" + java.util.regex.Matcher.quoteReplacement(rank));
-		return name.replaceFirst("^((?:<[^>]*>)*)", "$1" + java.util.regex.Matcher.quoteReplacement(icon));
-	}
-
-	/** Client thread: clan / guest clan lines we added, and the sender's rank icon ("" for none). */
-	// As many as the game keeps: 100 lines each of clan and guest clan chat. Fewer, and an older line we added lost its rank icon and wore the game's default (guest) one.
-	final Map<Integer, String> relayRank = capped(200, false);
-
-	/**
-	 * Enter on public chat: the line goes out now, read as typed (never changed or held: the game sends
-	 * it as ever), without waiting for the game to echo it a tick later; when the echo lands it is the
-	 * same line again (the site drops the repeat). Chat effects ("wave:", "red:") are the game's, not
-	 * the words.
-	 */
-	@Subscribe
-	void onChatboxInput(ChatboxInput e) {
-		if (e.getChatType() == 0 && !e.getValue().startsWith("/")) relaySay("public", Text.removeTags(e.getValue()).replaceFirst("(?i)^((yellow|red|green|cyan|purple|white|flash[123]|glow[123]|wave2?|scroll|shake|slide):)+", ""), null);
-	}
-
-	/**
-	 * The Soulrend chat icon: an soulrend (pointed horn, flat top, narrow waist, wide foot) in flat gold with a
-	 * dark outline, drawn 1:1. Laid out like the tenure badge (tenureArt): a 13px-tall canvas with the
-	 * 9px glyph on rows 2-10, dropped TENURE_DROP, so the two sit level either side of the name.
-	 */
-	String relayIcon() {
-		if (relayIcon < 0) {
-			String[] a = {"..XXXXXXXXX", "XXXXXXXXXXX", "..XXXXXXXX.", ".....SSS...", ".....SSS...", "....XXXXX..", "...XXXXXXX."};
-			var img = new BufferedImage(15, 13, BufferedImage.TYPE_INT_ARGB);
-			for (int pass = 0; pass < 2; pass++)
-				for (int y = 0; y < 7; y++)
-					for (int x = 0; x < 11; x++) {
-						char k = a[y].charAt(x);
-						if (k == '.') continue;
-						if (pass == 1) img.setRGB(x + 2, y + 3, k == 'X' ? 0xFFFFCE28 : 0xFFD6A014);
-						else for (int d = 0; d < 9; d++) img.setRGB(x + 1 + d % 3, y + 2 + d / 3, 0xFF2A1C08);
-					}
-			relayIcon = chatIconManager.registerChatIcon(img);
-		}
-		return dropIcon(chatIconManager.chatIconIndex(relayIcon));
-	}
-
-	// The account-type icons the site may send (ironman, ultimate, hardcore, group, hardcore group, unranked group); nothing else.
-	static final Pattern ICON_LEAD = Pattern.compile("^<img=(2|3|10|41|42|43)>");
-
-	/** Client thread: a relayed line. If the game already showed it, add the icon to that copy; otherwise print the line at once. */
-	void showRelay(JsonObject m) {
-		if (CHAT_RELAY_MODE == SoulrendConfig.Relay.Off || !loggedIn() || client.getLocalPlayer() == null) return;
-		var n = m.get("n").getAsString();
-		var c = m.get("c").getAsString();
-		var key = c + relayKey(n, m.get("x").getAsString());
-		var seen = relaySeen.remove(key);
-		var game = seen == null ? null : client.getMessages().get(seen[0]);
-		if (game != null) {
-			relayMark(game, "");
-			return;
-		}
-		if (client.getIgnoreContainer().findByName(n) != null) return;
-		// The sender as our own client knows them: on screen (public), or in our own channel's member list
-		// (clan, guest clan, friends chat). Nobody unknown to it is shown.
-		Player near = null;
-		String from = null, rank = null, shown = null;
-		var type = PUBLICCHAT;
-		if ("public".equals(c)) {
-			for (var q : client.getPlayers()) if (q != null && q.getName() != null && relayKey(n, "").equals(relayKey(q.getName(), ""))) near = q;
-			if (near != null) shown = near.getName();
-		} else if ("clan".equals(c) || "guest".equals(c)) {
-			var g = "guest".equals(c);
-			var ch = g ? client.getGuestClanChannel() : client.getClanChannel();
-			var member = ch == null ? null : ch.findMember(n);
-			if (member != null) {
-				// As the game writes a sender: a non-breaking space between words. With a plain space the
-				// chatbox can't find the sender in the clan and draws the guest icon for an owner.
-				shown = member.getName().replace(' ', '\u00a0');
-				from = ch.getName();
-				type = g ? CLAN_GUEST_CHAT : CLAN_CHAT;
-				var cs = g ? client.getGuestClanSettings() : client.getClanSettings();
-				var title = cs == null ? null : cs.titleForRank(member.getRank());
-				int r = title == null ? -1 : chatIconManager.getIconNumber(title);
-				rank = r < 0 ? "" : "<img=" + r + ">";
-			}
-		} else if ("pm".equals(c)) {
-			// As the game would: Private On (anyone), Friends (a friend), Off (nobody); no filter read, nobody.
-			var f = client.getWidget(InterfaceID.Chatbox.CHAT_PRIVATE_FILTER);
-			var mode = f == null ? "Off" : Text.removeTags(f.getText());
-			var plain = Text.removeTags(n).replace('\u00a0', ' ');
-			if (plain.matches("[A-Za-z0-9 _-]{1,12}") && !mode.contains("Off") && client.getIgnoreContainer().findByName(plain) == null
-					&& (!mode.contains("Friends") || client.isFriended(plain, false))) {
-				shown = Text.escapeJagex(Text.toJagexName(plain));
-				type = PRIVATECHAT;
-			}
-		} else {
-			var fc = client.getFriendsChatManager();
-			var member = fc == null ? null : fc.findByName(n);
-			if (member != null) {
-				shown = member.getName();
-				from = fc.getName();
-				type = FRIENDSCHAT;
-			}
-		}
-		if (shown == null) return;
-		// Untrusted all the same: the words escaped; the name our client's own, after the rank and the
-		// account-type icon (only those six indices, by explicit match) and before the Soulrend icon.
-		var x = Text.escapeJagex(m.get("x").getAsString());
-		var im = m.has("nm") ? ICON_LEAD.matcher(m.get("nm").getAsString()) : null;
-		var icon = im != null && im.lookingAt() ? "<img=" + im.group(1) + ">" : "";
-		injecting = true;
-		try {
-			// The name stays the plain one: RuneLite's channel plugin finds the sender's rank by it, and the
-			// icons go on as the chatbox builds the line (onScriptCallbackEvent).
-			var node = client.addChatMessage(type, shown, x, from);
-			relayNodes.put(key, node.getId());
-			if (rank != null) relayRank.put(node.getId(), rank);
-			relayMark(node, icon);
-		} finally {
-			injecting = false;
-		}
-		relaySeen.remove(key);
-	}
-
-	/** An event chat push row: its chatbox copy (built by the site), or the Feed tab's dot when that's off. */
-	void eventChatLine(JsonObject m) {
-		// "chat:<event>:<channel>": where "Reply in" posts, and the line's colours.
-		var feed = m.getAsJsonArray("feeds").get(0).getAsString().split(":");
-		// Off here, or this board switched off on the site: the panel's Feed tab gets a dot instead.
-		if (!EVENT_CHAT_ENABLED || chatboxOff.contains(feed[1])) {
-			var panel = sidebarPanel;
-			if (panel != null) panel.feedUnread();
-			return;
-		}
-		// The site escapes what people typed; still, only colour tags and escapes stay, and only a line led
-		// by its "[Board · Channel]" prefix is printed, so nothing can pass for a game message.
-		var line = m.get(chatOne && m.has("cb1") ? "cb1" : "cb").getAsString().replaceAll("<(?!/?col(=[0-9a-fA-F]{6})?>|lt>|gt>)[^>]*>", "");
-		if (!line.matches("^<col=[0-9a-fA-F]{6}>\\[[^<\\]]+\\]</col> .*")) return;
-		int tag = line.indexOf(']'), colon = line.indexOf(": ", tag);
-		if (colon < 0) return;
-		var ai = m.has("ai") ? "<img=" + m.get("ai").getAsInt() + ">" : "";
-		String[] p = {line.substring(line.indexOf('[') + 1, tag), line.substring(tag + 8, colon), line.substring(colon + 2).replaceAll("</?col[^>]*>", ""), feed[2],
-				ICON_LEAD.matcher(ai).lookingAt() ? ai : ""};
-		clientThread.invokeLater(() -> {
-			if (!loggedIn() || client.getLocalPlayer() == null) return;
-			opaqueChatbox();
-			var text = eventText(p);
-			eventLines.put(Text.removeTags(text), feed[1] + ":" + feed[2]);
-			eventNodes.put(client.addChatMessage(GAMEMESSAGE, "", text, null).getId(), p);
-		});
-	}
-
-	/** Client thread: event chat lines in the chatbox, as {tag, name, message, channel}, recoloured with the chatbox. */
-	final Map<Integer, String[]> eventNodes = capped(50, false);
-	/** Tag, Team, All, Announcements: on the opaque chatbox, then the transparent one. */
-	static final String[][] EVENT_COLS = {{"b04e00", "0a6b0a", "00666e", "7a4800"}, {"ff9b30", "72e872", "3ddbe0", "ffc34d"}};
-
-	/** "<soulrend>[Tag · All] <badge><icon>Name: message": the icon first (Soulrend's line), the tag in Soulrend orange, the words by channel. */
-	String eventText(String[] p) {
-		var c = EVENT_COLS[lastChatboxOpaque ? 0 : 1];
-		// The name as in game chat: the Supporter badge and colours (ChatFlair, as on player lines), then
-		// the account-type icon before the name.
-		var d = flairOn() ? chatFlair.decorateReadable(p[1], chatStar(), 0, lastChatboxOpaque) : null;
-		var who = d == null ? p[4] + p[1] : d.replaceFirst("^(<img=\\d+>)?", "$1" + p[4]);
-		return relayIcon() + "<col=" + c[0] + ">[" + p[0] + "]</col> " + who + ": <col=" + c["team".equals(p[3]) ? 1 : "all".equals(p[3]) ? 2 : 3] + ">" + p[2] + "</col>";
-	}
-
-	void fetchChatChans(Runnable then) {
-		try {
-			apiClient.interactiveExecutor().execute(() -> {
-				var r = apiClient.chatChans();
-				if (r != null && r.has("chans")) {
-					chatChans = r.getAsJsonArray("chans");
-					chatOne = !r.has("one") || r.get("one").getAsBoolean();
-				}
-				if (then != null && chatChans != null) clientThread.invoke(then);
-			});
-		} catch (RejectedExecutionException e) {
-			// shutting down
-		}
-	}
-
-	/** Client thread: RuneLite's own chatbox input (never the game's chat) for one event chat channel. */
-	void openEventChat(int i, String value) {
-		var list = chatChans;
-		if (list == null || list.size() == 0) {
-			sendChatMessage("No event chat you can post in right now.");
-			return;
-		}
-		eventChatAt = Math.floorMod(i, list.size());
-		var c = list.get(eventChatAt).getAsJsonObject();
-		eventChatInput = chatboxPanelManager.openTextInput("[" + c.get("l").getAsString() + "] " + getLocalPlayerName() + ":")
-				// The game's own chat limit, which the site enforces too (a longer line was dropped there whole).
-				.value(value.length() > 80 ? value.substring(0, 80) : value)
-				.addCharValidator(ch -> eventChatInput == null || eventChatInput.getValue().length() < 80)
-				.onDone((Consumer<String>) t -> sendEventChat(c, t))
-				.build();
-	}
-
-	void sendEventChat(JsonObject c, String text) {
-		if (text == null || text.trim().isEmpty()) return;
-		apiClient.interactiveExecutor().execute(() -> {
-			var err = FeedList.errorOf(apiClient.postUi("chat-send", Map.of("e", c.get("e").getAsString(), "to", c.get("to").getAsString()), Map.of("msg", text.trim())));
-			if (err != null) sendChatMessage(WARN, err);
-		});
-	}
-
-	/** Menu options about the player a chat line names (not a task or item it mentions). */
-	static final Set<String> PLAYER_OPTIONS = Set.of("Message", "Add friend", "Remove friend", "Delete friend", "Add ignore",
-		"Remove ignore", "Delete ignore", "Report", "Add Note", "Lookup", "Hop-to", "Reply", "Soulrend");
-
-	/** The open menu's Soulrend chat line, and whom it is about: a here/gone while it's open updates it. */
-	MenuEntry statusEntry;
-	Map<String, String> statusNames = Map.of();
-	Set<String> statusSeen = Set.of();
-
-	/** The status line for the menu's players: connected only for someone the game shows us right now. */
-	String relayStatus(int show) {
-		String status;
-		var live = new ArrayList<String>();
-		for (var n : statusNames.entrySet()) if (statusSeen.contains(n.getKey()) && relayConnected(n.getValue())) live.add(n.getValue());
-		if (show < 2) status = "reconnecting";
-		else if (statusNames.size() == 1) status = !live.isEmpty() ? "<col=00ff00>connected" : "<col=ff0000>disconnected";
-		else status = live.isEmpty() ? "<col=ff0000>none of these" : "<col=00ff00>" + String.join(", ", live.subList(0, Math.min(3, live.size()))) + (live.size() > 3 ? " +" + (live.size() - 3) : "");
-		return "<col=9f9f9f>Soulrend chat: " + status;
-	}
-
-	/** Client thread: an answer came in while the menu is open: its line shows it at once. */
-	void relayMenuRefresh() {
-		var e = statusEntry;
-		if (e != null && client.isMenuOpen()) e.setOption(relayStatus(relayPresence()));
-	}
-
-	/** Client-side entries only (nothing is sent to the game): event chat on the Clan tab, Reply on a line. */
-	@Subscribe
-	void onMenuOpened(MenuOpened e) {
-		var chans = chatChans;
-		var area = client.getWidget(InterfaceID.Chatbox.SCROLLAREA);
-		var mp = client.getMouseCanvasPosition();
-		var overChatLine = area != null && !area.isHidden() && area.getBounds().contains(mp.getX(), mp.getY());
-		// A player, a channel member or a chat line's name: whether they have Soulrend chat on. An info line,
-		// no action; only while our own relay is live (else we can't know anyone's).
-		// Only while we send through Soulrend chat: who can receive it matters to a sender, nobody else.
-		int show = relayPresence();
-		// Every player this menu is about, once each: a crowd's menu names several, and one line about
-		// whichever came first read as the status of all of them.
-		var names = new LinkedHashMap<String, String>();
-		var seen = new HashSet<String>();
-		var onFriendsList = false;
-		for (var en : e.getMenuEntries()) if (WidgetUtil.componentToInterface(en.getParam1()) == InterfaceID.FRIENDS) onFriendsList = true;
-		for (var en : show > 0 ? e.getMenuEntries() : new MenuEntry[0]) {
-			// Only someone the game itself shows us as here: in the scene, in one of our channels' member
-			// lists, or online on our friends list. Never more than the game shows (no entry at all).
-			var name = en.getPlayer() == null ? LEVEL.matcher(Text.removeTags(String.valueOf(en.getTarget()))).replaceAll("").trim() : en.getPlayer().getName();
-			if (empty(name)) continue;
-			// A menu opened on the friends list follows it: logged out there (offline, or hidden from us),
-			// no line, whatever we share. Other plugins' entries in the same menu (World Hopper's Hop-to,
-			// lookups) don't carry the list's widget, so this is decided for the menu, not per entry.
-			if (onFriendsList && !friendOnline(name)) continue;
-			var cc = client.getClanChannel();
-			var gc = client.getGuestClanChannel();
-			var fc = client.getFriendsChatManager();
-			// Visible: the game shows them to us right now. A chat line's name or a friend the game shows
-			// offline still gets a line, but always "disconnected": whoever hides as offline stays so, and
-			// it reads the same as someone without Soulrend.
-			var visible = en.getPlayer() != null || inScene(name) || inGroup(name) || friendOnline(name) || (cc != null && cc.findMember(name) != null)
-				|| (gc != null && gc.findMember(name) != null) || (fc != null && fc.findByName(name) != null);
-			// A hidden name gets a line only off a chat line, and only on an option about a player (not a
-			// task or an item a broadcast names); an offline friend none at all.
-			if (!visible && !(overChatLine && PLAYER_OPTIONS.contains(Text.removeTags(String.valueOf(en.getOption()))))) continue;
-			var key = Text.standardize(Text.removeTags(name));
-			names.putIfAbsent(key, Text.removeTags(name).replace('\u00a0', ' '));
-			if (visible) seen.add(key);
-		}
-		if (show == 2) relayWho(names.values());
-		statusEntry = null;
-		if (!names.isEmpty()) {
-			statusNames = names;
-			statusSeen = seen;
-			statusEntry = client.getMenu().createMenuEntry(1).setOption(relayStatus(show)).setTarget("").setType(MenuAction.RUNELITE);
-		}
-		for (var en : e.getMenuEntries()) {
-			int on = en.getParam1();
-			if (on != InterfaceID.Chatbox.CHAT_CLAN) continue;
-			for (int i = chans == null ? -1 : chans.size() - 1; i >= 0; i--) {
-				int at = i;
-				menuEntry("Event chat:", chans.get(i).getAsJsonObject().get("l").getAsString(), () -> openEventChat(at, ""));
-			}
-			return;
-		}
-		var kids = area == null || area.isHidden() ? null : area.getDynamicChildren();
-		if (kids == null || !area.getBounds().contains(mp.getX(), mp.getY())) return;
-		for (var w : kids) {
-			if (w == null || w.isHidden() || w.getText() == null || !w.getBounds().contains(mp.getX(), mp.getY())) continue;
-			var t = Text.removeTags(w.getText());
-			for (var line : eventLines.entrySet()) {
-				if (!t.endsWith(line.getKey()) || chans == null) continue;
-				for (int i = 0; i < chans.size(); i++) {
-					var c = chans.get(i).getAsJsonObject();
-					int at = i;
-					if (line.getValue().equals(c.get("e").getAsString() + ":" + c.get("to").getAsString())) menuEntry("Reply in", c.get("l").getAsString(), () -> openEventChat(at, ""));
-				}
-			}
-		}
-	}
-
-	void menuEntry(String option, String target, Runnable run) {
-		client.getMenu().createMenuEntry(1).setOption(option).setTarget("<col=ffb54d>" + target).setType(MenuAction.RUNELITE).onClick(x -> run.run());
-	}
-
 	synchronized void feedLine(JsonObject m) {
 		if (!config.chatFeed()) return;
 		var tag = m.has("tag") ? m.get("tag").getAsString() : "";
@@ -10400,19 +9454,6 @@ public class SoulrendPlugin extends Plugin {
 		});
 	}
 
-	/**
-	 * Whether profile data can be synced now — drives the in-tab "Sync profile" row.
-	 */
-	boolean supportsProfileSync() {
-		return COLLECTION_LOG_PROFILE_SYNC_ENABLED && apiClient.isConfigured() && siteKnown();
-	}
-
-	// Whether the collection log is on screen, as last seen on a tick. The panel's "Sync profile" can
-	// only work then (requestFullClogTransmit reads the log's own widgets); offered anywhere else it
-	// was a button whose only answer was "open your collection log".
-	volatile boolean clogOpen;
-
-	/** "Sync profile" in the side panel: supported, and the log is open to read from. */
 	/** Client thread: logged in on a separate-save (seasonal) world, cached for the side panel. */
 	void markSeasonalWorld() {
 		var on = client.getGameState() == GameState.LOGGED_IN && WorldInfo.separateSave(client.getWorldType());
@@ -10437,45 +9478,7 @@ public class SoulrendPlugin extends Plugin {
 		configManager.setConfiguration("soulrendbingo", "shareSeasonal", on);
 	}
 
-	boolean canSyncProfileFromPanel() {
-		return clogOpen && supportsProfileSync();
-	}
-
-	void trackClogOpen() {
-		var open = client.getWidget(InterfaceID.Collection.FRAME) != null;
-		if (open != clogOpen) {
-			clogOpen = open;
-			repaintSidebar();
-		}
-	}
-
-	/**
-	 * Tell the site about a collection-log unlock as it happens, with the kill that produced it.
-	 *
-	 * <p>Otherwise the site only learns of the slot at the next log sync, and stamps it with THAT
-	 * moment: Moxi taken on the 16th Amoxliatl and synced at 39 read "at 39 KC", dated whenever the
-	 * log was next opened. The kill line is sent as-is and the site keeps it only when it belongs to
-	 * the item's page. One request per unlock, which is once per slot per account, ever.
-	 */
-	void sendClogUnlock(String item) {
-		if (!supportsProfileSync()) return;
-		// Read on the client thread, where the kill line was recorded.
-		var recentKill = lastKcName != null && now() - lastKcAtMs <= KC_ATTRIBUTION_WINDOW_MS;
-		var kcName = recentKill ? lastKcName : null;
-		var kc = recentKill ? lastKcValue : null;
-		submit(() -> {
-			try {
-				apiClient.submitClogUnlock(item, kcName, kc);
-			} catch (Exception e) {
-				// Not retried: the next log sync still records the slot, just without the live KC.
-			}
-		});
-	}
-
-	/**
-	 * A config answered, or the site said this person is in no clan — the log and bests are the
-	 * person's, so a solo player syncs them like anyone else.
-	 */
+	/** Whether the site knows this account, including players without a clan. */
 	boolean siteKnown() {
 		return pluginConfig != null || apiClient.signedInWithoutClan();
 	}
@@ -10494,23 +9497,17 @@ public class SoulrendPlugin extends Plugin {
 	/**
 	 * Point the profile-sync state at the account that just logged in.
 	 *
-	 * <p>State is per-RSN, so switching characters swaps it rather than merging two logs. A no-op
+	 * <p>State is per-RSN, so switching characters swaps the saved bests. A no-op
 	 * when the same account logs back in, which is the common case.
 	 */
 	void loadProfileSyncState(String rsn) {
 		var key = rsn == null ? "" : rsn.trim().toLowerCase(ROOT);
 		if (key.isEmpty() || key.equals(profileSyncRsn)) return;
 		profileSyncRsn = key;
-		clogSync.reset();
 		personalBests.reset();
 		// A different character doesn't inherit this one's unsent highlights — the site files them
 		// against whoever the request authenticates as, which would now be the wrong person.
 		moments.reset();
-		clogSync.restoreState(cfgGet(accountKey(CFG_CLOG_STATE, key)));
-		// The whole-log fingerprint survives a restart: opening the collection log re-transmits
-		// everything every time, and without this each session's first open re-sent a log the site
-		// already had, byte for byte.
-		lastClogFingerprint = cfgLong(accountKey(CFG_CLOG_FINGERPRINT, key));
 		personalBests.restoreState(cfgGet(accountKey(CFG_PB_STATE, key)));
 		importRuneLitePersonalBests(key);
 	}
@@ -10616,98 +9613,7 @@ public class SoulrendPlugin extends Plugin {
 		return null;
 	}
 
-	/**
-	 * Send any collection-log pages that have changed. Runs on the shared executor's 30s tick --
-	 * no thread of our own, and nothing on the client thread.
-	 */
-	void flushClogSync() {
-		if (profileSyncRsn == null || !supportsProfileSync()) return;
-		var now = now();
-		if (!clogSync.isDue(now) || !clogBackoff.ready(now)) return;
-		var batch = clogSync.nextBatch();
-		// Rate-limited: background sync, nothing to tell the player, just wait as long as the site asked.
-		// Refused outright (a malformed page, a site that doesn't take these): dropping the batch is the
-		// only way out of an otherwise permanent 30-second retry loop.
-		if (pushBatch("Collection log pages", clogBackoff, now, () -> {
-			apiClient.submitClogPages(batch, clogSync.syncedPages());
-			return batch;
-		}, ms -> clogPushAllowedAt = now() + Math.max(ms, 1_000L), m -> clogSync.onSent(batch), m -> {
-		}) == null) return;
-		clogSync.onSent(batch);
-		cfgSet(accountKey(CFG_CLOG_STATE, profileSyncRsn),
-				clogSync.serializeState());
-	}
-
-	/**
-	 * Push a settled whole-log transmit (see {@link ClogFullSync}). Runs on the same 30s tick as the
-	 * page sync; the two are complementary — this carries every obtained item, the page route carries
-	 * the kill-count lines that only appear on a drawn page.
-	 */
-	void flushFullClogSync() {
-		if (profileSyncRsn == null || !supportsProfileSync()) return;
-		var now = now();
-		if (!clogFullSync.isDue(now) || !clogFullBackoff.ready(now)) return;
-		// The site's own rate limit, respected before the request rather than discovered by it.
-		if (now < clogPushAllowedAt) return;
-		var manual = clogFullSync.isManual();
-		int count = clogFullSync.size();
-		// Opening the log re-transmits everything, and most opens change nothing. Pushing an
-		// identical log would burn the server's cooldown and rewrite 1,700 rows to say the same
-		// thing. A deliberate press still goes, so "sync now" always means something happened.
-		var fingerprint = clogFullSync.fingerprint();
-		if (!manual && fingerprint == lastClogFingerprint) {
-			clogFullSync.onSent();
-			// Nothing to send. Said once a login — proof the sync ran and agreed with the site —
-			// and then not again: the log is re-transmitted on every open, and a line each time
-			// saying nothing happened is worse than saying nothing at all.
-			if (!autoClogReportedThisLogin) {
-				autoClogReportedThisLogin = true;
-				sendChatMessage("Collection log checked — your profile is up to date.");
-			}
-			return;
-		}
-		// Rate-limited: it said when. Wait exactly that long instead of doubling blindly, and keep the
-		// batch. Refused: the site will keep saying no, so retrying forever is just noise. Failed: kept for
-		// the next attempt; a site that's down mustn't cost them the transmit.
-		var result = pushBatch("Whole-log", clogFullBackoff, now,
-				() -> apiClient.submitClogItems(clogFullSync.snapshot()), ms -> {
-					clogPushAllowedAt = now + Math.max(ms, 1_000L);
-					clogFullSync.onSendFailed(now);
-					if (manual) sendChatMessage("Synced very recently — the site allows one sync a minute. Try again in "
-							+ secs(ms) + "s.");
-				}, m -> {
-					clogFullSync.onSent();
-					if (manual) sendChatMessage(WARN, "Couldn't sync your profile: " + m + ".");
-				}, m -> {
-					clogFullSync.onSendFailed(now);
-					if (manual) sendChatMessage(WARN, "Couldn't sync your profile: " + m + ". It'll retry on its own.");
-				});
-		manualSyncStartedAt = 0; // landed or given up on — nothing for the watchdog to complain about
-		if (result == null) return;
-		clogPushAllowedAt = now + SERVER_CLOG_COOLDOWN_MS;
-		lastClogFingerprint = fingerprint;
-		if (profileSyncRsn != null) cfgSet(accountKey(CFG_CLOG_FINGERPRINT, profileSyncRsn),
-				"" + fingerprint);
-		clogFullSync.onSent();
-		log.info("Collection log synced: {} items", count);
-		if (manual) {
-			// The game's own slot count, as the log's title shows it: the transmit can carry a few more item
-			// ids than slots (the same slot under two ids), and "497" beside a log reading 493 looked wrong.
-			int slots = client.getVarpValue(VarPlayerID.COLLECTION_COUNT);
-			sendChatMessage(Tone.DONE, "Profile synced — " + (slots > 0 ? slots : count) + " collection log slots.");
-		} else if (result.added > 0) {
-			// New slots are news: always said.
-			autoClogReportedThisLogin = true;
-			sendChatMessage(Tone.DONE, "Collection log synced — " + result.added + " new slot"
-					+ (result.added == 1 ? "" : "s") + ".");
-		} else if (!autoClogReportedThisLogin) {
-			// A push that added nothing still proves the round trip worked — once a login.
-			autoClogReportedThisLogin = true;
-			sendChatMessage("Collection log synced — nothing new.");
-		}
-	}
-
-	/** Same contract for best times. */
+	/** Push settled personal bests from the background scheduler. */
 	void flushPersonalBests() {
 		if (!config.syncPersonalBests() || !apiClient.isConfigured() || profileSyncRsn == null
 				|| !siteKnown()) return;

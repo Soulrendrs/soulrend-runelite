@@ -34,9 +34,6 @@ final class PushSocket extends WebSocketListener {
 	ScheduledFuture<?> pending;
 	int failures;
 	volatile boolean live;
-	/** The site said this socket may relay chat ({"t":"hello","relay":1}); any other closes on a message. */
-	volatile boolean relayOk;
-
 	/** Up and hearing changes, so polls may slow down. */
 	boolean live() {
 		return live;
@@ -49,13 +46,6 @@ final class PushSocket extends WebSocketListener {
 		failures = 0;
 		close();
 		if (next != null) retryIn(0);
-	}
-
-	/** The same scope on a new ticket (the site may grant now what it refused then). */
-	synchronized void renew() {
-		if (scope == null) return;
-		close();
-		retryIn(0);
 	}
 
 	void close() {
@@ -80,23 +70,16 @@ final class PushSocket extends WebSocketListener {
 	}
 
 	void connect() {
-		// Flags after the board and team (SoulrendPlugin.syncPush): ":f" chat-feed lines, ":r" panel rows,
-		// ":c<world>" the chat relay on that world.
 		String s;
 		synchronized (this) {
 			pending = null;
 			s = scope;
 		}
 		var feed = s != null && s.contains(":f");
-		var c = s == null ? null : java.util.regex.Pattern.compile(":c(\\d+)").matcher(s);
-		var relay = c != null && c.find() ? Integer.parseInt(c.group(1)) : 0;
-		var fc = s == null || s.indexOf('@') < 0 ? "" : s.substring(s.indexOf('@') + 1);
-		// rows always true: this plugin reads panel rows, and the site only sends them to one that says so
-		// (an older plugin would log each). ":r" only decides whether to connect with no board.
 		// A blocking HTTP call: on OkHttp's pool, not the one executor thread every push and flush shares
 		// (a hung site would stall all of it for the read timeout, on every retry).
 		try {
-			api.interactiveExecutor().execute(() -> withTicket(s, api.fetchPushTicket(feed, true, relay, fc)));
+			api.interactiveExecutor().execute(() -> withTicket(s, api.fetchPushTicket(feed)));
 		} catch (RejectedExecutionException e) {
 			// shutting down
 		}
@@ -114,12 +97,6 @@ final class PushSocket extends WebSocketListener {
 		}
 	}
 
-	/** A chat relay line out (only a relay ticket's socket may send; any other is closed by the site). */
-	boolean say(String json) {
-		var s = socket;
-		return live && relayOk && s != null && s.send(json);
-	}
-
 	public void onMessage(WebSocket ws, String text) {
 		JsonObject m;
 		try {
@@ -134,7 +111,6 @@ final class PushSocket extends WebSocketListener {
 				failures = 0;
 			}
 			live = true;
-			relayOk = m.has("relay");
 		}
 		onMessage.accept(m);
 	}

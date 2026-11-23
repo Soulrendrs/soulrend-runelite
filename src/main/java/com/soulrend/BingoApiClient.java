@@ -567,7 +567,6 @@ public class BingoApiClient {
 		/** The [Soulrend] tag's colour (hex, no '#'), or null for Soulrend gold. */
 		String tag;
 		/** Boards (event ids) whose chat stays out of the chatbox. */
-		List<String> off;
 	}
 
 	/** Asked like the config (the brief is built from the same answer). Null on any failure. */
@@ -585,21 +584,13 @@ public class BingoApiClient {
 	 * Null when signed out, refused, or there's no board to listen to (204) — and when the socket it
 	 * names isn't on the site this plugin already talks to, which it never dials anywhere else.
 	 */
-	PushTicket fetchPushTicket(boolean feed, boolean rows, int relayWorld, String fc) {
-		// ?flair=1 always: this plugin applies Supporter-list deltas (ChatFlairSync). ?relay=1&world=: the
-		// chat relay is on, and the world is its public room (docs/PLUGIN_WIRE.md chat-relay).
-		var path = "/api/plugin/push/ticket?flair=1" + (feed ? "&feed=1" : "") + (rows ? "&rows=1" : "")
-				// fc is "<friends chat owner>~<guest clan>", both standardised (SoulrendPlugin.fcOwner).
-				+ (relayWorld > 0 ? "&relay=1&world=" + relayWorld + "&fc=" + fc.replaceAll("[^a-z0-9_~-]", "+").replace("~", "&guest=") : "");
+	PushTicket fetchPushTicket(boolean feed) {
+		// Site board updates, feed rows and flair deltas use the same socket.
+		var path = "/api/plugin/push/ticket?flair=1&rows=1" + (feed ? "&feed=1" : "");
 		var t = isConfigured() ? getOrNull(authedRequest(clanUrl(path)).get(), PushTicket.class) : null;
 		var socket = t == null || t.url == null ? null : HttpUrl.parse(t.url.replaceFirst("^ws", "http"));
 		var site = HttpUrl.parse(getApiUrl());
 		return socket != null && site != null && socket.host().equals(site.host()) ? t : null;
-	}
-
-	/** GET /api/plugin/chat-chans: where the chatbox event chat input may post ({one, chans}). Null on failure. */
-	JsonObject chatChans() {
-		return getOrNull(authedRequest(clanUrl("/api/plugin/chat-chans")).get(), JsonObject.class);
 	}
 
 	/**
@@ -1559,31 +1550,6 @@ public class BingoApiClient {
 	}
 
 	/**
-	 * POST /api/plugin/clog — push the WHOLE collection log as a flat obtained-item list.
-	 *
-	 * The page-by-page route sends what the player has drawn; this sends everything the server
-	 * transmitted (see {@link ClogFullSync}). No page names travel: the site owns the catalogue and
-	 * maps ids onto pages, so a Jagex reshuffle is a dataset rebuild there rather than a release here.
-	 */
-	/** What a whole-log push changed, so an automatic sync can stay quiet when it changed nothing. */
-	static final class ClogPushResult {
-		int added;
-	}
-
-	ClogPushResult submitClogItems(Map<Integer, Integer> items) throws IOException {
-		if (items == null || items.isEmpty()) return new ClogPushResult();
-		var body = postJson("/api/plugin/clog", obj("items", pairs(items, "id", "q")), null, false);
-		try {
-			var result = gson.fromJson(body, ClogPushResult.class);
-			return result != null ? result : new ClogPushResult();
-		} catch (RuntimeException ignored) {
-			// An older site doesn't report counts. The push still worked; we just can't say what
-			// it did, so an automatic sync stays quiet rather than guessing.
-			return new ClogPushResult();
-		}
-	}
-
-	/**
 	 * POST /api/events/:id/start-proof — file this account's STARTING SHOT (site lib/startProof).
 	 *
 	 * The image has already been through {@link #uploadImage}; this hands over its URL plus the
@@ -1785,46 +1751,6 @@ public class BingoApiClient {
 	 */
 	void submitGuestChannel(String guestChannel) throws IOException {
 		postJson("/api/plugin/presence", obj("guestChannel", guestChannel), "Presence push failed", false);
-	}
-
-	/**
-	 * POST /api/plugin/clog with {@code unlocks} — one collection-log unlock, sent as its chat line
-	 * fires, with the most recent kill line when there was one. The site resolves the name against
-	 * its catalogue and ignores a slot it already holds. Blocking; off the client thread.
-	 */
-	void submitClogUnlock(String itemName, String kcName, Integer kc) throws IOException {
-		var unlock = obj("name", itemName);
-		if (kcName != null && kc != null) {
-			unlock.addProperty("kcName", kcName);
-			unlock.addProperty("kc", kc);
-		}
-		postJson("/api/plugin/clog", obj("unlocks", one(unlock)), "Collection log unlock push failed", false);
-	}
-
-	/**
-	 * POST /api/plugin/clog — collection-log pages the player has actually opened.
-	 *
-	 * <p>Sends ONLY obtained items, and only pages whose contents changed since the last successful
-	 * push ({@link ClogSync} owns that decision). The site already ships the full item catalogue, so
-	 * the missing half is derivable — transmitting it would double every payload to say "still
-	 * nothing here".
-	 *
-	 * <p>Idempotent: the server keys on (member, page) and replaces, so a retry or a client restart
-	 * mid-sync costs nothing. Profile data only — never scoring.
-	 */
-	void submitClogPages(List<ClogPage> pages, int syncedPages) throws IOException {
-		if (pages == null || pages.isEmpty()) return;
-		var out = new JsonArray();
-		for (var page : pages) {
-			if (page == null || page.name == null || page.name.isEmpty()) continue;
-			var items = new JsonArray();
-			for (int i = 0; i < page.itemIds.length; i++) items.add(obj("id", page.itemIds[i], "q", page.quantities[i]));
-			var p = obj("name", page.name, "obtained", page.obtained, "total", page.total, "items", items);
-			if (!page.counts.isEmpty()) p.add("counts", gson.toJsonTree(page.counts));
-			out.add(p);
-		}
-		// How much of the log this account has opened at all — drives the site's "68% synced" note.
-		if (out.size() > 0) postJson("/api/plugin/clog", obj("pages", out, "syncedPages", syncedPages), "Collection log push failed", true);
 	}
 
 	/**
