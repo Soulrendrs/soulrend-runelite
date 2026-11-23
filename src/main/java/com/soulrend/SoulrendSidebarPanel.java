@@ -1034,6 +1034,17 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		shownAccountRow = row;
 		// Shown whenever this computer is signed in — it is also where Sign out lives.
 		accountRowPanel.setVisible(!api.needsSignIn());
+		if (BingoApiClient.CANONICAL_SITE.equals(BingoApiClient.site()) &&
+			(row == null || row.state == AccountRow.State.TRACKING)) {
+			String website = connectedWebsiteUser == null ? "Soulrend account connected"
+				: "Soulrend account: <b>" + esc(connectedWebsiteUser) + "</b>";
+			String device = connectedDeviceName == null ? "RuneLite device" : connectedDeviceName;
+			setAccountLabel(website, device + " is authorized to use your Soulrend website account.", false);
+			accountLink.setVisible(false);
+			if (changed && !accountActionInFlight) setAccountStatus("");
+			redraw(capH(accountRowPanel));
+			return;
+		}
 		if (row == null) {
 			setAccountLabel(connectedWebsiteUser == null ? "Completing Soulrend connection…" :
 				"Connected as <b>" + esc(connectedWebsiteUser) + "</b>" +
@@ -1252,7 +1263,8 @@ public class SoulrendSidebarPanel extends PluginPanel {
         tabStrip.setVisible(false);
         String token = api.playerToken;
         String character = data.myRsn();
-        if (!Objects.equals(token, panelToken) || !Objects.equals(character, panelCharacter)) {
+        boolean tokenChanged = !Objects.equals(token, panelToken);
+        if (tokenChanged || !Objects.equals(character, panelCharacter)) {
             generation++;
             reading = false;
             selectedEvent = 0;
@@ -1261,12 +1273,19 @@ public class SoulrendSidebarPanel extends PluginPanel {
             panelCharacter = character;
             lastBingoRenderKey = null;
             observedRows.clear();
-            connectedWebsiteUser = null;
+            if (tokenChanged) {
+                connectedWebsiteUser = null;
+                connectedDeviceName = null;
+            }
             renderLoading();
         }
         refreshSignInRow();
         refreshAccountRow();
         if (api.needsSignIn()) { setContent(firstRunCard()); return; }
+        if (character == null) {
+            setContent(boardText("Enter the game to see bingos for your RuneScape character."));
+            return;
+        }
         if (api.isAccountPaused()) { setContent(boardText("Paused for this character")); return; }
         if (reading || (!manual && System.currentTimeMillis() < nextRead)) return;
         long version = ++generation;
@@ -1281,6 +1300,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
                 reading = false;
                 if (!onScreen || !Objects.equals(token, api.playerToken) || !Objects.equals(character, data.myRsn()) || api.isAccountPaused()) return;
                 var rows = column();
+                rows.add(boardText("RuneScape character: " + character));
                 boolean failed = list == null || list.events == null || (event != null && board == null);
                 retrySeconds = failed ? Math.min(240, retrySeconds * 2) : 30;
                 nextRead = System.currentTimeMillis() + retrySeconds * 1000L;
@@ -1299,7 +1319,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
                 else {
                     connectedWebsiteUser = list.username;
                     refreshAccountRow();
-                    if (list.events.isEmpty()) rows.add(boardText("No eligible bingos"));
+                    if (list.events.isEmpty()) rows.add(boardText("No eligible bingos for this character."));
                     for (var e : list.events) {
                         if (e.id == selectedEvent) {
                             rows.add(boardText(e.name, BOLD, BRAND_ORANGE));
@@ -1314,7 +1334,6 @@ public class SoulrendSidebarPanel extends PluginPanel {
                         }
                         rows.add(boardText(("active".equals(e.status) ? "Active" : "Upcoming")
                             + (e.team == null ? "" : " · " + e.team)));
-                        if (e.characters != null) rows.add(boardText("Characters: " + String.join(", ", e.characters)));
                     }
                     if (event != null) {
                         rows.add(Box.createVerticalStrut(10));
