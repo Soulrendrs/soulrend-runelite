@@ -408,7 +408,21 @@ public class BingoApiClient {
             .addQueryParameter("character", character).build().toString();
     }
 
-    int uploadEvidence(PendingSubmissionStore.PendingSubmission proof, String token, byte[] image) throws IOException {
+    static final class EvidenceUpload {
+        final int httpStatus;
+        final String proofStatus;
+
+        EvidenceUpload(int httpStatus, String proofStatus) {
+            this.httpStatus = httpStatus;
+            this.proofStatus = proofStatus;
+        }
+    }
+
+    private static final class EvidenceReceipt {
+        String status;
+    }
+
+    EvidenceUpload uploadEvidence(PendingSubmissionStore.PendingSubmission proof, String token, byte[] image) throws IOException {
         var body = new MultipartBody.Builder().setType(MultipartBody.FORM)
             .addFormDataPart("tile", String.valueOf(proof.tileId))
             .addFormDataPart("capture_id", proof.runeliteCaptureId)
@@ -424,7 +438,18 @@ public class BingoApiClient {
         body.addFormDataPart("image", "evidence.jpg", RequestBody.create(MediaType.parse("image/jpeg"), image));
         return execute(httpClient, plainRequest(evidenceUrl(proof.eventId, proof.capturedRsn))
             .header("Authorization", "Bearer " + token).post(body.build()),
-            (reply, data) -> reply.code());
+            (reply, data) -> {
+                String proofStatus = null;
+                if (reply.isSuccessful()) {
+                    try {
+                        var receipt = gson.fromJson(data, EvidenceReceipt.class);
+                        if (receipt != null) proofStatus = receipt.status;
+                    } catch (JsonParseException ignored) {
+                        // The HTTP receipt still acknowledges the upload.
+                    }
+                }
+                return new EvidenceUpload(reply.code(), proofStatus);
+            });
     }
 
     /** One account inbox across the website and RuneLite; no clan routes or gameplay actions. */

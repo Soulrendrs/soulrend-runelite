@@ -58,6 +58,38 @@ public class ApiClientHttpTest
 	}
 
     @Test
+    public void evidenceUploadReadsTheServerDecisionAndKeepsTheHttpStatus() throws IOException {
+        var client = client();
+        var proof = new PendingSubmissionStore.PendingSubmission();
+        proof.runeliteCaptureId = "123e4567-e89b-12d3-a456-426614174000";
+        proof.capturedRsn = "Player";
+        proof.eventId = 12;
+        proof.tileId = 34;
+        proof.evidenceKind = "drop";
+        proof.evidenceSource = "npc";
+        proof.evidenceId = 995;
+        proof.amount = 5;
+        reply = "{\"proof_id\":1,\"status\":\"approved\"}";
+        var accepted = client.uploadEvidence(proof, "token", new byte[]{1});
+        assertEquals(200, accepted.httpStatus);
+        assertEquals("approved", accepted.proofStatus);
+        assertEquals("/api/runelite/v1/events/12/evidence", seen.get(0).url().encodedPath());
+        assertFalse(bodies.get(0).contains("approved"));
+
+        code = 429;
+        reply = "{\"status\":\"approved\"}";
+        var limited = client.uploadEvidence(proof, "token", new byte[]{1});
+        assertEquals(429, limited.httpStatus);
+        assertNull(limited.proofStatus);
+
+        code = 200;
+        reply = "not JSON";
+        var unknown = client.uploadEvidence(proof, "token", new byte[]{1});
+        assertEquals(200, unknown.httpStatus);
+        assertNull(unknown.proofStatus);
+    }
+
+    @Test
     public void devicePairingUsesOnlyFirstPartyRouteAndNonSecretMetadata() {
         BingoApiClient c = client();
         reply = "{\"device_code\":\"secret\",\"user_code\":\"ABCD-EFGH\"}";
