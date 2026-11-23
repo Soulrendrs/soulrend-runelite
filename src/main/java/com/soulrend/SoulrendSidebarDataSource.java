@@ -102,6 +102,11 @@ public class SoulrendSidebarDataSource {
 		withPlugin(p -> p.toggleBannerSound(clip));
 	}
 
+	/** Preview one bundled objective sound using the same player-configured volume. */
+	void previewBingoCue(BannerSoundService.BingoCue cue) {
+		withPlugin(p -> p.bannerSound.previewBingoCue(cue));
+	}
+
 	/** Copy the sounds folder's path — hub releases may not open a file manager (see Clipboards). */
 	void copyBannerSoundsPath() {
 		withPlugin(SoulrendPlugin::copyBannerSoundsPath);
