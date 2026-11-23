@@ -1293,7 +1293,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
                 reading = false;
                 if (!onScreen || !Objects.equals(token, api.playerToken) || !Objects.equals(character, data.myRsn()) || api.isAccountPaused()) return;
                 var rows = column();
-                rows.add(boardText("RuneScape character: " + character));
+                rows.add(boardText("Playing as " + character, SMALL, BINGO_TEXT));
                 boolean failed = list == null || list.events == null || (event != null && board == null);
                 retrySeconds = failed ? Math.min(240, retrySeconds * 2) : 30;
                 nextRead = System.currentTimeMillis() + retrySeconds * 1000L;
@@ -1332,10 +1332,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
                         }
                     }
                     if (event != null) {
-                        rows.add(Box.createVerticalStrut(10));
-                        rows.add(fullWidthButton("View on website", "Open this bingo on Soulrend",
-                            () -> LinkBrowser.browse(BingoApiClient.CANONICAL_SITE + "/events/" + event.id + "/")));
-                        rows.add(gap(6));
+                        rows.add(Box.createVerticalStrut(6));
                         if (board == null) rows.add(boardText("Board unavailable"));
                         else {
                             if (board.progress != null || board.captain != null) {
@@ -1347,17 +1344,6 @@ public class SoulrendSidebarPanel extends PluginPanel {
                                 }
                                 if (board.captain != null) overview.add(boardText("Captain: " + board.captain, SMALL, BINGO_TEXT));
                                 rows.add(overview);
-                            }
-                            if (board.standings != null && !board.standings.isEmpty()) {
-                                rows.add(Box.createVerticalStrut(8));
-                                rows.add(boardText("Standings", BOLD, WHITE));
-                                for (var rank : board.standings) {
-                                    var standing = bingoCard(rank.rank == 1 ? BINGO_GOLD : BINGO_PURPLE);
-                                    standing.add(boardText("#" + rank.rank + "  " + rank.team, BOLD, WHITE));
-                                    standing.add(boardText(rank.points + " pts · " + rank.completed + " completed", SMALL, BINGO_TEXT));
-                                    rows.add(standing);
-                                    rows.add(gap(3));
-                                }
                             }
                             if (board.tiles != null) {
                                 var available = board.tiles.stream()
@@ -1375,8 +1361,9 @@ public class SoulrendSidebarPanel extends PluginPanel {
                                         : "rejected".equals(tile.status) ? BINGO_RED : BINGO_PURPLE;
                                     var card = bingoCard(accent);
                                     card.add(boardText(tile.name, BOLD, WHITE));
-                                    String status = tile.credited ? "Completed" : "pending".equals(tile.status) ? "In review"
-                                        : "rejected".equals(tile.status) ? "Rejected" : "Available";
+                                    String status = tile.credited ? "Completed" : "pending".equals(tile.status) ? "Pending approval"
+                                        : "rejected".equals(tile.status) ? "Rejected"
+                                        : tile.value_amount != null && tile.value_amount > 0 ? "In progress" : "Available";
                                     card.add(boardText(status, SMALL, accent));
                                     if (tile.target != null) {
                                         String scope = "solo".equals(tile.scope) ? "Solo" : "Team";
@@ -1398,6 +1385,9 @@ public class SoulrendSidebarPanel extends PluginPanel {
                                 }
                             }
                         }
+                        rows.add(gap(10));
+                        rows.add(fullWidthButton("Open event on website", "Open the full event, standings and administration on Soulrend",
+                            () -> LinkBrowser.browse(BingoApiClient.CANONICAL_SITE + "/events/" + event.id + "/")));
                     }
                 }
                 refreshObservedGains();
