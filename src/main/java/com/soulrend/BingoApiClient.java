@@ -342,6 +342,13 @@ public class BingoApiClient {
     static final class CompletionFeed {
         long participation;
         List<ConfirmedTile> completed;
+        List<ProgressTile> progress;
+    }
+    static final class ProgressTile {
+        int id;
+        long revision, value, target, quantity;
+        String name, contributor, unit, scope;
+        boolean self;
     }
     static final class ConfirmedTile {
         int id;
@@ -363,6 +370,7 @@ public class BingoApiClient {
     }
     static final class BoardTile {
         String name, status, value, target, scope, objective_type, metric;
+        Long value_amount, target_amount;
         boolean credited;
         String label() {
             if ("hidden".equals(status)) return "Hidden tile";

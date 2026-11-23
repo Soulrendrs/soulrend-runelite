@@ -1315,18 +1315,21 @@ public class SoulrendSidebarPanel extends PluginPanel {
                     if (list.events.isEmpty()) rows.add(boardText("No eligible bingos for this character."));
                     for (var e : list.events) {
                         if (e.id == selectedEvent) {
-                            rows.add(boardText(e.name, BOLD, BRAND_ORANGE));
+                            var hero = bingoCard(BINGO_GOLD);
+                            hero.add(boardText("active".equals(e.status) ? "LIVE BINGO" : "UPCOMING BINGO", SMALL, BINGO_GOLD));
+                            hero.add(boardText(e.name, BOLD, WHITE));
+                            if (e.team != null) hero.add(boardText(e.team, SMALL, BINGO_TEXT));
+                            rows.add(hero);
                         } else {
-                            rows.add(fullWidthButton(Ui.plainText(e.name), Ui.plainText(e.name), () -> {
-                                if (reading) return;
-                                selectedEvent = e.id;
-                                observedRows.clear();
-                                renderLoading();
-                                readBingos(true);
-                            }));
+                            rows.add(fullWidthButton(Ui.plainText(e.name),
+                                "active".equals(e.status) ? "Switch to live bingo" : "View upcoming bingo", () -> {
+                                    if (reading) return;
+                                    selectedEvent = e.id;
+                                    observedRows.clear();
+                                    renderLoading();
+                                    readBingos(true);
+                                }));
                         }
-                        rows.add(boardText(("active".equals(e.status) ? "Active" : "Upcoming")
-                            + (e.team == null ? "" : " · " + e.team)));
                     }
                     if (event != null) {
                         rows.add(Box.createVerticalStrut(10));
@@ -1335,17 +1338,25 @@ public class SoulrendSidebarPanel extends PluginPanel {
                         rows.add(gap(6));
                         if (board == null) rows.add(boardText("Board unavailable"));
                         else {
-                            if (board.captain != null) rows.add(boardText("Captain: " + board.captain));
-                            if (board.progress != null) {
-                                rows.add(boardText("Team progress: " + board.progress.completed
-                                    + "/" + board.progress.visible + " visible objectives credited"));
+                            if (board.progress != null || board.captain != null) {
+                                var overview = bingoCard(BINGO_PURPLE);
+                                if (board.progress != null) {
+                                    overview.add(boardText(board.progress.completed + " / " + board.progress.visible
+                                        + " objectives complete", BOLD, WHITE));
+                                    overview.add(bingoMeter(board.progress.completed, board.progress.visible, BINGO_GREEN));
+                                }
+                                if (board.captain != null) overview.add(boardText("Captain: " + board.captain, SMALL, BINGO_TEXT));
+                                rows.add(overview);
                             }
                             if (board.standings != null && !board.standings.isEmpty()) {
                                 rows.add(Box.createVerticalStrut(8));
                                 rows.add(boardText("Standings", BOLD, WHITE));
                                 for (var rank : board.standings) {
-                                    rows.add(boardText(rank.rank + ". " + rank.team + " · "
-                                        + rank.points + " pts · " + rank.completed + " objectives"));
+                                    var standing = bingoCard(rank.rank == 1 ? BINGO_GOLD : BINGO_PURPLE);
+                                    standing.add(boardText("#" + rank.rank + "  " + rank.team, BOLD, WHITE));
+                                    standing.add(boardText(rank.points + " pts · " + rank.completed + " completed", SMALL, BINGO_TEXT));
+                                    rows.add(standing);
+                                    rows.add(gap(3));
                                 }
                             }
                             if (board.tiles != null) {
@@ -1360,11 +1371,21 @@ public class SoulrendSidebarPanel extends PluginPanel {
                                     && event.characters != null && event.characters.stream().anyMatch(rsn -> Rsn.same(rsn, character));
                                 for (var tile : available) {
                                     rows.add(Box.createVerticalStrut(4));
-                                    JLabel card = boardText(tile.label(), REGULAR, WHITE);
-                                    card.setBackground(DARKER_GRAY_COLOR);
-                                    card.setOpaque(true);
-                                    card.setBorder(createEmptyBorder(6, 8, 6, 8));
-                                    rows.add(capH(card));
+                                    var accent = tile.credited ? BINGO_GREEN : "pending".equals(tile.status) ? BINGO_GOLD
+                                        : "rejected".equals(tile.status) ? BINGO_RED : BINGO_PURPLE;
+                                    var card = bingoCard(accent);
+                                    card.add(boardText(tile.name, BOLD, WHITE));
+                                    String status = tile.credited ? "Completed" : "pending".equals(tile.status) ? "In review"
+                                        : "rejected".equals(tile.status) ? "Rejected" : "Available";
+                                    card.add(boardText(status, SMALL, accent));
+                                    if (tile.target != null) {
+                                        String scope = "solo".equals(tile.scope) ? "Solo" : "Team";
+                                        card.add(boardText(scope + " · " + tile.value + " / " + tile.target, SMALL, BINGO_TEXT));
+                                        if (tile.value_amount != null && tile.target_amount != null) {
+                                            card.add(bingoMeter(tile.value_amount, tile.target_amount, accent));
+                                        }
+                                    }
+                                    rows.add(card);
                                     if (linked && tile.metric != null && ("skill_xp".equals(tile.objective_type)
                                         || "boss_kc".equals(tile.objective_type))) {
                                         JLabel observed = small("", MUTED);
@@ -1372,7 +1393,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
                                         observed.setToolTipText("Observed on this client this session. Official credit comes from Wise Old Man.");
                                         observed.setVisible(false);
                                         observedRows.put(observed, tile);
-                                        rows.add(observed);
+                                        card.add(observed);
                                     }
                                 }
                             }
@@ -1383,6 +1404,32 @@ public class SoulrendSidebarPanel extends PluginPanel {
                 setContent(rows);
             });
         });
+    }
+
+    private static final Color BINGO_PURPLE = new Color(0xa981ed);
+    private static final Color BINGO_GOLD = new Color(0xd9ae65);
+    private static final Color BINGO_GREEN = new Color(0xa0e7bc);
+    private static final Color BINGO_RED = new Color(0xf09192);
+    private static final Color BINGO_TEXT = new Color(0xd7caeb);
+
+    private static JPanel bingoCard(Color accent) {
+        var card = column();
+        card.setOpaque(true);
+        card.setBackground(new Color(0x20172c));
+        card.setBorder(createCompoundBorder(createMatteBorder(1, 3, 1, 1, accent),
+            createEmptyBorder(7, 8, 7, 8)));
+        return capH(card);
+    }
+
+    private static JProgressBar bingoMeter(long value, long target, Color accent) {
+        var meter = new JProgressBar(0, 100);
+        meter.setValue(target > 0 ? (int) Math.min(100, Math.max(0, 100.0 * value / target)) : 0);
+        meter.setForeground(accent);
+        meter.setBackground(new Color(0x392a4a));
+        meter.setBorderPainted(false);
+        meter.setPreferredSize(new Dimension(0, 5));
+        meter.getAccessibleContext().setAccessibleName(value + " of " + target);
+        return capH(meter);
     }
 
     private void refreshObservedGains() {

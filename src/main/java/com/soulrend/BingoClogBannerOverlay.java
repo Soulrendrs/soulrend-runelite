@@ -54,6 +54,7 @@ public class BingoClogBannerOverlay extends Overlay {
 
 	static final Color ORANGE = new Color(255, 152, 31);
 
+	final BingoBannerQueue bingoCards = new BingoBannerQueue();
 	final ConcurrentLinkedQueue<String[]> queue = new ConcurrentLinkedQueue<>();
 	final BufferedImage background;
 	final Font headerFont;
@@ -109,6 +110,7 @@ public class BingoClogBannerOverlay extends Overlay {
 
 	/** Called on the client thread when the signed-in bingo scope changes. */
 	void removeBanners(String title) {
+		if (BingoCompletionMonitor.TITLE.equals(title)) bingoCards.clear();
 		queue.removeIf(banner -> title.equals(banner[0]));
 		if (active != null && title.equals(active[0])) {
 			active = null;
@@ -120,7 +122,7 @@ public class BingoClogBannerOverlay extends Overlay {
 	final AtomicInteger folded = new AtomicInteger();
 
 	public Dimension render(Graphics2D g) {
-		if (background == null || SoulrendPlugin.capturing) return null;
+		if (SoulrendPlugin.capturing) return null;
 
 		var now = System.currentTimeMillis();
 		var hEnd = H_EXPAND_MS;
@@ -130,6 +132,19 @@ public class BingoClogBannerOverlay extends Overlay {
 		var total = vCollapseEnd + H_COLLAPSE_MS;
 
 		if (active == null || now - startedAt >= total) {
+			var bingo = bingoCards.current(now);
+			if (bingo != null) {
+				var cardGraphics = (Graphics2D) g.create();
+				try {
+					var offset = dodge(BingoCompletionCard.WIDTH, BingoCompletionCard.HEIGHT);
+					if (offset != null) cardGraphics.translate(offset.x, offset.y);
+					BingoCompletionCard.paint(cardGraphics, bingo);
+				} finally {
+					cardGraphics.dispose();
+				}
+				return new Dimension(BingoCompletionCard.WIDTH, BingoCompletionCard.HEIGHT);
+			}
+			if (background == null) return null;
 			active = queue.poll();
 			int n = active == null ? folded.getAndSet(0) : 0;
 			if (n > 0) active = new String[]{"Soulrend", "+" + n + " more", "See chat and the panel"};
@@ -167,7 +182,7 @@ public class BingoClogBannerOverlay extends Overlay {
 		var g2 = (Graphics2D) g.create();
 		// Glide to the dodge spot (and back) instead of jumping when the popup comes or goes; a banner
 		// that starts with the popup already up starts there.
-		var off = dodge();
+		var off = dodge(BASE_W, BASE_H);
 		float tx = off == null ? 0 : off.x, ty = off == null ? 0 : off.y;
 		if (e < 50 || lastFrame == 0) { ox = tx; oy = ty; }
 		else {
@@ -214,17 +229,17 @@ public class BingoClogBannerOverlay extends Overlay {
 
 	/** The game's collection log popup (restyled or not) sits top centre too: when it would cover the
 	 *  banner, the banner goes left of it (the right is minimap and orbs), else right, else under it. */
-	Point dodge() {
+	Point dodge(int width, int height) {
 		var w = client.getWidget(InterfaceID.NotificationDisplay.CONTENT);
 		var me = getBounds();
 		if (w == null || w.isHidden() || me == null) return null;
 		var b = w.getBounds();
 		// Restyle plugins draw it about twice the widget's size around the same centre: keep clear of that.
 		var p = new Rectangle(b.x - b.width / 2, b.y, b.width * 2, b.height * 2);
-		if (!p.intersects(me.x, me.y, BASE_W, BASE_H)) return null;
+		if (!p.intersects(me.x, me.y, width, height)) return null;
 		int gap = 12, vx = client.getViewportXOffset(), right = p.x + p.width + gap;
-		if (p.x - gap - vx >= BASE_W) return new Point(p.x - gap - BASE_W - me.x, p.y - me.y);
-		if (vx + client.getViewportWidth() - right >= BASE_W) return new Point(right - me.x, p.y - me.y);
+		if (p.x - gap - vx >= width) return new Point(p.x - gap - width - me.x, p.y - me.y);
+		if (vx + client.getViewportWidth() - right >= width) return new Point(right - me.x, p.y - me.y);
 		return new Point(0, p.y + p.height + gap - me.y);
 	}
 

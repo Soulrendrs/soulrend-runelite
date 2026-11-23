@@ -3,6 +3,7 @@ package com.soulrend;
 import com.soulrend.BingoApiClient.CompletionFeed;
 import com.soulrend.BingoApiClient.ConfirmedTile;
 import com.soulrend.BingoApiClient.EventSummary;
+import com.soulrend.BingoApiClient.ProgressTile;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -14,7 +15,7 @@ import java.util.Set;
 
 /** Diffs the signed-in player's team board, independently of automatic evidence capture. */
 final class BingoCompletionMonitor {
-    private static final String TITLE = "Soulrend Bingo";
+    static final String TITLE = "Soulrend Bingo";
     private static final int MAX_BOARDS = 5;
 
     private static final class Scope {
@@ -30,6 +31,8 @@ final class BingoCompletionMonitor {
     private static final class Board {
         final long participation;
         final Set<Integer> seen = new HashSet<>();
+        final Map<Integer, ProgressTile> progress = new HashMap<>();
+        boolean progressInitialized;
 
         Board(long participation) {
             this.participation = participation;
@@ -87,6 +90,23 @@ final class BingoCompletionMonitor {
         return added;
     }
 
+    synchronized List<ProgressTile> observeProgress(int event, CompletionFeed feed) {
+        var board = boards.get(event);
+        if (board == null || feed == null || board.participation != feed.participation) return List.of();
+        var updated = new ArrayList<ProgressTile>();
+        if (feed.progress != null) for (var tile : feed.progress) {
+            if (tile == null || tile.id <= 0 || tile.revision <= 0 || tile.value <= 0 || tile.target <= 0
+                || tile.name == null || tile.name.isBlank()) continue;
+            var before = board.progress.get(tile.id);
+            if (before != null && (tile.revision < before.revision
+                || tile.revision == before.revision && tile.value == before.value)) continue;
+            board.progress.put(tile.id, tile);
+            if (board.progressInitialized) updated.add(tile);
+        }
+        board.progressInitialized = true;
+        return updated;
+    }
+
     void poll(List<EventSummary> events, String token, String session, String character) {
         if (!current(session, character)) return;
         useScope(session, character);
@@ -102,16 +122,19 @@ final class BingoCompletionMonitor {
             var feed = plugin.apiClient.bingoCompletions(event.id, token, character);
             if (!current(session, character)) return;
             final List<ConfirmedTile> additions;
+            final List<ProgressTile> progress;
             synchronized (this) {
                 if (scope != origin) return;
                 additions = observe(event.id, feed);
+                progress = observeProgress(event.id, feed);
             }
-            if (!additions.isEmpty()) plugin.clientThread.invokeLater(() -> {
+            if (!additions.isEmpty() || !progress.isEmpty()) plugin.clientThread.invokeLater(() -> {
                 if (!current(session, character) || !Rsn.same(character, plugin.getLocalPlayerName())) return;
                 synchronized (this) {
                     if (scope != origin) return;
                 }
-                for (var tile : additions) show(tile);
+                for (var tile : additions) show(event, tile);
+                for (var tile : progress) showProgress(event, tile);
             });
         }
         synchronized (this) {
@@ -124,12 +147,29 @@ final class BingoCompletionMonitor {
             && session.equals(DiskFiles.fingerprint(plugin.apiClient.playerToken));
     }
 
-    private void show(ConfirmedTile tile) {
-        if (tile.self ? !plugin.config.selfTileBanner() : !plugin.config.teamCompletionBanner()) return;
-        var heading = tile.self ? "You completed a tile!" : "Team tile complete!";
-        var detail = !tile.self && tile.contributor != null && !tile.contributor.isBlank()
-            ? tile.contributor + ": " + tile.name : tile.name;
-        if (plugin.clogBanner.show(TITLE, heading, detail)) plugin.playBannerSound();
-        plugin.sendChatMessage(ChatPalette.Tone.DONE, heading + " " + detail);
+    private boolean permits(boolean self) {
+        return self ? plugin.config.selfTileBanner() : plugin.config.teamCompletionBanner();
+    }
+
+    private void show(EventSummary event, ConfirmedTile tile) {
+        if (!permits(tile.self)) return;
+        var contributor = tile.contributor == null || tile.contributor.isBlank()
+            ? "Team completion" : "By: " + tile.contributor;
+        var card = new BingoBannerQueue.Card(event.id + ":" + tile.id, tile.name,
+            event.team == null ? "Unassigned" : event.team, contributor, true);
+        if (plugin.clogBanner.bingoCards.offer(card)) plugin.playBannerSound();
+        plugin.sendChatMessage(ChatPalette.Tone.DONE, "Bingooooo! " + tile.name + " · " + contributor);
+    }
+
+    private void showProgress(EventSummary event, ProgressTile tile) {
+        if (!permits(tile.self)) return;
+        var progress = String.format(Locale.ROOT, "%,d / %,d %s", tile.value, tile.target,
+            "kills".equals(tile.unit) ? "kills" : "items");
+        var contributor = tile.contributor == null ? "Progress recorded" : "Latest: " + tile.contributor;
+        if (tile.quantity > 0) contributor += "  +" + tile.quantity;
+        if ("solo".equals(tile.scope)) contributor += "  ·  Best solo";
+        plugin.clogBanner.bingoCards.offer(new BingoBannerQueue.Card(event.id + ":" + tile.id,
+            progress + "  ·  " + tile.name, event.team == null ? "Unassigned" : event.team,
+            contributor, false));
     }
 }
