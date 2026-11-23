@@ -6,6 +6,10 @@ Official RuneLite companion for the [Soulrend Bingo Portal](https://soulrend.eve
 
 > **Status: development foundation.** The plugin has not been released, tested against production, or submitted to the RuneLite Plugin Hub. Do not install a development build expecting working Soulrend authentication or proof submission.
 
+## Bingo completion popups
+
+RuneLite shows confirmed completions for your active team boards in the in-game banner. Use **My tile popups** and **Team completion popups** in Soulrend's Bingo settings to control them. The first board read after sign-in establishes a silent baseline. Approval and official stat credit are picked up on the next background poll.
+
 ## Architecture
 
 The RuneLite plugin is a client for Soulrend's existing Django API. Event eligibility, board progression, proof approval, and official Wise Old Man XP/KC credit remain server-authoritative.

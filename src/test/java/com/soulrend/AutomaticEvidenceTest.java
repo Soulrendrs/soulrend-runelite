@@ -1,9 +1,12 @@
 package com.soulrend;
 
+import net.runelite.client.game.ItemStack;
 import org.junit.Test;
 
+import java.util.List;
 import java.util.Map;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -35,6 +38,26 @@ public class AutomaticEvidenceTest {
         org.junit.Assert.assertNull(AutomaticEvidence.gatheringSkill(Map.of("fishing", 7), 8));
         org.junit.Assert.assertNull(AutomaticEvidence.gatheringSkill(Map.of("fishing", 8, "mining", 8), 8));
         org.junit.Assert.assertEquals("fishing", AutomaticEvidence.gatheringSkill(Map.of("fishing", 8), 8));
+    }
+
+    @Test
+    public void notedStacksAlsoMatchTheirBaseItemWithoutLosingExactIds() {
+        var quantities = AutomaticEvidence.lootQuantities(List.of(
+            new ItemStack(537, 3), new ItemStack(536, 2), new ItemStack(537, 0)),
+            id -> id == 537 ? 536 : id);
+        assertEquals(Map.of(536, 5, 537, 3), quantities);
+    }
+
+    @Test
+    public void firstCompletionsCanShareATickAndMixedBatchesStayAmbiguous() {
+        var tasks = List.of(
+            new SoulrendPlugin.PendingCaTask(CombatAchievementTier.EASY, "Example"),
+            new SoulrendPlugin.PendingCaTask(CombatAchievementTier.HARD, "Another Task"),
+            new SoulrendPlugin.PendingCaTask(CombatAchievementTier.HARD, "another task"));
+        assertEquals(List.of("example", "another task"), AutomaticEvidence.confirmedCombatTasks(tasks, 4));
+        assertEquals(List.of("example", "another task"), AutomaticEvidence.confirmedCombatTasks(tasks, 0));
+        assertEquals(List.of(), AutomaticEvidence.confirmedCombatTasks(tasks, 3));
+        assertEquals(List.of(), AutomaticEvidence.confirmedCombatTasks(tasks, -1));
     }
 
     @Test

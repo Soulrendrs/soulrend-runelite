@@ -338,6 +338,15 @@ public class BingoApiClient {
         String name, status, team;
         List<String> characters;
     }
+    static final class CompletionFeed {
+        long participation;
+        List<ConfirmedTile> completed;
+    }
+    static final class ConfirmedTile {
+        int id;
+        String name, contributor;
+        boolean self;
+    }
     static final class TeamBoard {
         String captain;
         List<BoardTile> tiles;
@@ -377,6 +386,12 @@ public class BingoApiClient {
             lastBingoHttpStatus = 0; // Offline/invalid response is not a revoked session.
             return null;
         }
+    }
+
+    CompletionFeed bingoCompletions(int eventId, String token, String character) {
+        var url = HttpUrl.parse(authUrl("/api/runelite/v1/events/" + eventId + "/board")).newBuilder()
+            .addQueryParameter("view", "completions").addQueryParameter("character", character).build().toString();
+        return getOrNull(plainRequest(url).header("Authorization", "Bearer " + token).get(), CompletionFeed.class);
     }
 
     static final class EvidenceRules {

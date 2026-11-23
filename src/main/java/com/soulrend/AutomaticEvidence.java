@@ -8,12 +8,14 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.IntUnaryOperator;
 
 /** Reuses the gameplay signals, next game frame, and durable proof store from Anvil. */
 final class AutomaticEvidence {
@@ -102,8 +104,9 @@ final class AutomaticEvidence {
     }
 
     void sync() {
-        if (!enabled()) {
-            clear();
+        if (!enabled()) clear();
+        if (!enabled() && !plugin.bingoCompletions.enabled()) {
+            plugin.bingoCompletions.clear();
             return;
         }
         if (!syncing.compareAndSet(false, true)) return;
@@ -119,11 +122,21 @@ final class AutomaticEvidence {
         String character = plugin.apiClient.getCurrentRsn();
         if (token == null || token.isBlank() || character == null || character.isBlank()) {
             clear();
+            plugin.bingoCompletions.clear();
             return;
         }
         String session = DiskFiles.fingerprint(token);
+        if (plugin.bingoCompletions.enabled()) plugin.bingoCompletions.useScope(session, character);
+        else plugin.bingoCompletions.clear();
         var events = plugin.apiClient.bingoRead("", token, character, BingoApiClient.EventList.class);
         if (events == null || events.events == null) return;
+        if (plugin.bingoCompletions.enabled()) {
+            plugin.bingoCompletions.poll(events.events, token, session, character);
+        }
+        if (!sameSession(session, character)) {
+            clear();
+            return;
+        }
         var matches = new ArrayList<Match>();
         var reachable = new HashSet<Integer>();
         var considered = 0;
@@ -192,13 +205,10 @@ final class AutomaticEvidence {
     void drop(Collection<ItemStack> items, String source) {
         var snapshot = ready();
         if (snapshot == null || items == null || items.isEmpty()) return;
-        var quantities = new HashMap<Integer, Integer>();
-        for (var item : items) {
-            if (item.getId() > 0 && item.getQuantity() > 0) {
-                quantities.merge(item.getId(), item.getQuantity(),
-                    (a, b) -> (int) Math.min(Integer.MAX_VALUE, (long) a + b));
-            }
-        }
+        var quantities = lootQuantities(items, id -> {
+            var definition = plugin.itemManager.getItemComposition(id);
+            return definition != null && definition.getNote() != -1 ? definition.getLinkedNoteId() : id;
+        });
         var captures = new ArrayList<PendingSubmission>();
         var captureId = UUID.randomUUID().toString();
         for (var match : snapshot.matches) {
@@ -209,6 +219,24 @@ final class AutomaticEvidence {
             }
         }
         capture(snapshot, captures);
+    }
+
+    /** Retain exact-ID rules while also crediting the base ID of a noted drop. */
+    static Map<Integer, Integer> lootQuantities(Collection<ItemStack> items, IntUnaryOperator unnote) {
+        var counts = new HashMap<Integer, Integer>();
+        for (var item : items) {
+            int id = item.getId();
+            if (id <= 0 || item.getQuantity() <= 0) continue;
+            addQuantity(counts, id, item.getQuantity());
+            int base = unnote.applyAsInt(id);
+            if (base > 0 && base != id) addQuantity(counts, base, item.getQuantity());
+        }
+        return counts;
+    }
+
+    private static void addQuantity(Map<Integer, Integer> counts, int id, int quantity) {
+        counts.merge(id, quantity, (first, second) ->
+            (int) Math.min(Integer.MAX_VALUE, (long) first + second));
     }
 
     void npcKill(int npcId) {
@@ -286,18 +314,27 @@ final class AutomaticEvidence {
         capture(snapshot, captures);
     }
 
+    /** A positive aggregate can identify a full batch only when every distinct task accounts for it. */
+    static List<String> confirmedCombatTasks(List<SoulrendPlugin.PendingCaTask> tasks, int pointGain) {
+        if (pointGain < 0) return List.of();
+        var unique = new LinkedHashMap<String, CombatAchievementTier>();
+        for (var task : tasks) {
+            if (task.task == null || task.task.isBlank() || task.tier == null) continue;
+            var name = task.task.strip().toLowerCase(Locale.ROOT);
+            var previous = unique.putIfAbsent(name, task.tier);
+            if (previous != null && previous != task.tier) return List.of();
+        }
+        int allNewPoints = unique.values().stream().mapToInt(tier -> tier.ordinal() + 1).sum();
+        return pointGain == 0 || pointGain == allNewPoints ? List.copyOf(unique.keySet()) : List.of();
+    }
+
     void combatBatch(List<SoulrendPlugin.PendingCaTask> tasks, boolean initialized, int before, int after) {
         var snapshot = ready();
-        if (snapshot == null || !initialized || after < before) return;
-        var unique = new HashSet<String>();
-        for (var task : tasks) if (task.task != null) unique.add(task.task.strip().toLowerCase(Locale.ROOT));
-        // An aggregate points increase cannot identify the new task in a mixed batch.
-        if (after > before && unique.size() != 1) return;
-        boolean repeat = after == before;
+        if (snapshot == null || !initialized) return;
         var captures = new ArrayList<PendingSubmission>();
         var captureId = UUID.randomUUID().toString();
-        for (var task : unique) {
-            if (task.isEmpty()) continue;
+        boolean repeat = after == before;
+        for (var task : confirmedCombatTasks(tasks, after - before)) {
             for (var match : snapshot.matches) {
                 if (match.rule.matchesTask(task, repeat)) {
                     var proof = prepare(snapshot, match, captureId, match.rule.task_id, 1, "", repeat);
