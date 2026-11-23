@@ -157,6 +157,7 @@ final class AutomaticEvidence {
         }
         var pending = plugin.pendingSubmissionStore.loadAll();
         int sent = 0;
+        boolean progressUploaded = false;
         int held = (int) pending.stream().filter(proof -> proof.runeliteCaptureId != null
             && session.equals(proof.runeliteSession)).count();
         for (var proof : pending) {
@@ -177,9 +178,13 @@ final class AutomaticEvidence {
                     // A small individual observation updates the website's
                     // progress bar; printing every +1 kill/drop would flood chat.
                     String message = null;
-                    if ("approved".equals(upload.proofStatus)) message = "Bingo objective completed automatically.";
-                    else if ("pending".equals(upload.proofStatus)) message = "Bingo evidence sent for review.";
+                    if ("tracking".equals(upload.proofStatus) || "approved".equals(upload.proofStatus)) {
+                        progressUploaded = true;
+                    } else if ("pending".equals(upload.proofStatus)) message = "Bingo evidence sent for review.";
                     else if ("rejected".equals(upload.proofStatus)) message = "Bingo evidence was rejected. See the website.";
+                    if ("approved".equals(upload.proofStatus) && !plugin.bingoCompletions.enabled()) {
+                        message = "Bingo objective completed automatically.";
+                    }
                     if (message != null) plugin.sendChatMessage(ChatPalette.Tone.DONE, message);
                 }
                 if ((status >= 200 && status < 300) || status == 400 || status == 404 || status == 413) {
@@ -190,6 +195,9 @@ final class AutomaticEvidence {
             } catch (IOException e) {
                 break; // Leave stable capture IDs on disk for the next retry pass.
             }
+        }
+        if (progressUploaded && plugin.bingoCompletions.enabled()) {
+            plugin.bingoCompletions.poll(events.events, token, session, character);
         }
         if (sameSession(session, character)) {
             rules = new BoardRules(session, character,
