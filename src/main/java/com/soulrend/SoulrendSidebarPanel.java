@@ -149,6 +149,9 @@ public class SoulrendSidebarPanel extends PluginPanel {
 	boolean signInInFlight;
 	volatile DeviceSignIn signIn;
 	volatile String connectedWebsiteUser;
+	volatile String connectedDeviceName;
+	long nextSessionProbeAt;
+	boolean probingSession;
 
 	// The logged-in character's row (SoulrendSidebarDataSource.AccountRow) — one quiet line, because almost
 	// everyone reading it is the owner: "Tracking X · Not you? ×", "Not tracking X here · Track again",
@@ -218,6 +221,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 			// With the live push up, a push asks for the board when it moves (boardChanged) and "2m ago"
 			// times tick locally (UiView), so the timer is only a safety net: every 5 minutes.
 			refreshNotificationCountIfDue();
+			refreshDeviceSessionIfDue();
 			if (!typingInSearch() && (!pushLive.getAsBoolean() || ++quietTicks % PUSH_SAFETY_TICKS == 0)) refresh(); // the view redraws only if the site's answer changed
 		});
 		autoRefresh.setCoalesce(true);
@@ -806,6 +810,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 	public void onActivate() {
 		onScreen = true;
 		refreshNotificationCountIfDue();
+		refreshDeviceSessionIfDue();
 		feedRead();
 		data.feedOnScreen(tab == FEED);
 		refresh();
@@ -848,6 +853,42 @@ public class SoulrendSidebarPanel extends PluginPanel {
 	void cancelSignIn() {
 		var flow = signIn;
 		if (flow != null) flow.cancel();
+	}
+
+	/** Detect true remote revocation without treating temporary network failures as logout.
+	 * Only invoked on the visible sidebar; network work stays off the EDT. */
+	void refreshDeviceSessionIfDue() {
+		if (!onScreen || signInInFlight || api.needsSignIn() || api.accountPaused || probingSession) return;
+		long now = System.currentTimeMillis();
+		if (now < nextSessionProbeAt) return;
+		nextSessionProbeAt = now + 60_000L;
+		String token = api.playerToken;
+		probingSession = true;
+		interactive().execute(() -> {
+			BingoApiClient.SessionProbe probe = api.probeSession(token);
+			invokeLater(() -> {
+				probingSession = false;
+				if (!Objects.equals(token, api.playerToken) || !onScreen) return;
+				if (probe != null && !probe.authorized) {
+					connectedWebsiteUser = null;
+					connectedDeviceName = null;
+					setToken("");
+					setSignInStatus("Session expired or revoked. Connect again.");
+					refreshSignInRow();
+					refreshAccountRow();
+				} else if (probe != null && probe.identity != null &&
+					probe.identity.username != null) {
+					String user = probe.identity.username;
+					String name = probe.identity.device != null ? probe.identity.device.name : null;
+					if (!Objects.equals(connectedWebsiteUser, user) ||
+						!Objects.equals(connectedDeviceName, name)) {
+						connectedWebsiteUser = user;
+						connectedDeviceName = name;
+						refreshAccountRow();
+					}
+				}
+			});
+		});
 	}
 
 	/** Account-wide unread badge, polled at most once per minute while the sidebar is visible. */
@@ -909,6 +950,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 								invokeLater(() -> {
 									if (result.token.equals(configManager.getConfiguration("soulrendbingo", "playerToken"))) {
 										connectedWebsiteUser = identity.username;
+										connectedDeviceName = identity.device != null ? identity.device.name : null;
 										refreshAccountRow();
 									}
 								});
@@ -962,6 +1004,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 			"Soulrend", OK_CANCEL_OPTION, PLAIN_MESSAGE) != OK_OPTION) return;
 		if (api != null) api.revokeToken();
 		connectedWebsiteUser = null;
+		connectedDeviceName = null;
 		// Clearing the token fires onConfigChanged, which drops the session state (configureApiClient).
 		setToken("");
 		refreshSignInRow();
@@ -992,8 +1035,9 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		// Shown whenever this computer is signed in — it is also where Sign out lives.
 		accountRowPanel.setVisible(!api.needsSignIn());
 		if (row == null) {
-			setAccountLabel(connectedWebsiteUser == null ? "Signed in" :
-				"Connected as <b>" + esc(connectedWebsiteUser) + "</b>",
+			setAccountLabel(connectedWebsiteUser == null ? "Completing Soulrend connection…" :
+				"Connected as <b>" + esc(connectedWebsiteUser) + "</b>" +
+				(connectedDeviceName == null ? "" : " · " + esc(connectedDeviceName)),
 				"Connected to Soulrend. Bingo tracking and board sync are not available yet.", false);
 			accountLink.setVisible(false);
 			setAccountStatus("");
