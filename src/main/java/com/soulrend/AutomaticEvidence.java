@@ -104,7 +104,7 @@ final class AutomaticEvidence {
 
     void sync() {
         if (!enabled()) clear();
-        if (!enabled() && !plugin.bingoCompletions.enabled()) {
+        if (!enabled() && !plugin.bingoCompletions.enabled() && !BingoStartReminder.enabled(plugin)) {
             plugin.bingoCompletions.clear();
             return;
         }
@@ -129,6 +129,7 @@ final class AutomaticEvidence {
         else plugin.bingoCompletions.clear();
         var events = plugin.apiClient.bingoRead("", token, character, BingoApiClient.EventList.class);
         if (events == null || events.events == null) return;
+        plugin.bingoStartReminder.showDue(plugin, events.events, token, character);
         if (plugin.bingoCompletions.enabled()) {
             plugin.bingoCompletions.poll(events.events, token, session, character);
         }

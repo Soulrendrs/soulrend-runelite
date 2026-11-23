@@ -335,6 +335,7 @@ public class BingoApiClient {
     }
     static final class EventSummary {
         int id;
+        long start_at_epoch;
         String name, status, team;
         List<String> characters;
     }
