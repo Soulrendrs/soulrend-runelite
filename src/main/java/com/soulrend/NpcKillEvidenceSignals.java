@@ -61,7 +61,7 @@ final class NpcKillEvidenceSignals {
                 it.remove(); // new game session / reset game clock
             } else if (tick - signal.tick >= PAIR_WINDOW_TICKS) {
                 fallback.add(signal.id);
-                creditedClients.add(signal);
+                creditedClients.add(new Signal(signal.id, tick));
                 it.remove();
             }
         }
