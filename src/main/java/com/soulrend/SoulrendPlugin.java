@@ -61,7 +61,8 @@ import net.runelite.api.clan.ClanMember;
 @Slf4j
 @PluginDescriptor(
 		name = "Soulrend",
-		description = "Soulrend companion (development build; site integration pending)",
+		description = "Soulrend Bingo companion",
+		warning = "Connects to soulrend.events and shares linked character data, bingo activity, and game screenshots when evidence uploads are enabled.",
 		tags = {"soulrend", "bingo", "overlay", "drops", "loot", "clan", "event"},
 		// Required by getPluginDirectory(), which throws without it — the directory is named after it.
 		internalName = "soulrend-bingo"
@@ -343,7 +344,6 @@ public class SoulrendPlugin extends Plugin {
 	 * capture null. Enabled on the same condition the sidebar's Sync profile is — a site and a token
 	 * — because a button that can only produce "you are not signed in" is worse than no button.
 	 */
-	HeaderButton clogSyncButton;
 
 	/**
 	 * The "Soulrend" button in the CLAN window's header, beside other plugins' buttons.
@@ -1147,11 +1147,6 @@ public class SoulrendPlugin extends Plugin {
 		// The offset walks left from the bar's right edge: the close button ends at 28, WikiSync
 		// takes 33..104, and we take the next slot along. An absolute-right offset holds at any
 		// window size, where measuring off a neighbour moves the moment they move.
-		clogSyncButton = new HeaderButton(
-				client, InterfaceID.Collection.UNIVERSE, InterfaceID.Collection.SEARCH_TOGGLE,
-				109 /* CLOG_BUTTON_OFFSET */, 33 /* CLOG_BUTTON_NEAR_OFFSET */, "Soulrend", "Sync to",
-				() -> apiClient.isConfigured() && config.syncClog(), this::syncProfileNow);
-		clogSyncButton.frameId = InterfaceID.Collection.FRAME;
 		clanSyncButton = new HeaderButton(
 				client, InterfaceID.ClansInfo.UNIVERSE, InterfaceID.ClansInfo.CLOSE,
 				33 /* CLAN_BUTTON_OFFSET */, "Soulrend", "Sync roster to",
@@ -1198,7 +1193,6 @@ public class SoulrendPlugin extends Plugin {
 				.build();
 		clientToolbar.addNavigation(sidebarNavButton);
 		migrateChatSettings();
-		keyManager.registerKeyListener(eventChatKey);
 		// Registered now: a chat icon's index only exists once it has loaded, and the first line drawn
 		// before that went without it.
 		relayIcon();
@@ -1504,7 +1498,6 @@ public class SoulrendPlugin extends Plugin {
 		bingoCompletions.clear();
 		automaticEvidence.clear();
 		sessionGains.reset();
-		keyManager.unregisterKeyListener(eventChatKey);
 		clientThread.invokeLater(this::unflairAll);
 		invokeLater(() -> GradientLabel.watch(null));
 		overlayManager.remove(overlay);
@@ -1519,7 +1512,6 @@ public class SoulrendPlugin extends Plugin {
 		// OUR WIDGETS ARE OURS TO CLEAR. Disabling the plugin left the buttons sitting in the game's
 		// title bars until the interface happened to be rebuilt — a control for a plugin that is no
 		// longer running, which does nothing when pressed.
-		if (clogSyncButton != null) clientThread.invokeLater(() -> clogSyncButton.hideParts());
 		if (clanSyncButton != null) clientThread.invokeLater(() -> clanSyncButton.hideParts());
 		if (sidebarNavButton != null) {
 			clientToolbar.removeNavigation(sidebarNavButton);
@@ -1997,8 +1989,6 @@ public class SoulrendPlugin extends Plugin {
 		clogTransmitTick = client.getTickCount();
 		clogFullSync.begin(clogSyncRequested);
 		clogSyncRequested = false;
-		client.menuAction(-1, InterfaceID.Collection.SEARCH_TOGGLE, MenuAction.CC_OP, 1, -1, "Search", null);
-		client.runScript(2240 /* COLLECTION_INIT */);
 		return TransmitResult.STARTED;
 	}
 
@@ -2272,7 +2262,6 @@ public class SoulrendPlugin extends Plugin {
 		//
 		// A tick is 600ms and render() returns on an identity scan when nothing has moved, so this is
 		// cheap; it only runs at all while the relevant window is open.
-		if (clogSyncButton != null) clogSyncButton.refresh();
 		if (clanSyncButton != null) clanSyncButton.refresh();
 		pollClanCoffer();
 		tickClogTransmitGuard();
@@ -3366,7 +3355,6 @@ public class SoulrendPlugin extends Plugin {
 		var msg = event.getMessage();
 		if (msg == null || msg.isEmpty()) return;
 		maybeKeepFlairBroadcast(event);
-		relayHeard(event);
 		var ct = event.getType();
 		var plain = stripChatTags(msg);
 
@@ -6415,12 +6403,10 @@ public class SoulrendPlugin extends Plugin {
 	 */
 	@Subscribe
 	void onBeforeRender(BeforeRender event) {
-		if ((headerDue || clogSyncButton != null && clogSyncButton.unsure) && clanSyncButton != null) {
+		if (headerDue && clanSyncButton != null) {
 			headerDue = false;
-			clogSyncButton.render();
 			clanSyncButton.render();
 		}
-		clogMenuRow();
 		// The game rebuilt a member list (a tab switch, a sort, a join): its rows are new and plain.
 		if (flairDue || !menusOff() && nameListsRebuilt()) flairNameLists();
 		if (flairDue) {
@@ -6444,67 +6430,7 @@ public class SoulrendPlugin extends Plugin {
 	/** Client thread: a title-bar button, or a just-opened interface's names, to draw before the next frame. */
 	boolean headerDue, flairDue;
 
-	/**
-	 * Client thread, each frame the collection log is open: while the log is too narrow for the title-bar
-	 * button, the same action as a third row of the log's own dropdown ("View Log", "Overview", "Soulrend"),
-	 * shaped after the row above it. The game rebuilds the dropdown when it opens, so the row is put back
-	 * whenever it is missing; with room in the title bar again it is taken out.
-	 */
-	void clogMenuRow() {
-		var f = client.getWidget(InterfaceID.Collection.BURGER_MENU_FRAME);
-		var kids = f == null || f.isHidden() ? null : f.getDynamicChildren();
-		if (kids == null || kids.length < 2) return;
-		// Ours, if this build of the dropdown already has it (shown or put away), and the game's last row.
-		int mine = -1, base = -1;
-		for (int i = 0; i < kids.length; i++) {
-			if (kids[i] == null || kids[i].getType() != WidgetType.TEXT) continue;
-			if (HeaderButton.NAME.equals(kids[i].getName())) mine = i;
-			else base = i;
-		}
-		// Either the button or the row, never neither: the row answers to whether the button is actually
-		// on screen, not to a second reading of the same measurement.
-		var want = clogSyncButton != null && clogSyncButton.enabled.getAsBoolean() && !clogSyncButton.shown();
-		if (base < 1 || want == (mine > 0 && !kids[mine].isHidden())) return;
-		var last = kids[base];
-		int h = last.getOriginalHeight(), y = last.getOriginalY();
-		if (mine > 0) {
-			// Already built: shown while the title bar has no room for the button, put away when it does.
-			kids[mine].setHidden(!want);
-			kids[mine - 1].setHidden(!want);
-		} else {
-			var bg = kids[base - 1];
-			var r = f.createChild(-1, WidgetType.RECTANGLE);
-			var t = f.createChild(-1, WidgetType.TEXT);
-			for (var w : new Widget[]{r, t}) {
-				w.setOriginalX(last.getOriginalX());
-				w.setOriginalY(y + h);
-				w.setOriginalWidth(last.getOriginalWidth());
-				w.setOriginalHeight(h);
-			}
-			r.setFilled(bg.isFilled());
-			r.setOpacity(bg.getOpacity());
-			r.setTextColor(bg.getTextColor());
-			r.revalidate();
-			t.setText(HeaderButton.NAME);
-			t.setName(HeaderButton.NAME);
-			t.setFontId(last.getFontId());
-			t.setTextColor(0xffffff);
-			t.setTextShadowed(last.getTextShadowed());
-			t.setXTextAlignment(last.getXTextAlignment());
-			t.setYTextAlignment(last.getYTextAlignment());
-			t.setHasListener(true);
-			t.setAction(0, "Sync to"); // the game adds the name: "Sync to Soulrend"
-			t.setOnOpListener((JavaScriptCallback) e -> syncProfileNow());
-			t.setOnMouseOverListener((JavaScriptCallback) e -> t.setTextColor(0xff981f));
-			t.setOnMouseLeaveListener((JavaScriptCallback) e -> t.setTextColor(0xffffff));
-			t.revalidate();
-		}
-		// As tall as its rows: the game's own, plus ours while it shows. The margin under the last row
-		// is the one the game leaves beside them.
-		f.setOriginalHeight(y + (want ? 2 * h : h) + last.getOriginalX());
-		f.revalidate();
-		for (var k : f.getDynamicChildren()) k.revalidate();
-	}
+
 	/** Client thread: each FLAIR_LISTS list's first row when we last painted it. */
 	final Widget[] listSeen = new Widget[FLAIR_LISTS.length];
 
@@ -7058,11 +6984,8 @@ public class SoulrendPlugin extends Plugin {
 
 	/** A view from the live push (docs/PLUGIN_WIRE.md), applied off the socket's thread. */
 	void onPush(JsonObject m) {
-		// A relayed line goes straight to the client thread: queued behind the executor's other work (a
-		// flush, a config merge), it could wait seconds.
-		if ("relay".equals(m.get("t").getAsString())) {
-			if (config.soulrendChat() != SoulrendConfig.Relay.Off) clientThread.invoke(() -> showRelay(m));
-		} else if (execLive()) executor.execute(() -> safely("push", () -> applyPush(m)));
+		if ("relay".equals(m.get("t").getAsString())) return;
+		if (execLive()) executor.execute(() -> safely("push", () -> applyPush(m)));
 	}
 
 	/**
@@ -7110,7 +7033,6 @@ public class SoulrendPlugin extends Plugin {
 					pmModeSent = "";
 					relayAsked.clear();
 				});
-				fetchChatChans(null);
 			// The Supporter list: a delta, or (on connecting: one may have been missed) a version check.
 			case "flair":
 				if ((flairOn() || menusFlair()) && apiClient.isConfigured()) {
@@ -7122,8 +7044,7 @@ public class SoulrendPlugin extends Plugin {
 		if (kind.startsWith("rows")) {
 			// Panel rows (the Feed tab's lists): never the chatbox, never capped — the list batches them.
 			var panel = sidebarPanel;
-			if (panel != null) panel.feedPush(m);
-			if (m.has("cb")) eventChatLine(m);
+			if (panel != null && !m.has("cb")) panel.feedPush(m);
 			return;
 		}
 		var cfg = pluginConfig;
@@ -9924,20 +9845,7 @@ public class SoulrendPlugin extends Plugin {
 	net.runelite.client.game.chatbox.ChatboxTextInput eventChatInput;
 	int relayIcon = -1;
 
-	final HotkeyListener eventChatKey = new HotkeyListener(() -> config.eventChatKey()) {
-		public void hotkeyPressed() {
-			clientThread.invoke(() -> {
-				// Pressed again with our input open: the next channel, keeping what was typed.
-				var open = eventChatInput != null && chatboxPanelManager.getCurrentInput() == eventChatInput;
-				if (open) {
-					openEventChat(eventChatAt + 1, eventChatInput.getValue());
-				} else if (loggedIn() && apiClient.isConfigured()) {
-					if (chatChans != null) openEventChat(eventChatAt, "");
-					fetchChatChans(chatChans == null ? () -> openEventChat(eventChatAt, "") : null);
-				}
-			});
-		}
-	};
+
 
 	static String relayKey(String name, String text) {
 		return Text.standardize(name).replaceAll("[ _-]+", " ") + "\n" + Text.standardize(text).replaceAll("\\s+", " ");
@@ -10195,12 +10103,6 @@ public class SoulrendPlugin extends Plugin {
 			injecting = false;
 		}
 		relaySeen.remove(key);
-		var f = client.getWidget(InterfaceID.Chatbox.CHAT_PUBLIC_FILTER);
-		var mode = f == null ? "" : Text.removeTags(f.getText());
-		if (near != null && !mode.contains("Hide") && !mode.contains("Off") && (!mode.contains("Friends") || client.isFriended(n, false))) {
-			near.setOverheadText(Text.removeTags(x));
-			near.setOverheadCycle(150);
-		}
 	}
 
 	/** An event chat push row: its chatbox copy (built by the site), or the Feed tab's dot when that's off. */

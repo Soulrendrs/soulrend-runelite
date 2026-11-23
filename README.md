@@ -33,3 +33,5 @@ The Soulrend plugin uses its own plugin identity, configuration namespace (`soul
 5. Verify with actual RuneLite and apply to the Plugin Hub.
 
 Backend integration design: [soulrend-bingos/docs/runelite-plugin-integration.md](https://github.com/Soulrendrs/soulrend-bingos/blob/main/docs/runelite-plugin-integration.md) (pending review/merge).
+
+The bingo start reminder is a local **Soulrend Events** banner. The plugin does not relay player chat or sync collection logs. Use RuneProfile for collection-log data.

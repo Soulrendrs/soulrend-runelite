@@ -8,7 +8,7 @@ import java.util.Map;
 /** Show one local logout reminder per event and scheduled start. */
 final class BingoStartReminder {
     private static final long WINDOW_SECONDS = 10 * 60L;
-    static final String TITLE = "Bingo Start Reminder";
+    static final String TITLE = "Soulrend Events";
 
     // Only read and written on the RuneLite client thread.
     private final Map<Integer, Long> announcedStarts = new HashMap<>();
@@ -40,8 +40,6 @@ final class BingoStartReminder {
                     || event.characters.stream().noneMatch(name -> Rsn.same(name, character))
                     || !claim(event, now)) continue;
                 plugin.clogBanner.show(TITLE, "Bingo starts soon", "Log out for Wise Old Man");
-                plugin.sendChatMessage(ChatPalette.Tone.WARN, (event.name == null ? "Your bingo" : event.name)
-                    + " starts soon. Log out of OSRS before the start so Wise Old Man can capture fresh XP and boss KC.");
             }
         });
     }
