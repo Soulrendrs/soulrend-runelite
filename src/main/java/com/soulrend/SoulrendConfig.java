@@ -5,7 +5,8 @@ import net.runelite.client.config.*;
 @ConfigGroup("soulrendbingo")
 public interface SoulrendConfig extends Config {
 	@ConfigItem(keyName = "automaticEvidence", name = "Automatic bingo evidence", section = bingoSection,
-		description = "Automatically send game screenshots for matching bingo objectives to Soulrend for review. Turn off to stop capture and retries.")
+		description = "Automatically send game screenshots for matching bingo objectives to soulrend.events for review. Turn off to stop capture and retries.",
+		warning = "Game screenshots and matching bingo activity will be sent to soulrend.events.")
 	default boolean automaticEvidence() { return true; }
 
 	// ---- Sections (collapsible groups, top to bottom) ----
@@ -105,8 +106,6 @@ public interface SoulrendConfig extends Config {
 	default boolean relayWho() { return false; }
 
 	default boolean eventChatbox() { return false; }
-
-
 
 	// ---- Setup ----
 

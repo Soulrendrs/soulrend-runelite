@@ -61,8 +61,7 @@ import net.runelite.api.clan.ClanMember;
 @Slf4j
 @PluginDescriptor(
 		name = "Soulrend",
-		description = "Soulrend Bingo companion",
-		warning = "Connects to soulrend.events and shares linked character data, bingo activity, and game screenshots when evidence uploads are enabled.",
+		description = "Soulrend Bingo companion. Connects to soulrend.events and shares linked character data, activity and enabled screenshot uploads.",
 		tags = {"soulrend", "bingo", "overlay", "drops", "loot", "clan", "event"},
 		// Required by getPluginDirectory(), which throws without it — the directory is named after it.
 		internalName = "soulrend-bingo"
