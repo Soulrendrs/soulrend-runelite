@@ -1399,7 +1399,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
                                     rows.add(card);
                                     if (linked && tile.metric != null && ("skill_xp".equals(tile.objective_type)
                                         || "boss_kc".equals(tile.objective_type))) {
-                                        JLabel observed = small("", MUTED);
+                                        JLabel observed = left(small("", MUTED));
                                         observed.setBorder(createEmptyBorder(2, 8, 2, 8));
                                         observed.setToolTipText("Observed on this client this session. Official credit comes from Wise Old Man.");
                                         observed.setVisible(false);
@@ -1439,7 +1439,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
         var info = flatButton("Combat Achievement info", "Open OSRS repeat-completion instructions", BINGO_GOLD,
             () -> showBingoDetails("Combat Achievements", CA_REPEAT_GUIDANCE));
         info.setIcon(new GlyphIcon(STAR, 12, BINGO_GOLD));
-        reminder.add(info);
+        reminder.add(left(info));
         var setting = boardText("Repeat notifications: Not verified", SMALL, BINGO_GOLD);
         setting.setVisible(!caReminderDismissed);
         reminder.add(setting);
@@ -1449,12 +1449,12 @@ public class SoulrendSidebarPanel extends PluginPanel {
             caReminderDismissed = true;
             setting.setVisible(false);
             dismiss.setVisible(false);
-            capH(reminder).revalidate();
+            redraw(reminder);
         });
         dismiss.setVisible(!caReminderDismissed);
-        reminder.add(dismiss);
+        reminder.add(left(dismiss));
         if (allowsRepeats) info.setToolTipText("A visible objective allows repeat completions. Open OSRS setup instructions.");
-        return capH(reminder);
+        return reminder;
     }
 
     private JComponent objectiveHeading(BingoApiClient.BoardTile tile) {
