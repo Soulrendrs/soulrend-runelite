@@ -430,18 +430,21 @@ public class BingoApiClient {
         final int httpStatus;
         final String proofStatus;
         final Integer value, target;
+        final ConfirmedTile completion;
 
-        EvidenceUpload(int httpStatus, String proofStatus, Integer value, Integer target) {
+        EvidenceUpload(int httpStatus, String proofStatus, Integer value, Integer target, ConfirmedTile completion) {
             this.httpStatus = httpStatus;
             this.proofStatus = proofStatus;
             this.value = value;
             this.target = target;
+            this.completion = completion;
         }
     }
 
     private static final class EvidenceReceipt {
         String status;
         Integer value, target;
+        ConfirmedTile completion;
     }
 
     EvidenceUpload uploadEvidence(PendingSubmissionStore.PendingSubmission proof, String token, byte[] image) throws IOException {
@@ -463,6 +466,7 @@ public class BingoApiClient {
             (reply, data) -> {
                 String proofStatus = null;
                 Integer value = null, target = null;
+                ConfirmedTile completion = null;
                 if (reply.isSuccessful()) {
                     try {
                         var receipt = gson.fromJson(data, EvidenceReceipt.class);
@@ -470,12 +474,13 @@ public class BingoApiClient {
                             proofStatus = receipt.status;
                             value = receipt.value;
                             target = receipt.target;
+                            completion = receipt.completion;
                         }
                     } catch (JsonParseException ignored) {
                         // The HTTP receipt still acknowledges the upload.
                     }
                 }
-                return new EvidenceUpload(reply.code(), proofStatus, value, target);
+                return new EvidenceUpload(reply.code(), proofStatus, value, target, completion);
             });
     }
 

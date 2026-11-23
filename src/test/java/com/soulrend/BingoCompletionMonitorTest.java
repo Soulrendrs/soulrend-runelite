@@ -51,4 +51,19 @@ public class BingoCompletionMonitorTest {
         monitor.clear();
         assertTrue(monitor.observe(5, feed(20, old, added)).isEmpty());
     }
+
+    @Test
+    public void approvedNpcReceiptDoesNotNeedAFeedBaselineOrRepeatInTheFeed() {
+        var monitor = new BingoCompletionMonitor(null);
+        monitor.useScope("session", "My account");
+        var npc = tile(7, "Goblin");
+        npc.self = true;
+        assertTrue(monitor.rememberUploadedNpc(5, npc));
+        assertTrue(monitor.observe(5, feed(10)).isEmpty());
+        assertTrue(monitor.observe(5, feed(10, npc)).isEmpty());
+        assertTrue(!monitor.rememberUploadedNpc(5, npc));
+        var teammate = tile(8, "Teammate's tile");
+        assertTrue(!monitor.rememberUploadedNpc(5, teammate));
+        assertEquals(List.of(teammate), monitor.observe(5, feed(10, npc, teammate)));
+    }
 }

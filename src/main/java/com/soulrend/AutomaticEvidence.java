@@ -192,6 +192,12 @@ final class AutomaticEvidence {
                         progressUploaded = true;
                     } else if ("pending".equals(upload.proofStatus)) message = "Bingo evidence sent for review.";
                     else if ("rejected".equals(upload.proofStatus)) message = "Bingo evidence was rejected. See the website.";
+                    if ("npc_kill".equals(proof.evidenceKind) && "approved".equals(upload.proofStatus)
+                        && upload.completion != null && upload.completion.id == proof.tileId) {
+                        events.events.stream().filter(event -> event.id == proof.eventId).findFirst()
+                            .ifPresent(event -> plugin.bingoCompletions.announceUploadedNpc(
+                                event, upload.completion, session, character));
+                    }
                     if ("approved".equals(upload.proofStatus) && !plugin.bingoCompletions.enabled()) {
                         message = "Bingo objective completed automatically.";
                     }

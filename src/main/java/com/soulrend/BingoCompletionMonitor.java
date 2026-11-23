@@ -41,6 +41,7 @@ final class BingoCompletionMonitor {
 
     private final SoulrendPlugin plugin;
     private final Map<Integer, Board> boards = new HashMap<>();
+    private final Map<Integer, Set<Integer>> uploadedCompletions = new HashMap<>();
     private Scope scope;
 
     BingoCompletionMonitor(SoulrendPlugin plugin) {
@@ -58,6 +59,7 @@ final class BingoCompletionMonitor {
         if (scope == null) return;
         scope = null;
         boards.clear();
+        uploadedCompletions.clear();
         if (plugin != null && plugin.clogBanner != null) {
             plugin.clientThread.invokeLater(() -> plugin.clogBanner.removeBanners(TITLE));
         }
@@ -85,9 +87,33 @@ final class BingoCompletionMonitor {
         var added = new ArrayList<ConfirmedTile>();
         for (var tile : feed.completed) {
             if (tile != null && tile.id > 0 && tile.name != null && !tile.name.isBlank()
-                && board.seen.add(tile.id) && !baseline) added.add(tile);
+                && board.seen.add(tile.id) && !baseline
+                && !uploadedCompletions.getOrDefault(event, Set.of()).contains(tile.id)) added.add(tile);
         }
         return added;
+    }
+
+    synchronized boolean rememberUploadedNpc(int event, ConfirmedTile tile) {
+        if (tile == null || !tile.self || tile.id <= 0 || tile.name == null || tile.name.isBlank()) return false;
+        Board board = boards.get(event);
+        if (board != null && board.seen.contains(tile.id)) return false;
+        return uploadedCompletions.computeIfAbsent(event, id -> new HashSet<>()).add(tile.id);
+    }
+
+    void announceUploadedNpc(EventSummary event, ConfirmedTile tile, String session, String character) {
+        if (!current(session, character) || !permits(true)) return;
+        final Scope origin;
+        synchronized (this) {
+            origin = scope;
+            if (origin == null || !session.equals(origin.session) || !rememberUploadedNpc(event.id, tile)) return;
+        }
+        plugin.clientThread.invokeLater(() -> {
+            if (!current(session, character) || !Rsn.same(character, plugin.getLocalPlayerName())) return;
+            synchronized (this) {
+                if (scope != origin) return;
+            }
+            show(event, tile);
+        });
     }
 
     synchronized List<ProgressTile> observeProgress(int event, CompletionFeed feed) {
@@ -138,7 +164,10 @@ final class BingoCompletionMonitor {
             });
         }
         synchronized (this) {
-            if (scope == origin) boards.keySet().retainAll(active);
+            if (scope == origin) {
+                boards.keySet().retainAll(active);
+                uploadedCompletions.keySet().retainAll(active);
+            }
         }
     }
 
