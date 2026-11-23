@@ -13,7 +13,6 @@ import java.util.List;
 import java.util.Map;
 import net.runelite.api.Client;
 import net.runelite.api.FontTypeFace;
-import net.runelite.api.events.ScriptPostFired;
 import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.widgets.Widget;
 import net.runelite.api.widgets.WidgetType;
@@ -174,11 +173,8 @@ public class HeaderButtonTest {
 		}
 		assertTrue(p.flairDue);
 		assertFalse(p.headerDue);
-		try {
-			p.onScriptPostFired(new ScriptPostFired(net.runelite.api.ScriptID.COLLECTION_DRAW_LIST));
-		} catch (RuntimeException afterTheFlag) {
-			// Reading the page wants an injected plugin too.
-		}
-		assertTrue("a redrawn log header gets its button back before the frame", p.headerDue);
+		loaded.setGroupId(InterfaceID.CLANS_INFO);
+		p.onWidgetLoaded(loaded);
+		assertTrue(p.headerDue);
 	}
 }
