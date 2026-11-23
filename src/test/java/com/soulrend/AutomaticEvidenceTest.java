@@ -12,27 +12,30 @@ import static org.junit.Assert.assertTrue;
 
 public class AutomaticEvidenceTest {
     @Test
-    public void ordinaryStackMustMeetItemSourceAndQuantityRules() {
+    public void everyPositiveMatchingDropIsAnIndependentCumulativeObservation() {
         var rule = new AutomaticEvidence.Rule();
         rule.kind = "drop";
         rule.item_id = 995;
         rule.quantity = 5;
         rule.source = "npc";
         assertTrue(rule.matchesDrop(Map.of(995, 5), "npc"));
-        assertFalse(rule.matchesDrop(Map.of(995, 4), "npc"));
+        assertTrue(rule.matchesDrop(Map.of(995, 4), "npc"));
+        assertTrue(rule.matchesDrop(Map.of(995, 1), "npc"));
+        assertFalse(rule.matchesDrop(Map.of(995, 0), "npc"));
         assertFalse(rule.matchesDrop(Map.of(996, 10), "npc"));
         assertFalse(rule.matchesDrop(Map.of(995, 5), "pvp"));
     }
 
     @Test
-    public void inventoryGainNeedsCurrentUnambiguousSkillXpAndMatchingStack() {
+    public void everySkillAttributedGainCountsEvenBelowTheTarget() {
         var rule = new AutomaticEvidence.Rule();
         rule.kind = "gain";
         rule.item_id = 331;
         rule.source = "fishing";
         rule.quantity = 2;
         assertFalse(rule.matchesGain("mining", Map.of(331, 2)));
-        assertFalse(rule.matchesGain("fishing", Map.of(331, 1)));
+        assertTrue(rule.matchesGain("fishing", Map.of(331, 1)));
+        assertFalse(rule.matchesGain("fishing", Map.of(331, 0)));
         assertTrue(rule.matchesGain("fishing", Map.of(331, 2)));
         org.junit.Assert.assertNull(AutomaticEvidence.gatheringSkill(Map.of(), 8));
         org.junit.Assert.assertNull(AutomaticEvidence.gatheringSkill(Map.of("fishing", 7), 8));

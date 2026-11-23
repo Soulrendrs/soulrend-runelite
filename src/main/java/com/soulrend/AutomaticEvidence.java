@@ -15,12 +15,15 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.function.IntUnaryOperator;
 
 /** Reuses the gameplay signals, next game frame, and durable proof store from Anvil. */
 final class AutomaticEvidence {
     private static final long RULE_TTL_MS = 90_000;
-    private static final long CAPTURE_COOLDOWN_MS = 12_000;
+    private static final long CA_CAPTURE_COOLDOWN_MS = 12_000;
     private static final int MAX_ACTIVE_BOARDS = 5;
     private static final int MAX_PENDING_FOR_SESSION = 40;
 
@@ -29,26 +32,19 @@ final class AutomaticEvidence {
     static final class Rule {
         int tile;
         String kind;
-        Integer item_id, quantity, task_id, npc_id, diary_id;
-        String source, task_name, item_name, diary_name;
+        Integer item_id, quantity, task_id, npc_id;
+        String source, task_name;
         boolean allow_repeat;
 
         boolean matchesDrop(Map<Integer, Integer> items, String actualSource) {
             return "drop".equals(kind) && item_id != null
-                && items.getOrDefault(item_id, 0) >= (quantity == null ? 1 : quantity)
+                && items.getOrDefault(item_id, 0) > 0
                 && (source == null || source.isEmpty() || source.equals(actualSource));
         }
 
         boolean matchesGain(String skill, Map<Integer, Integer> gains) {
             return "gain".equals(kind) && item_id != null && skill.equals(source)
-                && gains.getOrDefault(item_id, 0) >= (quantity == null ? 1 : quantity);
-        }
-
-        Integer namedId(String type, String name) {
-            if (!type.equals(kind)) return null;
-            String expected = "diary".equals(type) ? diary_name : item_name;
-            if (expected == null || !expected.strip().equalsIgnoreCase(name.strip())) return null;
-            return "diary".equals(type) ? diary_id : item_id;
+                && gains.getOrDefault(item_id, 0) > 0;
         }
 
         boolean matchesTask(String task, boolean repeat) {
@@ -85,7 +81,9 @@ final class AutomaticEvidence {
 
     private final SoulrendPlugin plugin;
     private final AtomicBoolean syncing = new AtomicBoolean();
-    private final Map<Integer, Long> attempted = new HashMap<>(); // client thread
+    private final Map<Integer, Long> attempted = new HashMap<>(); // CA de-dup only, client thread
+    private final AtomicInteger queuedThisSync = new AtomicInteger();
+    private final AtomicBoolean flushScheduled = new AtomicBoolean();
     private volatile BoardRules rules;
     private final Map<String, Integer> skillTicks = new HashMap<>(); // client thread
 
@@ -95,6 +93,7 @@ final class AutomaticEvidence {
 
     void clear() {
         rules = null;
+        queuedThisSync.set(0);
     }
 
     private boolean enabled() {
@@ -161,7 +160,7 @@ final class AutomaticEvidence {
             && session.equals(proof.runeliteSession)).count();
         for (var proof : pending) {
             if (proof.runeliteCaptureId == null || !session.equals(proof.runeliteSession)) continue;
-            if (sent >= 8 || !Rsn.same(character, proof.capturedRsn) || !sameSession(session, character)
+            if (sent >= 32 || !Rsn.same(character, proof.capturedRsn) || !sameSession(session, character)
                 || !reachable.contains(proof.eventId)) continue;
             ++sent;
             var screenshot = plugin.pendingSubmissionStore.readScreenshot(proof);
@@ -174,11 +173,13 @@ final class AutomaticEvidence {
                 var upload = plugin.apiClient.uploadEvidence(proof, token, screenshot);
                 int status = upload.httpStatus;
                 if (status >= 200 && status < 300 && sameSession(session, character)) {
-                    String message = "Bingo evidence uploaded.";
-                    if ("approved".equals(upload.proofStatus)) message = "Bingo evidence approved.";
+                    // A small individual observation updates the website's
+                    // progress bar; printing every +1 kill/drop would flood chat.
+                    String message = null;
+                    if ("approved".equals(upload.proofStatus)) message = "Bingo objective completed automatically.";
                     else if ("pending".equals(upload.proofStatus)) message = "Bingo evidence sent for review.";
                     else if ("rejected".equals(upload.proofStatus)) message = "Bingo evidence was rejected. See the website.";
-                    plugin.sendChatMessage(ChatPalette.Tone.DONE, message);
+                    if (message != null) plugin.sendChatMessage(ChatPalette.Tone.DONE, message);
                 }
                 if ((status >= 200 && status < 300) || status == 400 || status == 404 || status == 413) {
                     plugin.pendingSubmissionStore.remove(proof);
@@ -189,8 +190,11 @@ final class AutomaticEvidence {
                 break; // Leave stable capture IDs on disk for the next retry pass.
             }
         }
-        if (sameSession(session, character)) rules = new BoardRules(session, character,
-            System.currentTimeMillis() + RULE_TTL_MS, List.copyOf(matches), held);
+        if (sameSession(session, character)) {
+            rules = new BoardRules(session, character,
+                System.currentTimeMillis() + RULE_TTL_MS, List.copyOf(matches), held);
+            queuedThisSync.set(0);
+        }
     }
 
     private boolean sameSession(String session, String character) {
@@ -252,21 +256,6 @@ final class AutomaticEvidence {
         for (var match : snapshot.matches) {
             if ("npc_kill".equals(match.rule.kind) && Integer.valueOf(npcId).equals(match.rule.npc_id)) {
                 var proof = prepare(snapshot, match, captureId, npcId, 1, "", false);
-                if (proof != null) captures.add(proof);
-            }
-        }
-        capture(snapshot, captures);
-    }
-
-    void named(String kind, String name) {
-        var snapshot = ready();
-        if (snapshot == null || name == null) return;
-        var captures = new ArrayList<PendingSubmission>();
-        var captureId = UUID.randomUUID().toString();
-        for (var match : snapshot.matches) {
-            var id = match.rule.namedId(kind, name);
-            if (id != null) {
-                var proof = prepare(snapshot, match, captureId, id, 1, "", false);
                 if (proof != null) captures.add(proof);
             }
         }
@@ -353,9 +342,20 @@ final class AutomaticEvidence {
     private PendingSubmission prepare(BoardRules snapshot, Match match, String captureId,
                                       int evidenceId, int quantity, String source, boolean repeat) {
         long now = System.currentTimeMillis();
-        attempted.values().removeIf(at -> now - at >= CAPTURE_COOLDOWN_MS);
-        if (attempted.size() >= MAX_PENDING_FOR_SESSION - snapshot.pending
-            || attempted.putIfAbsent(match.rule.tile, now) != null) return null;
+        boolean cumulative = "drop".equals(match.rule.kind) || "gain".equals(match.rule.kind)
+            || "npc_kill".equals(match.rule.kind);
+        if (cumulative) {
+            // Repeated drops/kills are distinct legitimate observations:
+            // cooldown-based suppression would silently lose cumulative gains.
+            if (queuedThisSync.incrementAndGet() + snapshot.pending > MAX_PENDING_FOR_SESSION) {
+                queuedThisSync.decrementAndGet();
+                return null;
+            }
+        } else {
+            attempted.values().removeIf(at -> now - at >= CA_CAPTURE_COOLDOWN_MS);
+            if (attempted.size() >= MAX_PENDING_FOR_SESSION - snapshot.pending
+                || attempted.putIfAbsent(match.rule.tile, now) != null) return null;
+        }
         var pending = new PendingSubmission();
         pending.runeliteCaptureId = captureId;
         pending.runeliteSession = snapshot.session;
@@ -378,10 +378,28 @@ final class AutomaticEvidence {
             if (!sameSession(snapshot.session, snapshot.character)) return;
             try {
                 byte[] screenshot = SoulrendPlugin.jpeg(image);
-                for (var proof : captures) plugin.pendingSubmissionStore.save(proof, screenshot);
+                boolean saved = false;
+                for (var proof : captures) {
+                    if (plugin.pendingSubmissionStore.save(proof, screenshot) != null) saved = true;
+                }
+                if (saved) flushSoon();
             } catch (IOException ignored) {
                 // No evidence file was committed. Never send a capture without an image.
             }
         }, null);
+    }
+
+    /** Keep the server's progress counter responsive after each game occurrence. */
+    private void flushSoon() {
+        var executor = plugin.executor;
+        if (executor == null || executor.isShutdown() || !flushScheduled.compareAndSet(false, true)) return;
+        try {
+            executor.schedule(() -> {
+                flushScheduled.set(false);
+                if (enabled()) sync();
+            }, 1500, TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException ignored) {
+            flushScheduled.set(false);
+        }
     }
 }

@@ -3000,20 +3000,24 @@ public class SoulrendPlugin extends Plugin {
 			maybeNotifyRareDrop(name, event.getItems(), "pickpocket");
 			return;
 		}
-		npcLoot(name, event.getItems());
+		boolean firstWasClientFallback = firstServerLoot && name != null
+			&& name.equalsIgnoreCase(fallbackKillName)
+			&& client.getTickCount() - fallbackKillTick <= 2;
+		npcLoot(name, event.getItems(), !firstWasClientFallback);
 		maybeNotifyRareDrop(name, event.getItems(), "npc");
 		// Count kills + value off the SERVER event — it fires once per real kill, so a barraged clump of
 		// same-tick deaths is counted in full (NpcLootReceived under-fires those). See serverNpcLootSeen.
-		if (firstServerLoot && name != null && name.equalsIgnoreCase(fallbackKillName)
-			&& client.getTickCount() - fallbackKillTick <= 2 /* FALLBACK_KILL_TICKS */) return; // the client-side fallback already counted this very kill (see fallbackKillName)
+		if (firstWasClientFallback) return; // the client-side fallback already counted this very kill (see fallbackKillName)
 		automaticEvidence.npcKill(event.getComposition().getId());
 		processValueTiles(name, event.getItems(), "npc");
 		processNpcKill(name);
 	}
 
 	/** A kill's loot: its vestige rolls, then the drop tiles for whatever no chat line already credited. */
-	void npcLoot(String name, Collection<ItemStack> items) {
-		automaticEvidence.drop(items, "npc");
+	void npcLoot(String name, Collection<ItemStack> items, boolean creditAutomaticEvidence) {
+		// ServerNpcLoot owns the canonical count; client-side NpcLootReceived
+		// can also fire for the same kill and must not double the totals.
+		if (creditAutomaticEvidence) automaticEvidence.drop(items, "npc");
 		trackVestigeRolls(name, items);
 		processLoot(name, chatCredits.unclaimed(items, now()), "npc");
 	}
@@ -3021,7 +3025,7 @@ public class SoulrendPlugin extends Plugin {
 	@Subscribe
 	void onNpcLootReceived(NpcLootReceived event) {
 		var name = event.getNpc().getName();
-		npcLoot(name, event.getItems());
+		npcLoot(name, event.getItems(), !serverNpcLootSeen);
 		recordEventLoot(name, event.getItems(), "npc");
 		maybeNotifyRareDrop(name, event.getItems(), "npc");
 		// Kill + value counting is owned by ServerNpcLoot when the client emits it (accurate under
@@ -3085,7 +3089,9 @@ public class SoulrendPlugin extends Plugin {
 		// raid twice. Restricted to EVENT loot — NPC kills come through onNpcLootReceived, and
 		// loot keys were re-typed to "pvp" above.
 		if ("event".equals(kind)) processNpcKill(source);
-		if (!isInventoryDiffLoot(source, event.getType())) automaticEvidence.drop(items, kind);
+		// Generic NPC loot duplicates the canonical server/fallback signal.
+		if (!"npc".equals(kind) && !isInventoryDiffLoot(source, event.getType()))
+			automaticEvidence.drop(items, kind);
 		processLoot(source, chatCredits.unclaimed(items, now()), kind);
 		processValueTiles(source, items, kind);
 		recordEventLoot(source, items, kind);
@@ -3566,7 +3572,7 @@ public class SoulrendPlugin extends Plugin {
 				maybeNotifyDiaryCompletion(area, tier);
 				recordFeedMoment(new Moment("diary", null, area, 1, null, null, null, null, null, tier,
 						now(), ("diary|" + area + "|" + tier).toLowerCase(ROOT)));
-				automaticEvidence.named("diary", area + " " + tier);
+				// Retired as a RuneLite bingo evidence source; historical site records remain unchanged.
 				creditDiaryTiles(area, tier);
 			}
 		}
@@ -3637,7 +3643,7 @@ public class SoulrendPlugin extends Plugin {
 		var t = now();
 		recentClogUnlocks.values().removeIf(at -> t - at > 15_000 /* CLOG_UNLOCK_SAME_MS */);
 		if (recentClogUnlocks.putIfAbsent(item.toLowerCase(ROOT), t) != null) return; // the other line for this unlock got here first
-		automaticEvidence.named("clog", item);
+		// Retired as a RuneLite bingo evidence source; historical site records remain unchanged.
 		// A pet drop moments ago is still waiting to learn WHICH pet it was — this line is the
 		// only thing that says so. It takes the name and both clog posts stand down, or the same
 		// pet lands twice, once as 🐾 and once as 📕.
