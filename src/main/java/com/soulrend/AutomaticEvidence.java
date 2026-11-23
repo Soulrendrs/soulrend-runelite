@@ -17,6 +17,7 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.function.IntUnaryOperator;
 
 /** Reuses the gameplay signals, next game frame, and durable proof store from Anvil. */
@@ -361,9 +362,20 @@ final class AutomaticEvidence {
     private PendingSubmission prepare(BoardRules snapshot, Match match, String captureId,
                                       int evidenceId, int quantity, String source, boolean repeat) {
         long now = System.currentTimeMillis();
-        attempted.values().removeIf(at -> now - at >= CAPTURE_COOLDOWN_MS);
-        if (attempted.size() >= MAX_PENDING_FOR_SESSION - snapshot.pending
-            || attempted.putIfAbsent(match.rule.tile, now) != null) return null;
+        boolean cumulative = "drop".equals(match.rule.kind) || "gain".equals(match.rule.kind)
+            || "npc_kill".equals(match.rule.kind);
+        if (cumulative) {
+            // Repeated drops/kills are distinct legitimate observations:
+            // cooldown-based suppression would silently lose cumulative gains.
+            if (queuedThisSync.incrementAndGet() + snapshot.pending > MAX_PENDING_FOR_SESSION) {
+                queuedThisSync.decrementAndGet();
+                return null;
+            }
+        } else {
+            attempted.values().removeIf(at -> now - at >= CA_CAPTURE_COOLDOWN_MS);
+            if (attempted.size() >= MAX_PENDING_FOR_SESSION - snapshot.pending
+                || attempted.putIfAbsent(match.rule.tile, now) != null) return null;
+        }
         var pending = new PendingSubmission();
         pending.runeliteCaptureId = captureId;
         pending.runeliteSession = snapshot.session;
@@ -386,10 +398,28 @@ final class AutomaticEvidence {
             if (!sameSession(snapshot.session, snapshot.character)) return;
             try {
                 byte[] screenshot = SoulrendPlugin.jpeg(image);
-                for (var proof : captures) plugin.pendingSubmissionStore.save(proof, screenshot);
+                boolean saved = false;
+                for (var proof : captures) {
+                    if (plugin.pendingSubmissionStore.save(proof, screenshot) != null) saved = true;
+                }
+                if (saved) flushSoon();
             } catch (IOException ignored) {
                 // No evidence file was committed. Never send a capture without an image.
             }
         }, null);
+    }
+
+    /** Keep the server's progress counter responsive after each game occurrence. */
+    private void flushSoon() {
+        var executor = plugin.executor;
+        if (executor == null || executor.isShutdown() || !flushScheduled.compareAndSet(false, true)) return;
+        try {
+            executor.schedule(() -> {
+                flushScheduled.set(false);
+                if (enabled()) sync();
+            }, 1500, TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException ignored) {
+            flushScheduled.set(false);
+        }
     }
 }
