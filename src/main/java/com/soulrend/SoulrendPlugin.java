@@ -146,6 +146,7 @@ public class SoulrendPlugin extends Plugin {
 
 	@Inject
 	PendingSubmissionStore pendingSubmissionStore;
+	final BingoCompletionMonitor bingoCompletions = new BingoCompletionMonitor(this);
 	final AutomaticEvidence automaticEvidence = new AutomaticEvidence(this);
 	final InstallationIdentity installationIdentity = new InstallationIdentity();
 
@@ -1499,6 +1500,7 @@ public class SoulrendPlugin extends Plugin {
 	}
 
 	protected void shutDown() {
+		bingoCompletions.clear();
 		automaticEvidence.clear();
 		sessionGains.reset();
 		keyManager.unregisterKeyListener(eventChatKey);
@@ -2328,7 +2330,7 @@ public class SoulrendPlugin extends Plugin {
 		lastRaidPartySize = raidParty;
 		// Baseline CA points once after login (before any completion) so we can tell first
 		// completions (points rise) from recompletions (points unchanged).
-		if (!caPointsInitialized && loggedIn()) {
+		if (!caPointsInitialized && loggedIn() && !statsAreArtificial()) {
 			int p = client.getVarbitValue(VarbitID.CA_POINTS);
 			if (p > 0 || client.getVarbitValue(VarbitID.CA_THRESHOLD_EASY) > 0) {
 				lastCaPoints = p;
@@ -2459,6 +2461,13 @@ public class SoulrendPlugin extends Plugin {
 		// session forgets the baselines — the next account's balances are not this one's.
 		var gs = event.getGameState();
 		boolean on = gs == GameState.LOGGED_IN, off = gs == GameState.LOGIN_SCREEN, hop = gs == GameState.HOPPING;
+		if (off) {
+			bingoCompletions.clear();
+			lastCaPoints = -1;
+			caPointsInitialized = false;
+			pendingCaTasks.clear();
+			notifiedCaTasks.clear();
+		}
 		if (on || off) markSeasonalWorld();
 		// The relay's public room is the world: a hop (or a log in) re-tickets it.
 		if (on) pushSoon();

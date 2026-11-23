@@ -107,6 +107,15 @@ public class BingoClogBannerOverlay extends Overlay {
 		return true;
 	}
 
+	/** Called on the client thread when the signed-in bingo scope changes. */
+	void removeBanners(String title) {
+		queue.removeIf(banner -> title.equals(banner[0]));
+		if (active != null && title.equals(active[0])) {
+			active = null;
+			wrapped = null;
+		}
+	}
+
 	/** Banners past the three waiting: one "+N more" closes the run, the rest is in chat and the panel. */
 	final AtomicInteger folded = new AtomicInteger();
 
