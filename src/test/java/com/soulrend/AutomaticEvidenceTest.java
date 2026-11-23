@@ -64,6 +64,23 @@ public class AutomaticEvidenceTest {
     }
 
     @Test
+    public void npcGroupsCountVerifiedVariantsButNotOtherNpcIds() {
+        var rule = new AutomaticEvidence.Rule();
+        rule.kind = "npc_kill";
+        rule.npc_id = 3014;
+        assertTrue(rule.matchesNpc(3014));
+        assertFalse(rule.matchesNpc(3106));
+        rule.npc_ids = new int[] {3014, 3106, 3107};
+        assertTrue(rule.matchesNpc(3014));
+        assertTrue(rule.matchesNpc(3106));
+        assertTrue(rule.matchesNpc(3107));
+        assertFalse(rule.matchesNpc(1118)); // Similar name, different combat level.
+        assertFalse(rule.matchesNpc(-1));
+        rule.kind = "drop";
+        assertFalse(rule.matchesNpc(3014));
+    }
+
+    @Test
     public void repeatCombatTasksRequireAnExplicitRule() {
         var rule = new AutomaticEvidence.Rule();
         rule.kind = "ca";

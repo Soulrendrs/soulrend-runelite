@@ -33,8 +33,18 @@ final class AutomaticEvidence {
         int tile;
         String kind;
         Integer item_id, quantity, task_id, npc_id;
+        int[] npc_ids;
         String source, task_name;
         boolean allow_repeat;
+
+        boolean matchesNpc(int observedNpcId) {
+            if (!"npc_kill".equals(kind) || npc_id == null || observedNpcId <= 0) return false;
+            if (npc_ids != null && npc_ids.length > 0) {
+                for (int allowed : npc_ids) if (allowed == observedNpcId) return true;
+                return false;
+            }
+            return npc_id == observedNpcId;
+        }
 
         boolean matchesDrop(Map<Integer, Integer> items, String actualSource) {
             return "drop".equals(kind) && item_id != null
@@ -263,7 +273,7 @@ final class AutomaticEvidence {
         var captures = new ArrayList<PendingSubmission>();
         var captureId = UUID.randomUUID().toString();
         for (var match : snapshot.matches) {
-            if ("npc_kill".equals(match.rule.kind) && Integer.valueOf(npcId).equals(match.rule.npc_id)) {
+            if (match.rule.matchesNpc(npcId)) {
                 var proof = prepare(snapshot, match, captureId, npcId, 1, "", false);
                 if (proof != null) captures.add(proof);
             }
