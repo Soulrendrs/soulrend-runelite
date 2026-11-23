@@ -31,11 +31,6 @@ final class GlyphIcon implements Icon {
 		this(shape, size, null);
 	}
 
-	GlyphIcon(Shape shape, int size, Color color) {
-		this.shape = shape;
-		this.size = size;
-		this.color = color;
-	}
 
 	public int getIconWidth() {
 		return size;

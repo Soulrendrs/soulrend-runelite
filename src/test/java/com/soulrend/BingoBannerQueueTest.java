@@ -5,7 +5,7 @@ import static org.junit.Assert.*;
 
 public class BingoBannerQueueTest {
     private static BingoBannerQueue.Card card(String tile, String detail, boolean completed) {
-        return new BingoBannerQueue.Card(tile, "Coins", "Team", detail, completed, () -> {}, 0, null);
+        return new BingoBannerQueue.Card(tile, "Coins", "Team", detail, completed, () -> {}, 0, null, null);
     }
 
     @Test
@@ -53,7 +53,7 @@ public class BingoBannerQueueTest {
         var starts = new java.util.concurrent.atomic.AtomicInteger();
         for (int i = 0; i < 12; i++) {
             assertTrue(queue.offer(new BingoBannerQueue.Card("3:" + i, "Coins", "Team",
-                "Complete", true, starts::incrementAndGet, 0, null)));
+                "Complete", true, starts::incrementAndGet, 0, null, null)));
         }
         assertEquals(0, starts.get());
         for (int i = 0; i < 12; i++) {

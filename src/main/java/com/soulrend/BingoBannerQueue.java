@@ -14,11 +14,11 @@ final class BingoBannerQueue {
         final boolean completed;
         final Runnable onShown;
         final int itemId;
-        final String iconPath;
+        final String iconPath, skill;
         volatile Icon icon;
 
         Card(String key, String objective, String team, String detail, boolean completed,
-             Runnable onShown, int itemId, String iconPath) {
+             Runnable onShown, int itemId, String iconPath, String skill) {
             this.key = key;
             this.objective = objective;
             this.team = team;
@@ -27,6 +27,7 @@ final class BingoBannerQueue {
             this.onShown = onShown;
             this.itemId = itemId;
             this.iconPath = iconPath;
+            this.skill = skill;
         }
     }
 

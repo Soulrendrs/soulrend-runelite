@@ -159,7 +159,7 @@ final class BingoCompletionMonitor {
             : String.format(Locale.ROOT, "%,d / %,d · %s", tile.value, tile.target, contributor);
         var card = new BingoBannerQueue.Card(event.id + ":" + tile.id, tile.name, event.team,
             detail, true, () -> plugin.bannerSound.playBingoCue(BannerSoundService.BingoCue.COMPLETION),
-            tile.item_id, tile.icon_path);
+            tile.item_id, tile.icon_path, tile.skill);
         plugin.clogBanner.bingoCards.offer(card);
         plugin.sendChatMessage(ChatPalette.Tone.DONE, "Bingooooo! " + tile.name + " · " + contributor);
     }
@@ -175,6 +175,6 @@ final class BingoCompletionMonitor {
             : BannerSoundService.BingoCue.TEAM_PROGRESS;
         plugin.clogBanner.bingoCards.offer(new BingoBannerQueue.Card(event.id + ":" + tile.id,
             tile.name, event.team, progress + " · " + contributor, false,
-            () -> plugin.bannerSound.playBingoCue(cue), tile.item_id, tile.icon_path));
+            () -> plugin.bannerSound.playBingoCue(cue), tile.item_id, tile.icon_path, null));
     }
 }

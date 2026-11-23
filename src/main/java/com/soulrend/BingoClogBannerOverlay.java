@@ -3,7 +3,9 @@ package com.soulrend;
 import net.runelite.api.Client;
 import net.runelite.api.gameval.InterfaceID;
 import net.runelite.client.ui.FontManager;
+import net.runelite.api.Skill;
 import net.runelite.client.game.ItemManager;
+import net.runelite.client.game.SkillIconManager;
 import javax.swing.ImageIcon;
 import net.runelite.client.ui.overlay.*;
 
@@ -75,6 +77,9 @@ public class BingoClogBannerOverlay extends Overlay {
 
 	@Inject
 	BingoApiClient api;
+
+	@Inject
+	SkillIconManager skills;
 
 	BingoBannerQueue.Card lastBingoCard;
 
@@ -151,6 +156,13 @@ public class BingoClogBannerOverlay extends Overlay {
 					lastBingoCard = bingo;
 					if (bingo.icon == null && bingo.itemId > 0) {
 						bingo.icon = new ImageIcon(items.getImage(bingo.itemId));
+					} else if (bingo.icon == null && bingo.skill != null) {
+						try {
+							var skill = Skill.valueOf(bingo.skill.toUpperCase(Locale.ROOT));
+							bingo.icon = new ImageIcon(skills.getSkillImage(skill, true));
+						} catch (IllegalArgumentException ignored) {
+							// Unrecognized metrics use the default card icon.
+						}
 					} else if (bingo.icon == null && BingoApiClient.isBingoIconPath(bingo.iconPath)) {
 						api.thumb(bingo.iconPath, 32, 32, false, icon -> bingo.icon = icon);
 					}
