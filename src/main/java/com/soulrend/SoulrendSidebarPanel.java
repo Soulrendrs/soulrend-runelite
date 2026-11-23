@@ -1296,7 +1296,17 @@ public class SoulrendSidebarPanel extends PluginPanel {
                 reading = false;
                 if (!onScreen || !Objects.equals(token, api.playerToken) || !Objects.equals(character, data.myRsn()) || api.isAccountPaused()) return;
                 var rows = column();
-                rows.add(boardText("Playing as " + character, SMALL, BINGO_TEXT));
+                var account = new JPanel(new BorderLayout(4, 0));
+                account.setOpaque(false);
+                var characterLabel = small("Playing as " + character, BINGO_TEXT);
+                characterLabel.setToolTipText(character);
+                account.add(characterLabel, CENTER);
+                var sounds = flatButton("", "Bingo notification sounds", BINGO_TEXT, () ->
+                    showMessageDialog(this, buildBingoSoundControls(), "Bingo notification sounds", PLAIN_MESSAGE));
+                sounds.setIcon(new GlyphIcon(GEAR, 13));
+                sounds.getAccessibleContext().setAccessibleName("Bingo notification sounds");
+                account.add(sounds, EAST);
+                rows.add(capH(account));
                 boolean failed = list == null || list.events == null || (event != null && board == null);
                 retrySeconds = failed ? Math.min(240, retrySeconds * 2) : 30;
                 nextRead = System.currentTimeMillis() + retrySeconds * 1000L;
@@ -1907,11 +1917,25 @@ public class SoulrendSidebarPanel extends PluginPanel {
 	 * .wav files are on your disk — so the list is the same wherever you are in the panel. A lit
 	 * swatch is in the play cycle, a hollow one is muted, and clicking the row flips it.
 	 */
-	JPanel buildBannerSounds() {
-		var clips = data.sounds(BANNER);
+	private JPanel buildBingoSoundControls() {
 		var panel = column();
-		panel.add(cardTitle("Bingo notification sounds"));
-		panel.add(note("40% default. Adjust volume and mute categories in RuneLite's Soulrend plugin settings.", 172));
+		Integer saved = configManager == null ? null
+			: configManager.getConfiguration("soulrendbingo", "bannerSoundVolume", int.class);
+		var volume = new JSlider(0, 100, saved == null ? 40 : Math.max(0, Math.min(100, saved)));
+		volume.setOpaque(false);
+		volume.getAccessibleContext().setAccessibleName("Bingo notification volume");
+		var volumeLabel = small("Volume " + volume.getValue() + "%", WHITE);
+		volumeLabel.setLabelFor(volume);
+		volume.addChangeListener(event -> {
+			int value = volume.getValue();
+			volumeLabel.setText("Volume " + value + "%");
+			if (!volume.getValueIsAdjusting() && configManager != null) {
+				configManager.setConfiguration("soulrendbingo", "bannerSoundVolume", value);
+			}
+		});
+		panel.add(volumeLabel);
+		panel.add(capH(volume));
+		panel.add(note("Mute individual cues in RuneLite's Soulrend plugin settings.", 158));
 		panel.add(gap(5));
 		panel.add(fullWidth(flatButton("Preview: My progress", "Play Retro Game Notification at my configured volume",
 			WHITE, () -> data.previewBingoCue(BannerSoundService.BingoCue.SELF_PROGRESS))));
@@ -1921,6 +1945,14 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		panel.add(gap(3));
 		panel.add(fullWidth(flatButton("Preview: BINGOOOOO!", "Play Small Win at my configured volume",
 			WHITE, () -> data.previewBingoCue(BannerSoundService.BingoCue.COMPLETION))));
+		return capH(panel);
+	}
+
+	JPanel buildBannerSounds() {
+		var clips = data.sounds(BANNER);
+		var panel = column();
+		panel.add(cardTitle("Bingo notification sounds"));
+		panel.add(buildBingoSoundControls());
 		panel.add(gap(8));
 		panel.add(cardTitle("Custom banner sounds"));
 
