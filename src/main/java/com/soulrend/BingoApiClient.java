@@ -1109,6 +1109,7 @@ public class BingoApiClient {
 
 	/** {@code POST /api/plugin/ui}: one of a view's actions, answered with the view to show next. */
 	JsonObject postUi(String act, Map<String, String> args, Map<String, String> fields) {
+		if ("chat-send".equals(act)) return null;
 		return getOrNull(uiRequest(rootUrl("/api/plugin/ui")).post(json(obj("act", act, "args", strings(args), "fields", strings(fields)))), JsonObject.class);
 	}
 

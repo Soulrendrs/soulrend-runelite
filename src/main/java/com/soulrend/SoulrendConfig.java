@@ -5,7 +5,8 @@ import net.runelite.client.config.*;
 @ConfigGroup("soulrendbingo")
 public interface SoulrendConfig extends Config {
 	@ConfigItem(keyName = "automaticEvidence", name = "Automatic bingo evidence", section = bingoSection,
-		description = "Automatically send game screenshots for matching bingo objectives to Soulrend for review. Turn off to stop capture and retries.")
+		description = "Automatically send game screenshots for matching bingo objectives to soulrend.events for review. Turn off to stop capture and retries.",
+		warning = "Game screenshots and matching bingo activity will be sent to soulrend.events.")
 	default boolean automaticEvidence() { return true; }
 
 	// ---- Sections (collapsible groups, top to bottom) ----
@@ -35,7 +36,7 @@ public interface SoulrendConfig extends Config {
 
 	@ConfigSection(
 		name = "Profile sync",
-		description = "Send your collection log and best times to your Soulrend profile.",
+		description = "Send best times to your Soulrend profile.",
 		position = 9,
 		closedByDefault = true
 	)
@@ -48,22 +49,6 @@ public interface SoulrendConfig extends Config {
 		closedByDefault = true
 	)
 	String chatSection = "chatSection";
-
-	@ConfigSection(
-		name = "Soulrend chat",
-		description = "Public, clan, friends chat and private lines that Soulrend players send through Soulrend, for when the game doesn't show them.",
-		position = 7,
-		closedByDefault = true
-	)
-	String relaySection = "relaySection";
-
-	@ConfigSection(
-		name = "Event chat",
-		description = "Your boards' event chat in the game chatbox. Which boards show here is set on the Soulrend website: Settings > In-game chat.",
-		position = 8,
-		closedByDefault = true
-	)
-	String eventSection = "eventSection";
 
 	@ConfigItem(
 		keyName = "chatFeed",
@@ -116,49 +101,11 @@ public interface SoulrendConfig extends Config {
 		}
 	}
 
-	@ConfigItem(
-		keyName = "soulrendChat",
-		name = "Soulrend chat",
-		description = "See: Soulrend chat lines from other Soulrend players, shown in your chat with a small soulrend. Send: your own public, clan, friends chat and guest clan lines also go to Soulrend chat (the game's chat is unchanged). PMs: your private messages as well, only to players who have Soulrend chat on.",
-		position = 1,
-		section = "relaySection"
-	)
-	default Relay soulrendChat() {
-		return Relay.See_others;
-	}
+	default Relay soulrendChat() { return Relay.Off; }
 
-	@ConfigItem(
-		keyName = "relayWho",
-		name = "Show who's connected",
-		description = "While you send through Soulrend chat: right-click a player or a name in chat to see whether they can receive it. Lines actually relayed through Soulrend carry the Soulrend icon.",
-		position = 2,
-		section = "relaySection"
-	)
-	default boolean relayWho() {
-		return true;
-	}
+	default boolean relayWho() { return false; }
 
-	@ConfigItem(
-		keyName = "eventChatbox",
-		name = "Event chat in chatbox",
-		description = "Print your boards' event chat in the game chatbox too. Off, it stays in the panel's Feed tab, with a dot when something new comes in.",
-		position = 1,
-		section = "eventSection"
-	)
-	default boolean eventChatbox() {
-		return true;
-	}
-
-	@ConfigItem(
-		keyName = "eventChatKey",
-		name = "Event chat key",
-		description = "Opens a chat input for your board's event chat; press it again to switch channel. You can also right-click the Clan chat tab.",
-		position = 2,
-		section = "eventSection"
-	)
-	default Keybind eventChatKey() {
-		return new Keybind(java.awt.event.KeyEvent.VK_INSERT, 0);
-	}
+	default boolean eventChatbox() { return false; }
 
 	// ---- Setup ----
 
@@ -398,27 +345,9 @@ public interface SoulrendConfig extends Config {
 		return true;
 	}
 
-	@ConfigItem(
-		keyName = "syncClog",
-		name = "Sync collection log",
-		description = "Send the collection-log pages you open to your profile.",
-		position = 2,
-		section = "profileSection"
-	)
-	default boolean syncClog() {
-		return true;
-	}
+	default boolean syncClog() { return false; }
 
-	@ConfigItem(
-		keyName = "autoFullClogSync",
-		name = "Sync the whole log on open",
-		description = "Read your whole collection log when you open it, not just the pages you view.",
-		position = 4,
-		section = "profileSection"
-	)
-	default boolean autoFullClogSync() {
-		return true;
-	}
+	default boolean autoFullClogSync() { return false; }
 
 	@ConfigItem(
 		keyName = "syncPersonalBests",
