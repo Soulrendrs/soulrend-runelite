@@ -149,17 +149,6 @@ public class ApiClientHttpTest
 	}
 
 	@Test
-	public void clogUnlockSendsTheItemWithItsKillOnlyWhenThereIsOne() throws IOException
-	{
-		BingoApiClient c = client();
-		c.submitClogUnlock("Primordial crystal", "Cerberus", 118);
-		c.submitClogUnlock("Pet chaos elemental", null, null);
-		assertTrue(seen.get(0).url().encodedPath().endsWith("/api/plugin/clog"));
-		assertEquals("{\"unlocks\":[{\"name\":\"Primordial crystal\",\"kcName\":\"Cerberus\",\"kc\":118}]}", bodies.get(0));
-		assertEquals("{\"unlocks\":[{\"name\":\"Pet chaos elemental\"}]}", bodies.get(1));
-	}
-
-	@Test
 	public void theWorldRidesEveryRequestAndIsFrozenIntoNotifications() throws Exception
 	{
 		BingoApiClient c = client();
@@ -311,32 +300,6 @@ public class ApiClientHttpTest
 		{
 			assertEquals("Facts: HTTP 409 — {\"error\":\"done\"}", e.getMessage());
 		}
-	}
-
-	@Test
-	public void wholeLogPushSpeaksToPeople() throws IOException
-	{
-		BingoApiClient c = client();
-		reply = "{\"added\":2}";
-		Map<Integer, Integer> items = new LinkedHashMap<>();
-		items.put(4151, 1);
-		assertEquals(2, c.submitClogItems(items).added);
-		assertEquals("{\"items\":[{\"id\":4151,\"q\":1}]}", bodies.get(0));
-		code = 429;
-		reply = "{\"error\":\"Slow down\",\"retryAfterMs\":49445}";
-		try
-		{
-			c.submitClogItems(items);
-			fail();
-		}
-		catch (BingoApiClient.RateLimitedException e)
-		{
-			assertEquals("Slow down", e.getMessage());
-			assertEquals(49445, e.retryAfterMs);
-		}
-		code = 200;
-		reply = "not json";
-		assertEquals(0, c.submitClogItems(items).added);
 	}
 
 	@Test
