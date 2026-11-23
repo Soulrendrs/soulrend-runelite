@@ -1801,7 +1801,19 @@ public class SoulrendSidebarPanel extends PluginPanel {
 	JPanel buildBannerSounds() {
 		var clips = data.sounds(BANNER);
 		var panel = column();
-		panel.add(cardTitle("Banner sounds"));
+		panel.add(cardTitle("Bingo notification sounds"));
+		panel.add(note("40% default. Adjust volume and mute categories in RuneLite's Soulrend plugin settings.", 172));
+		panel.add(gap(5));
+		panel.add(fullWidth(flatButton("Preview: My progress", "Play Retro Game Notification at my configured volume",
+			WHITE, () -> data.previewBingoCue(BannerSoundService.BingoCue.SELF_PROGRESS))));
+		panel.add(gap(3));
+		panel.add(fullWidth(flatButton("Preview: Teammate progress", "Play Happy Bell at my configured volume",
+			WHITE, () -> data.previewBingoCue(BannerSoundService.BingoCue.TEAM_PROGRESS))));
+		panel.add(gap(3));
+		panel.add(fullWidth(flatButton("Preview: BINGOOOOO!", "Play Small Win at my configured volume",
+			WHITE, () -> data.previewBingoCue(BannerSoundService.BingoCue.COMPLETION))));
+		panel.add(gap(8));
+		panel.add(cardTitle("Custom banner sounds"));
 
 		if (clips.isEmpty()) {
 			addAll(panel, note("None added — use Add clip, or the banner folder.", 165), gap(4));
