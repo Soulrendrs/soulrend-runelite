@@ -32,8 +32,8 @@ final class AutomaticEvidence {
     static final class Rule {
         int tile;
         String kind;
-        Integer item_id, quantity, task_id, npc_id, diary_id;
-        String source, task_name, item_name, diary_name;
+        Integer item_id, quantity, task_id, npc_id;
+        String source, task_name;
         boolean allow_repeat;
 
         boolean matchesDrop(Map<Integer, Integer> items, String actualSource) {
@@ -45,13 +45,6 @@ final class AutomaticEvidence {
         boolean matchesGain(String skill, Map<Integer, Integer> gains) {
             return "gain".equals(kind) && item_id != null && skill.equals(source)
                 && gains.getOrDefault(item_id, 0) > 0;
-        }
-
-        Integer namedId(String type, String name) {
-            if (!type.equals(kind)) return null;
-            String expected = "diary".equals(type) ? diary_name : item_name;
-            if (expected == null || !expected.strip().equalsIgnoreCase(name.strip())) return null;
-            return "diary".equals(type) ? diary_id : item_id;
         }
 
         boolean matchesTask(String task, boolean repeat) {
@@ -263,21 +256,6 @@ final class AutomaticEvidence {
         for (var match : snapshot.matches) {
             if ("npc_kill".equals(match.rule.kind) && Integer.valueOf(npcId).equals(match.rule.npc_id)) {
                 var proof = prepare(snapshot, match, captureId, npcId, 1, "", false);
-                if (proof != null) captures.add(proof);
-            }
-        }
-        capture(snapshot, captures);
-    }
-
-    void named(String kind, String name) {
-        var snapshot = ready();
-        if (snapshot == null || name == null) return;
-        var captures = new ArrayList<PendingSubmission>();
-        var captureId = UUID.randomUUID().toString();
-        for (var match : snapshot.matches) {
-            var id = match.rule.namedId(kind, name);
-            if (id != null) {
-                var proof = prepare(snapshot, match, captureId, id, 1, "", false);
                 if (proof != null) captures.add(proof);
             }
         }
