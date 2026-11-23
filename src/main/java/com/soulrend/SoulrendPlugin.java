@@ -1628,7 +1628,8 @@ public class SoulrendPlugin extends Plugin {
 	void showBingoToast(int tileId, String label, long current, long required) {
 		// Opted out of popups for their own drops: the drop still counts, only the banner and its
 		// sound are skipped.
-		if (config.selfTileBanner() && clogBanner.show(label, (int) current, (int) required)) playBannerSound();
+		if (config.selfTileBanner() && clogBanner.show(label, (int) current, (int) required))
+			bannerSound.playBingoCue(current >= required ? BannerSoundService.BingoCue.COMPLETION : BannerSoundService.BingoCue.SELF_PROGRESS);
 		// Marked even when the popup is off — otherwise the TEAM banner would announce the same
 		// tile a poll later, which is the popup they just turned off arriving by another door.
 		// This drop completed the tile locally — suppress the duplicate team-completion banner.
@@ -5221,7 +5222,8 @@ public class SoulrendPlugin extends Plugin {
 		if (sidebarPanel != null) invokeLater(sidebarPanel::tileCompleted);
 		if (!config.teamCompletionBanner()) return false;
 		// A drop's own popup already showed it complete: no second popup, but the chat line still says so.
-		if (!locallyShownTiles.contains(tileId)) if (clogBanner.show("Soulrend", "Tile complete!", label)) playBannerSound();
+		if (!locallyShownTiles.contains(tileId)) if (clogBanner.show("Soulrend", "Tile complete!", label))
+			bannerSound.playBingoCue(BannerSoundService.BingoCue.COMPLETION);
 		return true;
 	}
 
@@ -5295,7 +5297,7 @@ public class SoulrendPlugin extends Plugin {
 		Set<Integer> shown = new HashSet<>();
 		for (var t : cfg.completedTiles) if (t.partOf != null && locallyShownTiles.contains(t.tileId)) shown.add(t.partOf);
 		newlyDone.stream().filter(t -> !shown.contains(t.tileId)).max(Comparator.comparingInt(t -> t.points))
-			.ifPresent(t -> { if (clogBanner.show("Soulrend", "Tile complete!", t.label)) playBannerSound(); });
+			.ifPresent(t -> { if (clogBanner.show("Soulrend", "Tile complete!", t.label)) bannerSound.playBingoCue(BannerSoundService.BingoCue.COMPLETION); });
 		// A persistent chat line for EVERY newly-completed tile (including the bannered one) — the
 		// banner is easy to miss, so leave a record naming who finished it. Stat/manual completions
 		// carry no crediting player, so those just say "Tile complete: <label>!".
