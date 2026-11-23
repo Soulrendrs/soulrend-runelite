@@ -171,9 +171,14 @@ final class AutomaticEvidence {
                 continue;
             }
             try {
-                int status = plugin.apiClient.uploadEvidence(proof, token, screenshot);
+                var upload = plugin.apiClient.uploadEvidence(proof, token, screenshot);
+                int status = upload.httpStatus;
                 if (status >= 200 && status < 300 && sameSession(session, character)) {
-                    plugin.sendChatMessage(ChatPalette.Tone.DONE, "Bingo evidence sent for review.");
+                    String message = "Bingo evidence uploaded.";
+                    if ("approved".equals(upload.proofStatus)) message = "Bingo evidence approved.";
+                    else if ("pending".equals(upload.proofStatus)) message = "Bingo evidence sent for review.";
+                    else if ("rejected".equals(upload.proofStatus)) message = "Bingo evidence was rejected. See the website.";
+                    plugin.sendChatMessage(ChatPalette.Tone.DONE, message);
                 }
                 if ((status >= 200 && status < 300) || status == 400 || status == 404 || status == 413) {
                     plugin.pendingSubmissionStore.remove(proof);
