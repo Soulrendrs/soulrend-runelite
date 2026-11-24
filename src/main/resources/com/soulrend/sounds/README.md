@@ -25,7 +25,7 @@ GitHub CI cannot incorrectly report a release-ready build containing silent cues
 
 The cue mapping uses RuneLite AudioPlayer, plays packaged files offline without
 network downloads, and preserves existing per-category switches and the adjustable
-40% default volume. These resources are separate from user-imported banner/mission
+25% default volume. These resources are separate from user-imported banner/mission
 WAV folders.
 
 Source: recordings supplied by project owner and derived from Mixkit sound effects

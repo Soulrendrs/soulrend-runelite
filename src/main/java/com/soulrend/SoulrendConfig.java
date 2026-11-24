@@ -230,12 +230,12 @@ public interface SoulrendConfig extends Config {
 	@ConfigItem(
 		keyName = "bannerSoundVolume",
 		name = "Banner volume",
-		description = "Volume of Soulrend notification sounds (0–100). Default 40%.",
+		description = "Volume of Soulrend notification sounds (0–100). Default 25%.",
 		position = 6,
 		section = "bingoSection"
 	)
 	default int bannerSoundVolume() {
-		return 40;
+		return 25;
 	}
 
 	@ConfigItem(
