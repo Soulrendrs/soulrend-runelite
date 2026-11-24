@@ -24,11 +24,12 @@ final class BingoCompletionCard {
     private BingoCompletionCard() {}
 
     static Color accent(BingoBannerQueue.Card card) {
-        return card.evidence ? EVIDENCE : card.completed ? GOLD : card.self ? PURPLE : BLUE;
+        return card.evidence ? EVIDENCE : card.teamFinished() || card.unlocked() ? MINT
+            : card.completed ? GOLD : card.self ? PURPLE : BLUE;
     }
 
     static String heading(BingoBannerQueue.Card card) {
-        return card.teamFinished() ? "TEAM BINGO COMPLETE!" : card.evidence ? "Evidence captured" : card.completed ? "BINGOOOOO!"
+        return card.teamFinished() ? "TEAM BINGO COMPLETE!" : card.unlocked() ? "Objective unlocked" : card.evidence ? "Evidence captured" : card.completed ? "BINGOOOOO!"
             : card.self ? "Objective progress" : "Teammate progress";
     }
 
@@ -55,7 +56,7 @@ final class BingoCompletionCard {
             var accent = accent(card);
             g.setColor(new Color(0x100b16));
             g.fillRoundRect(2, 3, WIDTH - 2, HEIGHT - 3, 14, 14);
-            g.setPaint(new GradientPaint(0, 0, card.completed ? new Color(0x382937) : new Color(0x292038),
+            g.setPaint(new GradientPaint(0, 0, card.teamFinished() ? new Color(0x204332) : card.completed ? new Color(0x382937) : new Color(0x292038),
                 0, HEIGHT, new Color(0x18121f)));
             g.fillRoundRect(1, 1, WIDTH - 3, HEIGHT - 4, 14, 14);
             g.setColor(accent);
@@ -64,8 +65,8 @@ final class BingoCompletionCard {
                 g.setColor(new Color(0x8f7042));
                 g.drawRoundRect(4, 4, WIDTH - 9, HEIGHT - 10, 11, 11);
                 if (animations) {
-                    for (int i = 0; i < 8; i++) {
-                        int x = i < 4 ? 9 + i * 5 : WIDTH - 10 - (i - 4) * 5;
+                    for (int i = 0; i < (card.teamFinished() ? 12 : 8); i++) {
+                        int x = i % 2 == 0 ? 9 + (i / 2) * 4 : WIDTH - 10 - (i / 2) * 4;
                         int y = 12 + (int) ((Math.max(0, elapsed) / 30 + i * 13) % 86);
                         g.setColor(new Color(240, 202, 121, 90 + (int) ((elapsed / 10 + i * 19) % 100)));
                         g.fillPolygon(new int[]{x, x + 2, x, x - 2}, new int[]{y - 3, y, y + 3, y}, 4);
@@ -82,7 +83,7 @@ final class BingoCompletionCard {
             g.setFont(FontManager.getRunescapeSmallFont());
             line(g, "SOULREND BINGO", 67, 9, WIDTH - 83, accent);
             g.setFont(FontManager.getRunescapeBoldFont());
-            line(g, heading(card), 67, 23, WIDTH - 83, card.completed ? GOLD : PARCHMENT);
+            line(g, heading(card), 67, 23, WIDTH - 83, card.completed || card.unlocked() ? accent : PARCHMENT);
             String gain = !card.completed && !card.evidence && card.quantity > 0
                 ? String.format(Locale.ROOT, "+%,d", card.quantity) : "";
             int gainWidth = gain.isEmpty() ? 0 : Math.min(100, g.getFontMetrics().stringWidth(gain) + 12);
@@ -111,7 +112,7 @@ final class BingoCompletionCard {
                 if (!card.self && card.contributor != null && !card.contributor.isBlank())
                     line(g, "By: " + card.contributor, 15, 96, WIDTH - 31, LAVENDER);
             } else {
-                line(g, card.detail, 15, 72, WIDTH - 31, card.completed ? MINT : LAVENDER);
+                line(g, card.detail, 15, 72, WIDTH - 31, card.completed || card.unlocked() ? MINT : LAVENDER);
                 if ((card.evidence || card.teamFinished()) && card.team != null)
                     line(g, card.team, 15, 91, WIDTH - 31, LAVENDER);
             }
@@ -132,6 +133,13 @@ final class BingoCompletionCard {
             } finally {
                 image.dispose();
             }
+        } else if (card.teamFinished()) {
+            g.setColor(GOLD);
+            g.fillRoundRect(25, 22, 20, 15, 4, 4);
+            g.drawRoundRect(19, 23, 10, 12, 6, 6);
+            g.drawRoundRect(41, 23, 10, 12, 6, 6);
+            g.fillRect(33, 36, 4, 9);
+            g.fillRoundRect(27, 45, 16, 4, 2, 2);
         } else {
             g.setColor(accent);
             g.fillPolygon(new int[]{35, 43, 35, 27}, new int[]{24, 35, 46, 35}, 4);
