@@ -33,6 +33,7 @@ final class BingoCompletionMonitor {
         final Set<Integer> seen = new HashSet<>();
         final Map<Integer, ProgressTile> progress = new HashMap<>();
         boolean progressInitialized;
+        Boolean teamFinished;
 
         Board(long participation) {
             this.participation = participation;
@@ -133,6 +134,15 @@ final class BingoCompletionMonitor {
         return updated;
     }
 
+    synchronized boolean observeTeamFinish(int event, CompletionFeed feed) {
+        var board = boards.get(event);
+        if (board == null || feed == null || board.participation != feed.participation
+            || feed.team_finished == null) return false;
+        boolean changed = Boolean.FALSE.equals(board.teamFinished) && feed.team_finished;
+        board.teamFinished = feed.team_finished;
+        return changed;
+    }
+
     void poll(List<EventSummary> events, String token, String session, String character) {
         if (!current(session, character)) return;
         useScope(session, character);
@@ -149,18 +159,21 @@ final class BingoCompletionMonitor {
             if (!current(session, character)) return;
             final List<ConfirmedTile> additions;
             final List<ProgressTile> progress;
+            final boolean teamFinished;
             synchronized (this) {
                 if (scope != origin) return;
                 additions = observe(event.id, feed);
                 progress = observeProgress(event.id, feed);
+                teamFinished = observeTeamFinish(event.id, feed);
             }
-            if (!additions.isEmpty() || !progress.isEmpty()) plugin.clientThread.invokeLater(() -> {
+            if (teamFinished || !additions.isEmpty() || !progress.isEmpty()) plugin.clientThread.invokeLater(() -> {
                 if (!current(session, character) || !Rsn.same(character, plugin.getLocalPlayerName())) return;
                 synchronized (this) {
                     if (scope != origin) return;
                 }
                 for (var tile : additions) show(event, tile);
                 for (var tile : progress) showProgress(event, tile);
+                if (teamFinished) showTeamFinish(event);
             });
         }
         synchronized (this) {
@@ -178,6 +191,16 @@ final class BingoCompletionMonitor {
 
     private boolean permits(boolean self) {
         return self ? plugin.config.selfTileBanner() : plugin.config.teamCompletionBanner();
+    }
+
+    private void showTeamFinish(EventSummary event) {
+        if (!plugin.config.teamCompletionBanner()) return;
+        String team = event.team == null ? "Your team" : event.team;
+        plugin.clogBanner.bingoCards.offer(new BingoBannerQueue.Card(event.id + ":team-finished",
+            event.name, team, team + " completed the bingo!", true,
+            () -> plugin.bannerSound.playBingoCue(BannerSoundService.BingoCue.COMPLETION),
+            0, null, null));
+        plugin.sendChatMessage(ChatPalette.Tone.DONE, team + " completed " + event.name + "!");
     }
 
     private void show(EventSummary event, ConfirmedTile tile) {
