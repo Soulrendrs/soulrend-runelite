@@ -28,6 +28,18 @@ public class RuneLiteAuthRouteGateTest
     }
 
     @Test
+    public void onlyExactPublicObjectiveArtworkRoutesAreAllowed()
+    {
+        assertTrue(BingoApiClient.productionRouteAllowed(HttpUrl.parse("https://soulrend.events/runescape-assets/npc-icon/655/")));
+        assertTrue(BingoApiClient.productionRouteAllowed(HttpUrl.parse("https://soulrend.events/static/runelite-items/526.png")));
+        assertTrue(BingoApiClient.productionRouteAllowed(HttpUrl.parse("https://soulrend.events/static/wom-metrics/attack.png")));
+        assertFalse(BingoApiClient.productionRouteAllowed(HttpUrl.parse("https://soulrend.events/runescape-assets/npc-icon/655/extra")));
+        assertFalse(BingoApiClient.productionRouteAllowed(HttpUrl.parse("https://soulrend.events/static/private.png")));
+        assertFalse(BingoApiClient.productionRouteAllowed(HttpUrl.parse("https://soulrend.events/runescape-assets/npc-icon/655/?extra=1")));
+        assertFalse(BingoApiClient.productionRouteAllowed(HttpUrl.parse("http://soulrend.events/runescape-assets/npc-icon/655/")));
+    }
+
+    @Test
     public void unitTestLocalMockServerContinuesToWork()
     {
         assertTrue(BingoApiClient.productionRouteAllowed(HttpUrl.parse("http://127.0.0.1:8080/api/plugin/config")));

@@ -58,3 +58,24 @@ tasks.register('runClient', JavaExec) {
         args project.property('rlargs').toString().trim().split('\\s+')
     }
 }
+
+// Preserve the upstream BSD-2-Clause notice in every distributed plugin JAR.
+tasks.named('jar', Jar) {
+    from('LICENSE') {
+        into 'META-INF'
+        rename { 'LICENSE-Anvil.txt' }
+    }
+}
+
+// Fail the normal Gradle check if packaging silently drops the notice.
+tasks.register('verifyBinaryLicense') {
+    dependsOn tasks.named('jar')
+    doLast {
+        def archive = tasks.named('jar').get().archiveFile.get().asFile
+        def entries = zipTree(archive).matching { include 'META-INF/LICENSE-Anvil.txt' }.files
+        if (entries.size() != 1 || entries.first().getText('UTF-8') != file('LICENSE').getText('UTF-8')) {
+            throw new GradleException('Plugin JAR is missing the complete upstream BSD license')
+        }
+    }
+}
+tasks.named('check') { dependsOn tasks.named('verifyBinaryLicense') }
