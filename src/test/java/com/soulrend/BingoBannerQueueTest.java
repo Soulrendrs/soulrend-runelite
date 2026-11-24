@@ -19,7 +19,7 @@ public class BingoBannerQueueTest {
         queue.offer(other);
         queue.offer(latest);
         assertSame(latest, queue.current(100L));
-        assertSame(other, queue.current(3511L));
+        assertSame(other, queue.current(3011L));
     }
 
     @Test
@@ -31,9 +31,9 @@ public class BingoBannerQueueTest {
         assertSame(partial, queue.current(10L));
         assertTrue(queue.offer(complete));
         assertFalse(queue.offer(partial));
-        assertSame(partial, queue.current(20L));
-        assertSame(complete, queue.current(3510L));
-        assertNull(queue.current(7010L));
+        assertSame(complete, queue.current(20L));
+        assertSame(complete, queue.current(5019L));
+        assertNull(queue.current(5020L));
     }
 
     @Test
@@ -43,10 +43,24 @@ public class BingoBannerQueueTest {
         var completion = card("2:1", "By: Teammate", true);
         assertTrue(queue.offer(completion));
         assertSame(completion, queue.current(1L));
-        assertFalse(queue.current(3501L).completed);
+        assertFalse(queue.current(5001L).completed);
         queue.clear();
-        assertNull(queue.current(3502L));
+        assertNull(queue.current(5002L));
     }
+    @Test
+    public void confirmedProgressReplacesEvidenceAndCannotBeOverwrittenByLateCapture() {
+        var queue = new BingoBannerQueue();
+        var evidence = new BingoBannerQueue.Card("1:4", "Coins", null, "Awaiting server confirmation",
+            false, () -> {}, 0, null, null, true);
+        var confirmed = card("1:4", "2 / 5", false);
+        queue.offer(evidence);
+        assertSame(evidence, queue.current(1));
+        assertTrue(queue.offer(confirmed));
+        assertSame(confirmed, queue.current(2));
+        assertFalse(queue.offer(evidence));
+        assertSame(confirmed, queue.current(3));
+    }
+
     @Test
     public void everyCompletionIsShownAndStartsAudioOnce() {
         var queue = new BingoBannerQueue();
@@ -57,7 +71,7 @@ public class BingoBannerQueueTest {
         }
         assertEquals(0, starts.get());
         for (int i = 0; i < 12; i++) {
-            long now = 1 + i * 3500L;
+            long now = 1 + i * 5000L;
             assertEquals("3:" + i, queue.current(now).key);
             queue.current(now + 100);
             assertEquals(i + 1, starts.get());
