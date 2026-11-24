@@ -198,7 +198,7 @@ final class BingoCompletionMonitor {
         String team = event.team == null ? "Your team" : event.team;
         plugin.clogBanner.bingoCards.offer(new BingoBannerQueue.Card(event.id + ":team-finished",
             event.name, team, team + " completed the bingo!", true,
-            () -> plugin.bannerSound.playBingoCue(BannerSoundService.BingoCue.COMPLETION),
+            () -> plugin.bannerSound.playBingoCue(BannerSoundService.BingoCue.TEAM_BINGO_COMPLETE),
             0, null, null));
         plugin.sendChatMessage(ChatPalette.Tone.DONE, team + " completed " + event.name + "!");
     }
