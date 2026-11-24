@@ -43,8 +43,8 @@ public class BannerSoundServiceTest
 		sound.shutdown();
 	}
 	@Test
-	public void defaultVolumeIsFortyPercent() {
-		org.junit.Assert.assertEquals(40, new SoulrendConfig() {}.bannerSoundVolume());
+	public void defaultVolumeIsTwentyFivePercent() {
+		org.junit.Assert.assertEquals(25, new SoulrendConfig() {}.bannerSoundVolume());
 	}
 
 	@Test
