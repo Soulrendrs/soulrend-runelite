@@ -384,7 +384,8 @@ public class BingoApiClient {
         }
     }
     static boolean isBingoIconPath(String path) {
-        return path != null && path.matches("/static/(?:runelite-items|wom-metrics)/[a-z0-9_]+\\.png");
+        return path != null && (path.matches("/static/(?:runelite-items|wom-metrics)/[a-z0-9_]+\\.png")
+            || path.matches("/runescape-assets/npc-icon/[1-9][0-9]{0,9}/"));
     }
 
     /** Most recent read-only bingo status. 401 means the saved device session is no longer valid. */
