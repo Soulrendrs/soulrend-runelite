@@ -343,8 +343,13 @@ public class BingoApiClient {
     static final class CompletionFeed {
         long participation;
         Boolean team_finished;
+        List<UnlockedTile> unlocked;
         List<ConfirmedTile> completed;
         List<ProgressTile> progress;
+    }
+    static final class UnlockedTile {
+        int id, item_id;
+        String name, icon_path, skill;
     }
     static final class ProgressTile {
         int id;
