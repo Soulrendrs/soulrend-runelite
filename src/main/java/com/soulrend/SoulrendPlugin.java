@@ -2397,6 +2397,9 @@ public class SoulrendPlugin extends Plugin {
 		// The name is known now; say so before the config round trip rather than after it.
 		repaintSidebar();
 		loadProfileSyncState(rsn);
+		// Load Soulrend evidence rules immediately after identity and pause gates are resolved.
+		// The legacy config refresh is not required by the native evidence API.
+		safely("initial bingo evidence sync", automaticEvidence::sync);
 		// Refresh config for the character we just logged into so tracking reflects THIS
 		// account's enrollment right away — when one person plays several accounts, only
 		// the enrolled one should track drops (don't wait for the 30s refresh cycle).

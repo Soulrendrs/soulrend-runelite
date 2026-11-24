@@ -23,6 +23,7 @@ import java.util.function.IntUnaryOperator;
 /** Reuses the gameplay signals, next game frame, and durable proof store from Anvil. */
 final class AutomaticEvidence {
     private static final long RULE_TTL_MS = 90_000;
+    static final long EVIDENCE_FLUSH_DELAY_MS = 250;
     private static final long CA_CAPTURE_COOLDOWN_MS = 12_000;
     private static final int MAX_ACTIVE_BOARDS = 5;
     private static final int MAX_PENDING_FOR_SESSION = 40;
@@ -436,7 +437,7 @@ final class AutomaticEvidence {
             executor.schedule(() -> {
                 flushScheduled.set(false);
                 if (enabled()) sync();
-            }, 1500, TimeUnit.MILLISECONDS);
+            }, EVIDENCE_FLUSH_DELAY_MS, TimeUnit.MILLISECONDS);
         } catch (RejectedExecutionException ignored) {
             flushScheduled.set(false);
         }

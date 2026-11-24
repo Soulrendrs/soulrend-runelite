@@ -12,6 +12,11 @@ import static org.junit.Assert.assertTrue;
 
 public class AutomaticEvidenceTest {
     @Test
+    public void evidenceFlushKeepsShortCoalescingWindow() {
+        assertEquals(250L, AutomaticEvidence.EVIDENCE_FLUSH_DELAY_MS);
+    }
+
+    @Test
     public void everyPositiveMatchingDropIsAnIndependentCumulativeObservation() {
         var rule = new AutomaticEvidence.Rule();
         rule.kind = "drop";
