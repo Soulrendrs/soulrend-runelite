@@ -57,7 +57,8 @@ final class BingoBannerQueue {
 
         boolean hasProgress() { return !evidence && value != null && target != null && target > 0; }
         double fraction() { return hasProgress() ? Math.max(0, Math.min(1, value / (double) target)) : 0; }
-        long holdMs() { return completed ? COMPLETION_MS : PROGRESS_MS; }
+        boolean teamFinished() { return key.endsWith(":team-finished"); }
+        long holdMs() { return teamFinished() ? 7000 : completed ? COMPLETION_MS : PROGRESS_MS; }
     }
 
     private final Deque<Card> waiting = new ArrayDeque<>();
@@ -98,7 +99,8 @@ final class BingoBannerQueue {
 
     Card current(long now) {
         if (visible == null || started != 0 && now - started >= visible.holdMs()) {
-            visible = waiting.stream().filter(card -> card.completed).findFirst().orElse(null);
+            visible = waiting.stream().filter(Card::teamFinished).findFirst().orElse(null);
+            if (visible == null) visible = waiting.stream().filter(card -> card.completed).findFirst().orElse(null);
             if (visible == null) visible = waiting.pollFirst();
             else waiting.remove(visible);
             started = 0;
