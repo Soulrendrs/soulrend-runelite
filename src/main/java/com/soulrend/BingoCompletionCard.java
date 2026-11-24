@@ -54,7 +54,7 @@ final class BingoCompletionCard {
             g.setFont(FontManager.getRunescapeSmallFont());
             line(g, "SOULREND BINGO", 56, 10, GOLD);
             g.setFont(FontManager.getRunescapeBoldFont());
-            line(g, card.completed ? "BINGOOOOO!" : "Tile progress", 56, 25, card.completed ? MINT : PARCHMENT);
+            line(g, card.completed ? "BINGOOOOO!" : card.evidence ? "Evidence captured" : "Tile progress", 56, 25, card.completed ? MINT : PARCHMENT);
             line(g, card.objective, 13, 53, PARCHMENT);
             g.setFont(FontManager.getRunescapeSmallFont());
             line(g, card.detail, 13, 73, LAVENDER);
