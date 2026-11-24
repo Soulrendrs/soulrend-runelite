@@ -367,6 +367,7 @@ public class BingoApiClient {
     }
     static final class TeamProgress {
         int visible, completed;
+        Integer main_total, main_completed;
     }
     static final class TeamStanding {
         int rank, points, completed;

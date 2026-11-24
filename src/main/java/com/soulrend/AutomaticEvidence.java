@@ -168,6 +168,7 @@ final class AutomaticEvidence {
         var pending = plugin.pendingSubmissionStore.loadAll();
         int sent = 0;
         boolean progressUploaded = false;
+        var completedEvents = new HashSet<Integer>();
         int held = (int) pending.stream().filter(proof -> proof.runeliteCaptureId != null
             && session.equals(proof.runeliteSession)).count();
         for (var proof : pending) {
@@ -192,6 +193,7 @@ final class AutomaticEvidence {
                         progressUploaded = true;
                     } else if ("pending".equals(upload.proofStatus)) message = "Bingo evidence sent for review.";
                     else if ("rejected".equals(upload.proofStatus)) message = "Bingo evidence was rejected. See the website.";
+                    if ("approved".equals(upload.proofStatus)) completedEvents.add(proof.eventId);
                     if ("npc_kill".equals(proof.evidenceKind) && "approved".equals(upload.proofStatus)
                         && upload.completion != null && upload.completion.id == proof.tileId) {
                         events.events.stream().filter(event -> event.id == proof.eventId).findFirst()
@@ -214,6 +216,18 @@ final class AutomaticEvidence {
         }
         if (progressUploaded && plugin.bingoCompletions.enabled()) {
             plugin.bingoCompletions.poll(events.events, token, session, character);
+        }
+        // Rules were fetched before uploads. Re-read only affected boards so a
+        // completed parent does not leave its children untracked for another poll.
+        for (int eventId : completedEvents) {
+            if (!sameSession(session, character)) break;
+            matches.removeIf(match -> match.event == eventId);
+            var response = plugin.apiClient.evidenceRules(eventId, token, character);
+            if (response != null && response.rules != null) {
+                for (var rule : response.rules) {
+                    if (rule != null && rule.tile > 0) matches.add(new Match(eventId, rule));
+                }
+            }
         }
         if (sameSession(session, character)) {
             rules = new BoardRules(session, character,
