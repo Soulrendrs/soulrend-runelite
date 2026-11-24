@@ -7,12 +7,17 @@ import javax.swing.Icon;
 /** Keeps one visible bingo alert and one latest queued update per event tile. */
 final class BingoBannerQueue {
     private static final int MAX_WAITING = 8;
-    private static final long HOLD_MS = 3500;
+    static final long PROGRESS_MS = 3000;
+    static final long COMPLETION_MS = 5000;
 
     static final class Card {
         final String key, objective, team, detail;
         final boolean completed;
         final boolean evidence;
+        final boolean self;
+        final Long value, target;
+        final long quantity;
+        final String contributor, scope;
         final Runnable onShown;
         final int itemId;
         final String iconPath, skill;
@@ -25,7 +30,20 @@ final class BingoBannerQueue {
 
         Card(String key, String objective, String team, String detail, boolean completed,
              Runnable onShown, int itemId, String iconPath, String skill, boolean evidence) {
+            this(key, objective, team, detail, completed, onShown, itemId, iconPath, skill,
+                evidence, true, null, null, 0, null, null);
+        }
+
+        Card(String key, String objective, String team, String detail, boolean completed,
+             Runnable onShown, int itemId, String iconPath, String skill, boolean evidence,
+             boolean self, Long value, Long target, long quantity, String contributor, String scope) {
             this.evidence = evidence;
+            this.self = self;
+            this.value = value;
+            this.target = target;
+            this.quantity = quantity;
+            this.contributor = contributor;
+            this.scope = scope;
             this.key = key;
             this.objective = objective;
             this.team = team;
@@ -36,6 +54,10 @@ final class BingoBannerQueue {
             this.iconPath = iconPath;
             this.skill = skill;
         }
+
+        boolean hasProgress() { return !evidence && value != null && target != null && target > 0; }
+        double fraction() { return hasProgress() ? Math.max(0, Math.min(1, value / (double) target)) : 0; }
+        long holdMs() { return completed ? COMPLETION_MS : PROGRESS_MS; }
     }
 
     private final Deque<Card> waiting = new ArrayDeque<>();
@@ -43,17 +65,23 @@ final class BingoBannerQueue {
     private long started;
 
     boolean offer(Card next) {
-        if (waiting.stream().anyMatch(card -> card.key.equals(next.key) && card.completed)) return false;
+        if (waiting.stream().anyMatch(card -> card.key.equals(next.key)
+            && (card.completed || next.evidence && !card.evidence))) return false;
         if (visible != null && visible.key.equals(next.key)) {
-            if (visible.completed) return false;
-            if (visible.evidence && next.completed) {
+            if (visible.completed || next.evidence && !visible.evidence) return false;
+            if (visible.evidence && !next.evidence || next.completed) {
+                if (next.icon == null && visible.itemId == next.itemId
+                    && java.util.Objects.equals(visible.iconPath, next.iconPath)
+                    && java.util.Objects.equals(visible.skill, next.skill)) next.icon = visible.icon;
                 visible = next;
                 started = 0;
                 waiting.removeIf(card -> card.key.equals(next.key));
                 return true;
             }
             if (!next.completed) {
-                next.icon = visible.icon;
+                if (next.icon == null && visible.itemId == next.itemId
+                    && java.util.Objects.equals(visible.iconPath, next.iconPath)
+                    && java.util.Objects.equals(visible.skill, next.skill)) next.icon = visible.icon;
                 visible = next;
                 return true;
             }
@@ -69,7 +97,7 @@ final class BingoBannerQueue {
     }
 
     Card current(long now) {
-        if (visible == null || started != 0 && now - started >= HOLD_MS) {
+        if (visible == null || started != 0 && now - started >= visible.holdMs()) {
             visible = waiting.stream().filter(card -> card.completed).findFirst().orElse(null);
             if (visible == null) visible = waiting.pollFirst();
             else waiting.remove(visible);
