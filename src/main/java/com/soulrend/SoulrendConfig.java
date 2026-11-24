@@ -326,6 +326,10 @@ public interface SoulrendConfig extends Config {
 		description = "Scale bingo notifications from 75% to 150%.", position = 15, section = "bingoSection")
 	default int bingoPopupScale() { return 100; }
 
+	@ConfigItem(keyName = "bingoUnlockPopups", name = "Objective unlock popups",
+		description = "Show newly available objectives from the confirmed team board.", position = 17, section = "bingoSection")
+	default boolean bingoUnlockPopups() { return true; }
+
 	@ConfigItem(
 		keyName = "shareActivity",
 		name = "Share clan posts",
