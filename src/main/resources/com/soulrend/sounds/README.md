@@ -1,6 +1,6 @@
 # Soulrend bingo notification sounds
 
-The three owner-supplied, normalized WAV assets must be committed in this directory and
+The four owner-supplied, normalized WAV assets must be committed in this directory and
 packaged in the RuneLite plugin JAR. They are deliberately renamed for stable, descriptive
 classpath paths. Do not rename/re-encode them again after installation.
 
@@ -8,7 +8,8 @@ classpath paths. Do not rename/re-encode them again after installation.
 | --- | --- | --- |
 | Teammate objective progress | `soulrend-teammate-progress.wav` | `mixkit-happy-bell-alert-601-normalized.wav` |
 | Your objective progress | `soulrend-personal-progress.wav` | `mixkit-retro-game-notification-212-normalized.wav` |
-| Confirmed bingo completion (BINGOOOOO!) | `soulrend-bingo-complete.wav` | `mixkit-small-win-2020-normalized.wav` |
+| Confirmed objective completion (BINGOOOOO!) | `soulrend-bingo-complete.wav` | `mixkit-small-win-2020-normalized.wav` |
+| Entire team bingo completion | `soulrend-team-bingo-complete.wav` | `winning-sound-effect-button.mp3` |
 
 To install the normalized recordings from the owner's local files:
 
@@ -19,7 +20,7 @@ python3 scripts/install_bingo_sounds.py /path/to/soulrend-normalized-notificatio
 ./gradlew clean test build
 ```
 
-Commit the three resulting `soulrend-*.wav` files alongside the Java changes.
+Commit the three resulting `soulrend-*.wav` files alongside the Java changes. The fourth, team victory WAV is supplied separately and must remain in this directory.
 The `BannerSoundServiceTest` suite fails when any required resource is missing, so
 GitHub CI cannot incorrectly report a release-ready build containing silent cues.
 
@@ -35,3 +36,5 @@ the sound files in a publicly available plugin source repository / RuneLite Plug
 keep the relevant license or authorization evidence with the project.
 
 Mixkit sound effects license: https://mixkit.co/license/modal/sfxFree/
+
+The team victory recording was separately supplied by the project owner. Its original source and redistribution authorization must be documented before public Plugin Hub distribution; it is not covered by the Mixkit attribution above.

@@ -219,14 +219,15 @@ public class BannerSoundService {
 
 
 	/**
-	 * Stable, bundled bingo cues. The three normalized WAV resources are intentionally distinct
+	 * Stable, bundled bingo cues. The four normalized WAV resources are intentionally distinct
 	 * from the existing user-imported banner/mission clip folders. Playback uses RuneLite AudioPlayer,
 	 * never raw Java Sound, and never downloads during gameplay.
 	 */
 	enum BingoCue {
 		TEAM_PROGRESS("sounds/soulrend-teammate-progress.wav"),
 		SELF_PROGRESS("sounds/soulrend-personal-progress.wav"),
-		COMPLETION("sounds/soulrend-bingo-complete.wav");
+		COMPLETION("sounds/soulrend-bingo-complete.wav"),
+		TEAM_BINGO_COMPLETE("sounds/soulrend-team-bingo-complete.wav");
 
 		final String resource;
 
@@ -237,14 +238,17 @@ public class BannerSoundService {
 				case TEAM_PROGRESS: return settings.teammateProgressSound();
 				case SELF_PROGRESS: return settings.ownProgressSound();
 				case COMPLETION: return settings.bingoCompletionSound();
+				case TEAM_BINGO_COMPLETE: return settings.teamBingoCompleteSound();
 				default: return false;
 			}
 		}
 	}
 
-	// AudioPlayer starts a clip and returns. The bundled cues are at most two seconds long.
+	// AudioPlayer starts a clip and returns. Leave room for the longer team celebration.
 	private long bingoAudioReady;
-	private static final long BINGO_CUE_SPACING_NS = TimeUnit.MILLISECONDS.toNanos(2100);
+	static long cueSpacingNanos(BingoCue cue) {
+		return TimeUnit.MILLISECONDS.toNanos(cue == BingoCue.TEAM_BINGO_COMPLETE ? 4300 : 2100);
+	}
 
 	void playBingoCue(BingoCue cue) {
 		queueBingoCue(cue, false);
@@ -270,7 +274,7 @@ public class BannerSoundService {
 			if (remaining > 0) TimeUnit.NANOSECONDS.sleep(remaining);
 			if (!config.bannerSound() || config.bannerSoundVolume() <= 0 || !preview && !cue.enabled(config)) return;
 			audioPlayer.play(BannerSoundService.class, cue.resource, gainDb());
-			bingoAudioReady = System.nanoTime() + BINGO_CUE_SPACING_NS;
+			bingoAudioReady = System.nanoTime() + cueSpacingNanos(cue);
 		} catch (InterruptedException e) {
 			Thread.currentThread().interrupt();
 		} catch (Exception e) {

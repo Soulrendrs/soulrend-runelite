@@ -33,6 +33,7 @@ final class BingoCompletionMonitor {
         final Set<Integer> seen = new HashSet<>();
         final Map<Integer, ProgressTile> progress = new HashMap<>();
         boolean progressInitialized;
+        Boolean teamFinished;
 
         Board(long participation) {
             this.participation = participation;
@@ -133,6 +134,15 @@ final class BingoCompletionMonitor {
         return updated;
     }
 
+    synchronized boolean observeTeamFinish(int event, CompletionFeed feed) {
+        var board = boards.get(event);
+        if (board == null || feed == null || board.participation != feed.participation
+            || feed.team_finished == null) return false;
+        boolean changed = Boolean.FALSE.equals(board.teamFinished) && feed.team_finished;
+        board.teamFinished = feed.team_finished;
+        return changed;
+    }
+
     void poll(List<EventSummary> events, String token, String session, String character) {
         if (!current(session, character)) return;
         useScope(session, character);
@@ -149,18 +159,21 @@ final class BingoCompletionMonitor {
             if (!current(session, character)) return;
             final List<ConfirmedTile> additions;
             final List<ProgressTile> progress;
+            final boolean teamFinished;
             synchronized (this) {
                 if (scope != origin) return;
                 additions = observe(event.id, feed);
                 progress = observeProgress(event.id, feed);
+                teamFinished = observeTeamFinish(event.id, feed);
             }
-            if (!additions.isEmpty() || !progress.isEmpty()) plugin.clientThread.invokeLater(() -> {
+            if (teamFinished || !additions.isEmpty() || !progress.isEmpty()) plugin.clientThread.invokeLater(() -> {
                 if (!current(session, character) || !Rsn.same(character, plugin.getLocalPlayerName())) return;
                 synchronized (this) {
                     if (scope != origin) return;
                 }
                 for (var tile : additions) show(event, tile);
                 for (var tile : progress) showProgress(event, tile);
+                if (teamFinished) showTeamFinish(event);
             });
         }
         synchronized (this) {
@@ -180,6 +193,16 @@ final class BingoCompletionMonitor {
         return self ? plugin.config.selfTileBanner() : plugin.config.teamCompletionBanner();
     }
 
+    private void showTeamFinish(EventSummary event) {
+        if (!plugin.config.teamCompletionBanner()) return;
+        String team = event.team == null ? "Your team" : event.team;
+        plugin.clogBanner.bingoCards.offer(new BingoBannerQueue.Card(event.id + ":team-finished",
+            event.name, team, team + " completed the bingo!", true,
+            () -> plugin.bannerSound.playBingoCue(BannerSoundService.BingoCue.TEAM_BINGO_COMPLETE),
+            0, null, null));
+        plugin.sendChatMessage(ChatPalette.Tone.DONE, team + " completed " + event.name + "!");
+    }
+
     private void show(EventSummary event, ConfirmedTile tile) {
         if (!permits(tile.self)) return;
         var contributor = tile.contributor == null || tile.contributor.isBlank()
@@ -188,7 +211,8 @@ final class BingoCompletionMonitor {
             : String.format(Locale.ROOT, "%,d / %,d · %s", tile.value, tile.target, contributor);
         var card = new BingoBannerQueue.Card(event.id + ":" + tile.id, tile.name, event.team,
             detail, true, () -> plugin.bannerSound.playBingoCue(BannerSoundService.BingoCue.COMPLETION),
-            tile.item_id, tile.icon_path, tile.skill);
+            tile.item_id, tile.icon_path, tile.skill, false, tile.self, tile.value, tile.target,
+            0, tile.contributor, null);
         plugin.clogBanner.bingoCards.offer(card);
         plugin.sendChatMessage(ChatPalette.Tone.DONE, "Bingooooo! " + tile.name + " · " + contributor);
     }
@@ -204,6 +228,7 @@ final class BingoCompletionMonitor {
             : BannerSoundService.BingoCue.TEAM_PROGRESS;
         plugin.clogBanner.bingoCards.offer(new BingoBannerQueue.Card(event.id + ":" + tile.id,
             tile.name, event.team, progress + " · " + contributor, false,
-            () -> plugin.bannerSound.playBingoCue(cue), tile.item_id, tile.icon_path, null));
+            () -> plugin.bannerSound.playBingoCue(cue), tile.item_id, tile.icon_path, null,
+            false, tile.self, tile.value, tile.target, tile.quantity, tile.contributor, tile.scope));
     }
 }

@@ -138,7 +138,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 	final JLabel signInStatus = small("", MUTED);
 	final JPanel signInRow = new JPanel(new BorderLayout(0, 2));
 	final JLabel signInCode = new JLabel("", SwingConstants.CENTER);
-	/** Opens the account menu: Not my account / Sign out. */
+	/** Opens the account menu: Sign out. */
 	final JLabel accountMenuLink = new JLabel(new GlyphIcon(ELLIPSIS, 14));
 	/**
 	 * Between {@link #onActivate} and {@link #onDeactivate}. Off screen, a refresh is skipped outright:
@@ -276,7 +276,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 
 		onClick(accountLink, this::onAccountButton);
 		accountStatus.setVisible(false);
-		styleLink(accountMenuLink, "Account: View my profile, Not my account, Sign out", () -> showAccountMenu(accountMenuLink));
+		styleLink(accountMenuLink, "Account: Sign out", () -> showAccountMenu(accountMenuLink));
 		// One strip for who you are here: the character being tracked on the left, and everything
 		// about the sign-in itself behind the ⋯ menu on the right. BorderLayout, not FlowLayout: every
 		// label is centred on the same line, where FlowLayout sat the link on its own baseline.
@@ -969,18 +969,6 @@ public class SoulrendSidebarPanel extends PluginPanel {
 
 	void showAccountMenu(Component anchor) {
 		var menu = new JPopupMenu();
-		var row = shownAccountRow;
-		var tracking = row != null && row.state == AccountRow.State.TRACKING;
-		// "View my profile": your own card.
-		if (tracking) item(menu, "View my profile on Soulrend", "Open " + row.rsn + "'s Soulrend profile in your browser", () -> {
-			if (tabsOn) {
-				invokeLater(() -> selectTab(YOU));
-			} else ProfileLookup.open(row.rsn);
-		});
-		if (tracking && !accountActionInFlight) {
-			item(menu, "Not my account…", "Someone else plays " + row.rsn + " here — stop tracking it on this computer", this::onAccountButton);
-			menu.addSeparator();
-		}
 		item(menu, "Sign out…", null, this::signOut);
 		menu.show(anchor, 0, anchor.getHeight());
 	}
@@ -1936,9 +1924,10 @@ public class SoulrendSidebarPanel extends PluginPanel {
 	 */
 	private JPanel buildBingoSoundControls() {
 		var panel = column();
-		Integer saved = configManager == null ? null
-			: configManager.getConfiguration("soulrendbingo", "bannerSoundVolume", int.class);
-		var volume = new JSlider(0, 100, saved == null ? 40 : Math.max(0, Math.min(100, saved)));
+		// Read the same typed configuration as BannerSoundService and RuneLite's settings.
+		SoulrendConfig settings = configManager == null ? new SoulrendConfig() {}
+			: configManager.getConfig(SoulrendConfig.class);
+		var volume = new JSlider(0, 100, Math.max(0, Math.min(100, settings.bannerSoundVolume())));
 		volume.setOpaque(false);
 		volume.getAccessibleContext().setAccessibleName("Bingo notification volume");
 		var volumeLabel = small("Volume " + volume.getValue() + "%", WHITE);
@@ -1962,6 +1951,9 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		panel.add(gap(3));
 		panel.add(fullWidth(flatButton("Preview: BINGOOOOO!", "Play Small Win at my configured volume",
 			WHITE, () -> data.previewBingoCue(BannerSoundService.BingoCue.COMPLETION))));
+		panel.add(gap(3));
+		panel.add(fullWidth(flatButton("Preview: Team bingo complete", "Play the team victory sound at my configured volume",
+			WHITE, () -> data.previewBingoCue(BannerSoundService.BingoCue.TEAM_BINGO_COMPLETE))));
 		return capH(panel);
 	}
 

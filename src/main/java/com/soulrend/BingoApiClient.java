@@ -342,6 +342,7 @@ public class BingoApiClient {
     }
     static final class CompletionFeed {
         long participation;
+        Boolean team_finished;
         List<ConfirmedTile> completed;
         List<ProgressTile> progress;
     }
