@@ -30,10 +30,30 @@ public class BingoCompletionCardTest {
         assertFalse(card(true, false, false, 1L, 0L).hasProgress());
     }
 
+    @Test public void milestonesHaveTheirOwnHeadingsAndDurations() {
+        var finish = new BingoBannerQueue.Card("1:team-finished", "Event", "Team",
+            "All objectives confirmed", true, () -> {}, 0, null, null);
+        var unlock = new BingoBannerQueue.Card("1:unlock:2", "Next objective", "Team",
+            "Now available", false, () -> {}, 0, null, null);
+        assertEquals("TEAM BINGO COMPLETE!", BingoCompletionCard.heading(finish));
+        assertEquals("Objective unlocked", BingoCompletionCard.heading(unlock));
+        assertNotEquals(BingoCompletionCard.accent(finish), BingoCompletionCard.accent(card(true, true, false, 1L, 1L)));
+        assertEquals(7000L, finish.holdMs());
+        assertEquals(5000L, unlock.holdMs());
+        var queue = new BingoBannerQueue();
+        queue.offer(card(true, false, false, 1L, 2L));
+        queue.offer(unlock);
+        queue.offer(finish);
+        assertSame(finish, queue.current(1L));
+        assertSame(unlock, queue.current(7001L));
+    }
+
     @Test public void eachVariantRendersWithoutAnimationsOrIcon() {
         var cards = new BingoBannerQueue.Card[]{
             card(true, false, false, 3L, 5L), card(false, false, false, 4L, 5L),
-            card(true, true, false, 5L, 5L), card(true, false, true, null, null)};
+            card(true, true, false, 5L, 5L), card(true, false, true, null, null),
+            new BingoBannerQueue.Card("1:team-finished", "Event", "Team", "All objectives confirmed", true, () -> {}, 0, null, null),
+            new BingoBannerQueue.Card("1:unlock:2", "Next objective", "Team", "Now available", false, () -> {}, 0, null, null)};
         for (var card : cards) {
             var image = new BufferedImage(BingoCompletionCard.WIDTH, BingoCompletionCard.HEIGHT,
                 BufferedImage.TYPE_INT_ARGB);
