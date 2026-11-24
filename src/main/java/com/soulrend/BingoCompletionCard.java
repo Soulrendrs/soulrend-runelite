@@ -28,7 +28,7 @@ final class BingoCompletionCard {
     }
 
     static String heading(BingoBannerQueue.Card card) {
-        return card.evidence ? "Evidence captured" : card.completed ? "BINGOOOOO!"
+        return card.teamFinished() ? "TEAM BINGO COMPLETE!" : card.evidence ? "Evidence captured" : card.completed ? "BINGOOOOO!"
             : card.self ? "Objective progress" : "Teammate progress";
     }
 
@@ -112,7 +112,7 @@ final class BingoCompletionCard {
                     line(g, "By: " + card.contributor, 15, 96, WIDTH - 31, LAVENDER);
             } else {
                 line(g, card.detail, 15, 72, WIDTH - 31, card.completed ? MINT : LAVENDER);
-                if (card.evidence && card.team != null)
+                if ((card.evidence || card.teamFinished()) && card.team != null)
                     line(g, card.team, 15, 91, WIDTH - 31, LAVENDER);
             }
         } finally {
