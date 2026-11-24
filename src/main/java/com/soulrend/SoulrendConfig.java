@@ -193,7 +193,7 @@ public interface SoulrendConfig extends Config {
 	@ConfigItem(
 		keyName = "teamCompletionBanner",
 		name = "Team completion popups",
-		description = "Show a banner when anyone on your team completes a tile.",
+		description = "Show a popup when a teammate progresses or completes a tile.",
 		position = 3,
 		section = "bingoSection"
 	)
@@ -311,6 +311,15 @@ public interface SoulrendConfig extends Config {
 		section = "bingoSection"
 	)
 	default boolean bingoCompletionSound() { return true; }
+
+	@ConfigItem(keyName = "bingoPopupAnimations", name = "Bingo popup animations",
+		description = "Animate popup entrances, progress bars and completion sparkles.", position = 14, section = "bingoSection")
+	default boolean bingoPopupAnimations() { return true; }
+
+	@Range(min = 75, max = 150)
+	@ConfigItem(keyName = "bingoPopupScale", name = "Bingo popup size",
+		description = "Scale bingo notifications from 75% to 150%.", position = 15, section = "bingoSection")
+	default int bingoPopupScale() { return 100; }
 
 	@ConfigItem(
 		keyName = "shareActivity",
