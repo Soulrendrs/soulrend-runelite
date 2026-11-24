@@ -48,14 +48,19 @@ public class BannerSoundServiceTest
 	}
 
 	@Test
-	public void bundledCuesHaveDistinctResourcesAndEnabledDefaults() {
+	public void bundledCuesHaveDistinctResourcesAndEnabledDefaults() throws java.io.IOException {
 		SoulrendConfig settings = new SoulrendConfig() {};
 		java.util.Set<String> resources = new java.util.HashSet<>();
 		for (BannerSoundService.BingoCue cue : BannerSoundService.BingoCue.values()) {
 			org.junit.Assert.assertTrue(cue.enabled(settings));
 			org.junit.Assert.assertTrue(cue.resource.startsWith("sounds/soulrend-"));
-			org.junit.Assert.assertNotNull("Missing bundled bingo sound: " + cue.resource,
-				BannerSoundService.class.getResource(cue.resource));
+			try (java.io.InputStream stream = BannerSoundService.class.getResourceAsStream(cue.resource)) {
+				org.junit.Assert.assertNotNull("Missing bundled bingo sound: " + cue.resource, stream);
+				byte[] wavHeader = new byte[12];
+				org.junit.Assert.assertEquals("Truncated WAV: " + cue.resource, 12, stream.read(wavHeader));
+				org.junit.Assert.assertEquals("RIFF", new String(wavHeader, 0, 4, java.nio.charset.StandardCharsets.US_ASCII));
+				org.junit.Assert.assertEquals("WAVE", new String(wavHeader, 8, 4, java.nio.charset.StandardCharsets.US_ASCII));
+			}
 			org.junit.Assert.assertTrue(resources.add(cue.resource));
 		}
 	}
