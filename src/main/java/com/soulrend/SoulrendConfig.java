@@ -312,6 +312,11 @@ public interface SoulrendConfig extends Config {
 	)
 	default boolean bingoCompletionSound() { return true; }
 
+	@ConfigItem(keyName = "teamBingoCompleteSound", name = "Team bingo completion sound",
+		description = "Play the separate victory sound when your team completes the entire bingo.",
+		position = 15, section = "bingoSection")
+	default boolean teamBingoCompleteSound() { return true; }
+
 	@ConfigItem(keyName = "bingoPopupAnimations", name = "Bingo popup animations",
 		description = "Animate popup entrances, progress bars and completion sparkles.", position = 14, section = "bingoSection")
 	default boolean bingoPopupAnimations() { return true; }
