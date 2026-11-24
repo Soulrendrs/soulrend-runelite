@@ -224,9 +224,9 @@ public class BannerSoundService {
 	 * never raw Java Sound, and never downloads during gameplay.
 	 */
 	enum BingoCue {
-		TEAM_PROGRESS("sounds/mixkit-happy-bell-alert-601-normalized.wav"),
-		SELF_PROGRESS("sounds/mixkit-retro-game-notification-212-normalized.wav"),
-		COMPLETION("sounds/mixkit-small-win-2020-normalized.wav");
+		TEAM_PROGRESS("sounds/soulrend-teammate-progress.wav"),
+		SELF_PROGRESS("sounds/soulrend-personal-progress.wav"),
+		COMPLETION("sounds/soulrend-bingo-complete.wav");
 
 		final String resource;
 

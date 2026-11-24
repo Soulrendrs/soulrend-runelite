@@ -1,26 +1,37 @@
-# Soulrend bingo notification audio assets
+# Soulrend bingo notification sounds
 
-Three small, normalized (−18 LUFS) WAV resources belong **in this folder**, under these exact names:
+The three owner-supplied, normalized WAV assets must be committed in this directory and
+packaged in the RuneLite plugin JAR. They are deliberately renamed for stable, descriptive
+classpath paths. Do not rename/re-encode them again after installation.
 
-| Event | Resource filename |
-| --- | --- |
-| Team-mate progress | `mixkit-happy-bell-alert-601-normalized.wav` |
-| Personal progress | `mixkit-retro-game-notification-212-normalized.wav` |
-| Completed bingo objective (BINGOOOOO!) | `mixkit-small-win-2020-normalized.wav` |
+| Notification | Bundled filename | Original supplied filename |
+| --- | --- | --- |
+| Teammate objective progress | `soulrend-teammate-progress.wav` | `mixkit-happy-bell-alert-601-normalized.wav` |
+| Your objective progress | `soulrend-personal-progress.wav` | `mixkit-retro-game-notification-212-normalized.wav` |
+| Confirmed bingo completion (BINGOOOOO!) | `soulrend-bingo-complete.wav` | `mixkit-small-win-2020-normalized.wav` |
 
-The Mixkit Sound Effects Free License permits incorporation into a finished game
-but restricts redistribution with source files. The three WAVs are ignored in Git.
-For a local client build, extract the owner's ZIP at the repository root. Gradle
-automatically puts the files in the JAR under `com/soulrend/sounds/`.
+To install the normalized recordings from the owner's local files:
 
-For a Plugin Hub release, obtain written permission that covers the Hub's source
-build or use recordings with terms that explicitly permit redistributing the WAVs
-alongside the plugin source.
+```sh
+python3 scripts/install_bingo_sounds.py /path/to/normalized-audio-directory
+# or:
+python3 scripts/install_bingo_sounds.py /path/to/soulrend-normalized-notification-sounds.zip
+./gradlew clean test build
+```
 
-RuneLite's `AudioPlayer` loads the packaged classpath resources. No gameplay
-downloads are required. The 0–100% notification volume defaults to 40% and has
-a separate mute switch for each cue. In a checkout that lacks the WAVs, the three
-bingo cues are silent. User-imported banners and mission audio have their own
-existing playback paths.
+Commit the three resulting `soulrend-*.wav` files alongside the Java changes.
+The `BannerSoundServiceTest` suite fails when any required resource is missing, so
+GitHub CI cannot incorrectly report a release-ready build containing silent cues.
 
-License: https://mixkit.co/license/modal/sfxFree/
+The cue mapping uses RuneLite AudioPlayer, plays packaged files offline without
+network downloads, and preserves existing per-category switches and the adjustable
+40% default volume. These resources are separate from user-imported banner/mission
+WAV folders.
+
+Source: recordings supplied by project owner and derived from Mixkit sound effects
+601, 212, and 2020. The owner states they have distribution permission. **A changed
+filename does not change licensing terms.** Permission must cover distribution of
+the sound files in a publicly available plugin source repository / RuneLite Plugin Hub;
+keep the relevant license or authorization evidence with the project.
+
+Mixkit sound effects license: https://mixkit.co/license/modal/sfxFree/
