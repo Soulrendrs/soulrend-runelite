@@ -1962,6 +1962,9 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		panel.add(gap(3));
 		panel.add(fullWidth(flatButton("Preview: BINGOOOOO!", "Play Small Win at my configured volume",
 			WHITE, () -> data.previewBingoCue(BannerSoundService.BingoCue.COMPLETION))));
+		panel.add(gap(3));
+		panel.add(fullWidth(flatButton("Preview: Team bingo complete", "Play the team victory sound at my configured volume",
+			WHITE, () -> data.previewBingoCue(BannerSoundService.BingoCue.TEAM_BINGO_COMPLETE))));
 		return capH(panel);
 	}
 
