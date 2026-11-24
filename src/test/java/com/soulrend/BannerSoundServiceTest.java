@@ -53,7 +53,9 @@ public class BannerSoundServiceTest
 		java.util.Set<String> resources = new java.util.HashSet<>();
 		for (BannerSoundService.BingoCue cue : BannerSoundService.BingoCue.values()) {
 			org.junit.Assert.assertTrue(cue.enabled(settings));
-			org.junit.Assert.assertTrue(cue.resource.endsWith("-normalized.wav"));
+			org.junit.Assert.assertTrue(cue.resource.startsWith("sounds/soulrend-"));
+			org.junit.Assert.assertNotNull("Missing bundled bingo sound: " + cue.resource,
+				BannerSoundService.class.getResource(cue.resource));
 			org.junit.Assert.assertTrue(resources.add(cue.resource));
 		}
 	}
