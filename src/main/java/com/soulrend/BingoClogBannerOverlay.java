@@ -81,6 +81,9 @@ public class BingoClogBannerOverlay extends Overlay {
 	@Inject
 	SkillIconManager skills;
 
+	@Inject
+	SoulrendConfig config;
+
 	BingoBannerQueue.Card lastBingoCard;
 
 	@Inject
@@ -167,15 +170,20 @@ public class BingoClogBannerOverlay extends Overlay {
 						api.thumb(bingo.iconPath, 32, 32, false, icon -> bingo.icon = icon);
 					}
 				}
+				double scale = config == null ? 1.0 : Math.max(75, Math.min(150, config.bingoPopupScale())) / 100.0;
+				int width = (int) Math.ceil(BingoCompletionCard.WIDTH * scale);
+				int height = (int) Math.ceil(BingoCompletionCard.HEIGHT * scale);
 				var cardGraphics = (Graphics2D) g.create();
 				try {
-					var offset = dodge(BingoCompletionCard.WIDTH, BingoCompletionCard.HEIGHT);
+					var offset = dodge(width, height);
 					if (offset != null) cardGraphics.translate(offset.x, offset.y);
-					BingoCompletionCard.paint(cardGraphics, bingo, bingoCards.elapsed(now));
+					cardGraphics.scale(scale, scale);
+					BingoCompletionCard.paint(cardGraphics, bingo, bingoCards.elapsed(now),
+						config == null || config.bingoPopupAnimations());
 				} finally {
 					cardGraphics.dispose();
 				}
-				return new Dimension(BingoCompletionCard.WIDTH, BingoCompletionCard.HEIGHT);
+				return new Dimension(width, height);
 			}
 			lastBingoCard = null;
 			if (background == null) return null;
