@@ -1936,9 +1936,10 @@ public class SoulrendSidebarPanel extends PluginPanel {
 	 */
 	private JPanel buildBingoSoundControls() {
 		var panel = column();
-		Integer saved = configManager == null ? null
-			: configManager.getConfiguration("soulrendbingo", "bannerSoundVolume", int.class);
-		var volume = new JSlider(0, 100, saved == null ? 40 : Math.max(0, Math.min(100, saved)));
+		// Read the same typed configuration as BannerSoundService and RuneLite's settings.
+		SoulrendConfig settings = configManager == null ? new SoulrendConfig() {}
+			: configManager.getConfig(SoulrendConfig.class);
+		var volume = new JSlider(0, 100, Math.max(0, Math.min(100, settings.bannerSoundVolume())));
 		volume.setOpaque(false);
 		volume.getAccessibleContext().setAccessibleName("Bingo notification volume");
 		var volumeLabel = small("Volume " + volume.getValue() + "%", WHITE);
