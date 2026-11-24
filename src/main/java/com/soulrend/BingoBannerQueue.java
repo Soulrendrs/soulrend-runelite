@@ -12,6 +12,7 @@ final class BingoBannerQueue {
     static final class Card {
         final String key, objective, team, detail;
         final boolean completed;
+        final boolean evidence;
         final Runnable onShown;
         final int itemId;
         final String iconPath, skill;
@@ -19,6 +20,12 @@ final class BingoBannerQueue {
 
         Card(String key, String objective, String team, String detail, boolean completed,
              Runnable onShown, int itemId, String iconPath, String skill) {
+            this(key, objective, team, detail, completed, onShown, itemId, iconPath, skill, false);
+        }
+
+        Card(String key, String objective, String team, String detail, boolean completed,
+             Runnable onShown, int itemId, String iconPath, String skill, boolean evidence) {
+            this.evidence = evidence;
             this.key = key;
             this.objective = objective;
             this.team = team;
@@ -39,6 +46,12 @@ final class BingoBannerQueue {
         if (waiting.stream().anyMatch(card -> card.key.equals(next.key) && card.completed)) return false;
         if (visible != null && visible.key.equals(next.key)) {
             if (visible.completed) return false;
+            if (visible.evidence && next.completed) {
+                visible = next;
+                started = 0;
+                waiting.removeIf(card -> card.key.equals(next.key));
+                return true;
+            }
             if (!next.completed) {
                 next.icon = visible.icon;
                 visible = next;
