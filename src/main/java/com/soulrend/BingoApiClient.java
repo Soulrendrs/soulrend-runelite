@@ -85,7 +85,7 @@ public class BingoApiClient {
 		// identity and revocation. Never POST inherited Anvil submissions to Soulrend.
 		.addInterceptor(chain -> {
 			var url = chain.request().url();
-			if (!productionRouteAllowed(url))
+			if (!productionRouteAllowed(url) || (isBingoIconPath(url.encodedPath()) && !"GET".equals(chain.request().method())))
 				throw new IOException("Legacy plugin routes are disabled until Soulrend implements them.");
 			return chain.proceed(chain.request());
 		})
@@ -106,7 +106,8 @@ public class BingoApiClient {
 	/** Prevent unsupported inherited endpoints from reaching the production Django site. */
 	static boolean productionRouteAllowed(HttpUrl url) {
 		return !"soulrend.events".equalsIgnoreCase(url.host())
-			|| url.encodedPath().startsWith("/api/runelite/v1/");
+			|| url.encodedPath().startsWith("/api/runelite/v1/")
+			|| (url.isHttps() && url.port() == 443 && url.query() == null && isBingoIconPath(url.encodedPath()));
 	}
 
 	/**
@@ -1171,7 +1172,9 @@ public class BingoApiClient {
 			done.accept(hit instanceof GifIcon ? ((GifIcon) hit).copy() : hit);
 			return;
 		}
-		var imageRequest = accountPaused ? publicRequest(url.toString()) : authedRequest(url.toString());
+		// Objective artwork is public; never attach character or bearer headers to it.
+		var imageRequest = isBingoIconPath(path) ? plainRequest(url.toString())
+			: accountPaused ? publicRequest(url.toString()) : authedRequest(url.toString());
 		readClient.newCall(imageRequest.get().build()).enqueue(new Callback() {
 			public void onFailure(Call call, IOException e) {
 				done.accept(null);
