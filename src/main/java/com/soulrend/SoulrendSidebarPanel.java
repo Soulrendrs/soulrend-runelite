@@ -1356,10 +1356,19 @@ public class SoulrendSidebarPanel extends PluginPanel {
                             if (board.progress != null || board.captain != null) {
                                 var overview = bingoCard(BINGO_PURPLE);
                                 if (board.progress != null) {
+                                    var progress = board.progress;
                                     overview.add(boardText("My Objectives", BOLD, WHITE));
-                                    overview.add(boardText(board.progress.completed + " / " + board.progress.visible
-                                        + " complete", SMALL, BINGO_TEXT));
-                                    overview.add(bingoMeter(board.progress.completed, board.progress.visible, BINGO_GREEN));
+                                    if (progress.main_total != null && progress.main_completed != null
+                                        && progress.main_total > 0) {
+                                        overview.add(boardText(progress.main_completed + " / " + progress.main_total
+                                            + " main objectives cleared", SMALL, BINGO_TEXT));
+                                        overview.add(bingoMeter(progress.main_completed, progress.main_total, BINGO_GREEN));
+                                    } else {
+                                        overview.add(boardText(progress.completed + " cleared · "
+                                            + progress.visible + " listed", SMALL, BINGO_TEXT));
+                                    }
+                                    overview.add(boardText(Math.max(0, progress.visible - progress.completed)
+                                        + " listed, not cleared", SMALL, BINGO_TEXT));
                                 }
                                 if (board.captain != null) overview.add(boardText("Captain: " + board.captain, SMALL, BINGO_TEXT));
                                 rows.add(overview);
