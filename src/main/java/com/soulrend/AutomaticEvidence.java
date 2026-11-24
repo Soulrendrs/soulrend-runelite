@@ -221,7 +221,7 @@ final class AutomaticEvidence {
         // completed parent does not leave its children untracked for another poll.
         for (int eventId : completedEvents) {
             if (!sameSession(session, character)) break;
-            matches.removeIf(match -> match.eventId == eventId);
+            matches.removeIf(match -> match.event == eventId);
             var response = plugin.apiClient.evidenceRules(eventId, token, character);
             if (response != null && response.rules != null) {
                 for (var rule : response.rules) {
