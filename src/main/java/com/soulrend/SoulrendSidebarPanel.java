@@ -918,20 +918,20 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		boolean connecting = api.needsSignIn();
 		String token = api.playerToken;
 		Object[] options = {
-			connecting ? "Connect & enable automatic evidence" : "Enable automatic evidence",
-			connecting ? "Connect without automatic evidence" : "Keep automatic evidence off",
+			connecting ? "Enable & connect" : "Enable",
+			connecting ? "Connect only" : "Keep off",
 			"Cancel"
 		};
 		String message = (connecting
-			? "Connecting sends your IP address, installation metadata and linked character/bingo data to soulrend.events.\n\n"
-			: "Choose whether Soulrend may upload automatic bingo evidence.\n\n")
-			+ "Automatic evidence captures game screenshots when eligible bingo objectives progress and uploads them for event review.\n"
-			+ "Screenshots may include visible game chat and other information on your game screen.\n"
-			+ "This feature submits your IP address to a 3rd-party server not controlled or verified by RuneLite developers.\n"
-			+ "You can turn evidence off at any time in Soulrend's RuneLite settings. "
-			+ "Queued evidence can be retried when enabled.";
-		int choice = showOptionDialog(this, message, "Soulrend — screenshot privacy",
-			DEFAULT_OPTION, WARNING_MESSAGE, null, options, options[1]);
+			? "Connecting shares your IP address, installation details and character/bingo data\n"
+				+ "with soulrend.events.\n\n"
+			: "Automatic evidence sends your IP address and bingo data to soulrend.events.\n\n")
+			+ "Optional evidence uploads bingo progress screenshots for review (may include chat).\n"
+			+ "Disable anytime in settings; queued uploads may retry when re-enabled.\n\n"
+			+ "Soulrend is a third-party service not controlled or verified by RuneLite developers.";
+		int choice = showOptionDialog(this, message,
+			connecting ? "Connect to Soulrend" : "Automatic evidence",
+			DEFAULT_OPTION, PLAIN_MESSAGE, null, options, options[1]);
 		if (choice != 0 && choice != 1) return;
 		if (connecting) {
 			if (api.needsSignIn()) startSignIn(choice == 0);
