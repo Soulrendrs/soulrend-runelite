@@ -1079,7 +1079,7 @@ public class SoulrendPlugin extends Plugin {
 		clanSyncButton = new HeaderButton(
 				client, InterfaceID.ClansInfo.UNIVERSE, InterfaceID.ClansInfo.CLOSE,
 				33 /* CLAN_BUTTON_OFFSET */, "Soulrend", "Sync roster to",
-				() -> apiClient.isConfigured() && isAdmin && isClanRosterReadable(),
+				() -> false,
 				this::syncClanRosterFromPanel);
 		// The stat table as it stands right now, before any XP arrives. A plugin started mid-session
 		// — every reload during development, every enable from the sidebar — has no other chance to
@@ -3067,11 +3067,6 @@ public class SoulrendPlugin extends Plugin {
 		// The widget tracker still uses a line naming this player to attribute its own readings.
 		// Player-authored channels are excluded so typing a sentence cannot name oneself as actor.
 		if (!PLAYER_AUTHORED_CHAT.contains(ct)) {
-			var line = BingoApiClient.obj("tick", client.getTickCount(), "type", ct.name(), "text", msg);
-			synchronized (recentChat) {
-				recentChat.addLast(line);
-				if (recentChat.size() > 30) recentChat.removeFirst();
-			}
 			var sender = event.getName();
 			var cofferLine = sender == null || sender.trim().isEmpty() ? msg : sender + " " + msg;
 			clanCofferTracker.onChatLine(stripChatTags(cofferLine), getLocalPlayerName(), now());
@@ -3619,6 +3614,7 @@ public class SoulrendPlugin extends Plugin {
 	}
 
 	void queueFact(JsonObject fact, boolean shot, CoopFingerprint coop) {
+		if (BingoApiClient.productionMode()) return; // legacy facts must never capture or queue
 		// Its id (27 URL-safe characters of a random UUID), once and for good: the site credits an id one time (POST /api/plugin/facts), so
 		// every resend — a retry, the stash after a restart — carries this one. A fact restored from an
 		// older stash file has none yet and gets it here.
@@ -4180,9 +4176,6 @@ public class SoulrendPlugin extends Plugin {
 		proof.addProperty("tz", ZoneId.systemDefault().getId());
 		proof.addProperty("capturedAt", now());
 		proof.addProperty("tick", client.getTickCount());
-		synchronized (recentChat) {
-			proof.add("chat", gson.toJsonTree(recentChat));
-		}
 		return proof;
 	}
 
@@ -4509,6 +4502,7 @@ public class SoulrendPlugin extends Plugin {
 	}
 
 	void captureStartProofOnClientThread() {
+		if (BingoApiClient.productionMode()) return; // unsupported legacy endpoint; no capture
 		var cfg = pluginConfig;
 		if (cfg == null || cfg.startProof == null || cfg.event == null || !cfg.startProof.drawn) {
 			sendChatMessage("No starting shot is being asked for right now.");
@@ -4618,7 +4612,7 @@ public class SoulrendPlugin extends Plugin {
 	 */
 	void retryPendingSubmissions() {
 		automaticEvidence.sync();
-		if (!apiClient.isConfigured()) return;
+		if (BingoApiClient.productionMode() || !apiClient.isConfigured()) return;
 
 		if (!proofBackoff.ready(now())) return; // the last pass failed; wait out the backoff (the site coming back cuts it short)
 		var pending = pendingSubmissionStore.loadAll();
@@ -4933,6 +4927,7 @@ public class SoulrendPlugin extends Plugin {
 
 	/** Read last session's config off disk for the panel. Executor only (disk). */
 	void loadSavedResponses() {
+		if (BingoApiClient.productionMode()) return; // do not revive unsupported legacy UI/config
 		var rc = responseCache;
 		if (rc == null || !apiClient.isConfigured() || liveConfigAnswered) return;
 		var cfgEntry = rc.load(ResponseDiskCache.CONFIG);
@@ -5033,111 +5028,7 @@ public class SoulrendPlugin extends Plugin {
 	 * token.
 	 */
 	void syncClanRoster(AdminActionCallback cb) {
-		// Every way out of here says why when somebody pressed the button: after "Syncing the clan
-		// roster..." a silent return reads as a sync that never finished.
-		var automatic = autoRosterAnnounce;
-		if (!execLive()) {
-			cb.onResult(false, "Plugin not running");
-			return;
-		}
-		var token = config.playerToken();
-		if (empty(token)) {
-			syncFailed(cb, !automatic, null, "Sign in from the Soulrend side panel first.");
-			return;
-		}
-
-		// Wait your turn. Both buttons and the login-time push come through here, so this is the one
-		// place that can hold the line — a cooldown after a push that worked, and a doubling wait
-		// after one that didn't, so a site that's down isn't asked again every time someone clicks.
-		var gate = now();
-		var backedOff = !rosterBackoff.ready(gate);
-		var waitMs = backedOff
-				? rosterBackoff.secondsUntilReady(gate) * 1000L
-				: rosterPushAllowedAt - gate;
-		if (waitMs > 0) {
-			// This attempt isn't happening, so it doesn't get to speak for the login either.
-			autoRosterAnnounce = false;
-			var secs = secs(waitMs);
-			var why = backedOff
-					? "The site didn't take the last roster push — trying again in " + secs + "s."
-					: "The roster was just synced — try again in " + secs + "s.";
-			syncFailed(cb, !automatic, why, why);
-			return;
-		}
-
-		// Read clan data on the client thread, then POST on the executor thread.
-		clientThread.invokeLater(() -> {
-			if (!isClanScrapeAvailable()) {
-				autoRosterAnnounce = false;
-				// The panel offered the button off a cached answer; this is the live one, so believe
-				// it and take the button away now rather than after the grace period.
-				clanRosterReadable = false;
-				clanRosterMissingTicks = CLAN_ROSTER_GRACE_TICKS;
-				repaintSidebar();
-				syncFailed(cb, !automatic, null, "Join your clan channel first — the roster is read from it.");
-				return;
-			}
-			var settings = client.getClanSettings();
-			var clanName = settings.getName();
-			List<BingoApiClient.ClanMember> members = new ArrayList<>();
-			for (var m : settings.getMembers()) {
-				var out = new BingoApiClient.ClanMember();
-				out.rsn = m.getName();
-				var rank = m.getRank();
-				if (rank != null) {
-					var title = settings.titleForRank(rank);
-					out.rank = title != null ? title.getName() : String.valueOf(rank.getRank());
-					out.rankNum = rank.getRank();
-				}
-				var joined = m.getJoinDate();
-				if (joined != null) out.joinedDays = (int) (LocalDate.now().toEpochDay() - joined.toEpochDay());
-				members.add(out);
-			}
-
-			executor.submit(() -> {
-				try {
-					var r = apiClient.syncClan(config.playerToken(), clanName, members);
-					rosterBackoff.onSuccess();
-					rosterPushAllowedAt = now() + ROSTER_PUSH_COOLDOWN_MS;
-					lastSyncSummary = "+" + r.added + " added · " + r.updated + " updated · " + r.markedLeft + " left";
-					// A sync nobody asked for reports itself only when the roster actually MOVED.
-					// Silence on the login where nothing changed; one line when somebody joined or
-					// left, because that's news whether or not you pressed anything.
-					autoRosterAnnounce = false;
-					var say = r.say != null ? r.say : new Say();
-					var firstThisLogin = !autoRosterReportedThisLogin;
-					if (automatic) {
-						autoRosterReportedThisLogin = true;
-						(say.auto.isEmpty() && firstThisLogin ? singletonList("Clan roster checked — nothing changed.") : say.auto).forEach(this::sendChatMessage);
-					} else say.manual.forEach(this::sendChatMessage);
-					say.warn.forEach(w -> sendChatMessage(WARN, w));
-					if (!empty(r.capNotice)) sendChatMessage(r.capNotice);
-					cb.onResult(true, lastSyncSummary);
-				} catch (AdminUnauthorizedException e) {
-					// Token isn't (or is no longer) an admin — hide the button until the next login probe.
-					isAdmin = false;
-					syncFailed(cb, true, null, "Your account token isn't an admin (or was revoked).");
-				} catch (ClanMismatchException e) {
-					syncFailed(cb, true, null, "Clan name doesn't match site config (" + Objects.toString(e.serverClanName, "(not set)") + ").");
-				} catch (RateLimitedException e) {
-					// The site said when. Hold exactly that long rather than guessing at it.
-					rosterPushAllowedAt = now() + Math.max(e.retryAfterMs, 1_000L);
-					syncFailed(cb, !automatic, "The site is limiting roster syncs — try again in "
-							+ secs(e.retryAfterMs) + "s.", "Rate limited by the site.");
-				} catch (IOException e) {
-					// Might clear on its own (site down, network gone), so wait longer each time
-					// instead of letting a button turn into a retry loop against a dead host.
-					rosterBackoff.onFailure(now());
-					log.warn("Clan sync failed: {}", e.getMessage());
-					syncFailed(cb, !automatic, "Clan sync failed: " + e.getMessage(), "Sync failed: " + e.getMessage());
-				} catch (RuntimeException e) {
-					// Anything unexpected still has to release the button, or it says "Already
-					// syncing" until the next login.
-					log.warn("Clan sync failed unexpectedly", e);
-					syncFailed(cb, !automatic, "Clan sync failed — try again in a moment.", "Sync failed unexpectedly.");
-				}
-			});
-		});
+		cb.onResult(false, "Clan roster export has been retired. Manage your roster on the website.");
 	}
 
 	/**
@@ -5634,11 +5525,11 @@ public class SoulrendPlugin extends Plugin {
 
 	/** The panel's tracked name: its Supporter look, or null. */
 	boolean flairOn() {
-		return config.chatNames() != SoulrendConfig.Names.Off;
+		return !BingoApiClient.productionMode() && config.chatNames() != SoulrendConfig.Names.Off;
 	}
 
 	boolean menusFlair() {
-		return config.menuNames() != SoulrendConfig.Names.Off;
+		return !BingoApiClient.productionMode() && config.menuNames() != SoulrendConfig.Names.Off;
 	}
 
 	/**
@@ -6358,7 +6249,6 @@ public class SoulrendPlugin extends Plugin {
 	 */
 	void unflairChat() {
 		var input = client.getWidget(InterfaceID.Chatbox.INPUT);
-		if (input != null && inputPlain != null && inputPainted != null && inputPainted.equals(input.getText())) input.setText(inputPlain);
 		inputPlain = null;
 		inputPainted = null;
 		inputNameFrame = Long.MIN_VALUE;
@@ -6399,34 +6289,7 @@ public class SoulrendPlugin extends Plugin {
 	}
 
 	void flairChatInput() {
-		if (flairOff() || client.getLocalPlayer() == null) return;
-		var input = client.getWidget(InterfaceID.Chatbox.INPUT);
-		var me = client.getLocalPlayer().getName();
-		if (input == null || me == null) return;
-		var text = input.getText();
-		if (empty(text)) return;
-		if (!me.equals(inputFlairName)) {
-			inputFlairName = me;
-			inputFlairPattern = Pattern.compile("^((?:<img=\\d+>)*)" + Pattern.quote(me) + ":");
-		}
-		var frame = chatFlair.movingName(me) ? currentChatNameFrame() : -1;
-		var move = frame != inputNameFrame;
-		inputNameFrame = frame;
-		if (text.equals(inputPainted)) {
-			if (!move) return;
-			// The widget still has our last frame. Rebuild from the game's tag-free input, not our tags.
-			text = inputPlain;
-		}
-		var m = inputFlairPattern.matcher(text);
-		if (!m.find()) return;
-		var shift = chatNameShift(frame);
-		var opaque = opaqueChatbox();
-		var painted = chatFlair.decorateReadable(m.group(1) + me, chatStar(), shift, opaque);
-		if (painted != null) {
-			inputPlain = text;
-			inputPainted = painted + ":" + text.substring(m.end());
-			input.setText(inputPainted);
-		}
+		// Never modify the game's chat input widget.
 	}
 
 	/** The side-panel lists whose names wear Supporter colours: friends chat, clan, guest clan, friends. */
@@ -6516,6 +6379,7 @@ public class SoulrendPlugin extends Plugin {
 	}
 
 	void refreshConfig() {
+		if (BingoApiClient.productionMode()) return; // dedicated v1 polling lives in AutomaticEvidence/sidebar
 		configFetchLock.lock();
 		fetchConfigAndUnlock();
 	}
@@ -7597,6 +7461,7 @@ public class SoulrendPlugin extends Plugin {
 	 * no event running, and it never gates on tracking being enabled.
 	 */
 	void trackVestigeRolls(String source, Collection<ItemStack> items) {
+		if (BingoApiClient.productionMode()) return;
 		if (pluginConfig == null || pluginConfig.rollTables == null || empty(items)) return;
 		var table = pluginConfig.rollTables.stream().filter(t -> t != null && t.boss != null && t.boss.equalsIgnoreCase(source)).findFirst().orElse(null);
 		if (table == null) return;
@@ -7627,18 +7492,8 @@ public class SoulrendPlugin extends Plugin {
 	 * its own submission, because two clients that can't see each other would both stay quiet.
 	 */
 	CoopFingerprint coopFingerprint() {
-		List<String> teammates = new ArrayList<>();
-		var mine = myTeamRoster();
-		if (!mine.isEmpty()) {
-			var me = Rsn.normalize(getLocalPlayerName());
-			// Copy before iterating: the set is written from the game tick, and this runs off a
-			// kill credit on the same thread today — but a snapshot costs nothing and can't throw.
-			for (var seen : new ArrayList<>(instancePlayersSeen)) {
-				var n = Rsn.normalize(seen);
-				if (!n.isEmpty() && !n.equals(me) && mine.contains(n)) teammates.add(n);
-			}
-		}
-		var fp = new CoopFingerprint(teammates, partySize());
+		// Only aggregate headcount; do not export observed player names.
+		var fp = new CoopFingerprint(Collections.emptyList(), partySize());
 		return fp.isEmpty() ? null : fp;
 	}
 
@@ -8983,6 +8838,7 @@ public class SoulrendPlugin extends Plugin {
 	 * notification (a Maggot King fang post vanished this way).
 	 */
 	void captureFrameAsync(Consumer<byte[]> consumer) {
+		if (BingoApiClient.productionMode()) return; // legacy notification endpoint is unavailable
 		var delivered = new AtomicBoolean(false);
 		onNextFrame(image -> {
 			byte[] png = null;
@@ -9007,6 +8863,7 @@ public class SoulrendPlugin extends Plugin {
 	 * ends, so a plugin stopped in between can't leave every overlay hidden.
 	 */
 	void onCleanFrame(Consumer<BufferedImage> work) {
+		if (BingoApiClient.productionMode()) return; // legacy proof path
 		clientThread.invokeLater(() -> {
 			capturing = true;
 			onNextFrame(work, null);
@@ -9020,6 +8877,7 @@ public class SoulrendPlugin extends Plugin {
 	 * Returns how to show them again, or null.
 	 */
 	Runnable hideChatForShot() {
+		if (BingoApiClient.productionMode()) return null;
 		var cfg = pluginConfig;
 		int mask = ChatFlair.hideMask(cfg == null || cfg.me == null ? null : cfg.me.hide);
 		if (mask == 0 || !client.isClientThread()) return null;
@@ -9084,6 +8942,34 @@ public class SoulrendPlugin extends Plugin {
 	 * The next frame, with this person's hidden chat left out (hideChatForShot), handed to {@code work}
 	 * on the executor. Asked for on the client thread, so the hide and the request land between frames.
 	 */
+	/**
+	 * Capture automatic evidence without altering live game widgets. Redact chat surfaces in a
+	 * copy, including the full scroll area, rather than attempting to classify each changing line.
+	 */
+	void onEvidenceFrame(Consumer<BufferedImage> work) {
+		clientThread.invoke(() -> {
+			if (!execLive() || drawManager == null) return;
+			var masks = new ArrayList<Rectangle>();
+			var split = client.getWidget(InterfaceID.PmChat.CONTAINER);
+			if (split != null && !split.isHidden()) masks.add(split.getBounds());
+			var area = client.getWidget(InterfaceID.Chatbox.SCROLLAREA);
+			if (area != null && !area.isHidden()) masks.add(area.getBounds());
+			var input = client.getWidget(InterfaceID.Chatbox.INPUT);
+			if (input != null && !input.isHidden()) masks.add(input.getBounds());
+			var prompt = client.getWidget(InterfaceID.Chatbox.MES_LAYER);
+			if (prompt != null && !prompt.isHidden()) masks.add(prompt.getBounds());
+			int width = client.getCanvasWidth(), height = client.getCanvasHeight();
+			drawManager.requestNextFrameListener(image -> {
+				if (!execLive() || !(image instanceof BufferedImage)) return;
+				// Copy during the frame callback; the renderer can reuse its backing image.
+				var redacted = EvidenceFramePrivacy.redact((BufferedImage) image, masks, width, height);
+				if (redacted == null || !execLive()) return;
+				try { executor.submit(() -> work.accept(redacted)); }
+				catch (RejectedExecutionException ignored) { }
+			});
+		});
+	}
+
 	void onNextFrame(Consumer<BufferedImage> work, Runnable dead) {
 		clientThread.invoke(() -> {
 			var show = hideChatForShot();
@@ -9695,7 +9581,7 @@ public class SoulrendPlugin extends Plugin {
 		// Joined or left a guest channel: tell the guest bridge now rather than on the next tick.
 		if (event.isGuest()) submit(() -> safely("pushGuestChannel", this::pushGuestChannel));
 		// The member list arrives just after the channel; a delay is cheaper than polling for it.
-		if (!event.isGuest() && config.autoSyncClanRoster()) later(() -> safely("autoRosterSync", this::autoSyncClanRoster), AUTO_ROSTER_DELAY_MS);
+		// Roster export retired; do not schedule an automatic collection.
 	}
 
 	/**
@@ -9704,17 +9590,7 @@ public class SoulrendPlugin extends Plugin {
 	 * within the last half hour.
 	 */
 	void autoSyncClanRoster() {
-		if (autoRosterSyncRunning || !isAdmin) return;
-		var token = config.playerToken();
-		if (empty(token) || !apiClient.isConfigured()) return;
-		var now = now();
-		if (lastAutoRosterSyncAt != 0 && now - lastAutoRosterSyncAt < AUTO_ROSTER_MIN_GAP_MS) return;
-		autoRosterSyncRunning = true;
-		lastAutoRosterSyncAt = now;
-		autoRosterAnnounce = true;
-		syncClanRoster((ok, msg) -> {
-			autoRosterSyncRunning = false;
-			if (!ok) lastAutoRosterSyncAt = 0; // most likely "roster not loaded yet": the next channel change tries again
-		});
+		// Roster export retired.
 	}
+
 }

@@ -259,7 +259,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 
 		// Sign-in affordance — visible whenever there is no token (see refreshSignInRow).
 		styleFlatButton(signInButton, BRAND_ORANGE);
-		signInButton.addActionListener(e -> startSignIn());
+		signInButton.addActionListener(e -> chooseEvidenceConsent());
 		signInStatus.setVisible(false);
 		signInRow.setBackground(DARK_GRAY_COLOR);
 		signInRow.add(signInButton, NORTH);
@@ -836,9 +836,12 @@ public class SoulrendSidebarPanel extends PluginPanel {
 	void refreshSignInRow() {
 		inboxButton.setEnabled(!api.needsSignIn());
 		if (signInInFlight) return;
-		var show = api.needsSignIn();
-		signInRow.setVisible(show);
-		if (show && !signInStatus.isVisible()) setSignInStatus("Connects to " + SetupNudge.SITE_HOST + ".");
+		var signedOut = api.needsSignIn();
+		boolean review = !signedOut && !evidenceConsentReviewed();
+		signInButton.setText(review ? "Review screenshot privacy" : "Connect to Soulrend");
+		signInRow.setVisible(signedOut || review);
+		if (review) setSignInStatus("Automatic evidence is paused until you choose.");
+		else if (signedOut && !signInStatus.isVisible()) setSignInStatus("Connects to " + SetupNudge.SITE_HOST + ".");
 		redraw(signInRow);
 	}
 
@@ -904,9 +907,53 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		if (label != null) label.setToolTipText(tip);
 	}
 
+	boolean evidenceConsentReviewed() {
+		return configManager != null && EvidenceConsent.reviewed(api.playerToken,
+			configManager.getConfiguration("soulrendbingo", EvidenceConsent.KEY));
+	}
+
+	/** One explicit choice. Closing or cancelling never enables evidence or starts a connection. */
+	void chooseEvidenceConsent() {
+		if (signInInFlight || configManager == null) return;
+		boolean connecting = api.needsSignIn();
+		String token = api.playerToken;
+		Object[] options = {
+			connecting ? "Connect & enable automatic evidence" : "Enable automatic evidence",
+			connecting ? "Connect without automatic evidence" : "Keep automatic evidence off",
+			"Cancel"
+		};
+		String message = (connecting
+			? "Connecting sends your IP address, installation metadata and linked character/bingo data to soulrend.events.\n\n"
+			: "Choose whether Soulrend may upload automatic bingo evidence.\n\n")
+			+ "Automatic evidence captures game screenshots when eligible bingo objectives progress and uploads them for event review.\n"
+			+ "Screenshots may include visible game chat and other information on your game screen.\n"
+			+ "This feature submits your IP address to a 3rd-party server not controlled or verified by RuneLite developers.\n"
+			+ "You can turn evidence off at any time in Soulrend's RuneLite settings. "
+			+ "Queued evidence can be retried when enabled.";
+		int choice = showOptionDialog(this, message, "Soulrend — screenshot privacy",
+			DEFAULT_OPTION, WARNING_MESSAGE, null, options, options[1]);
+		if (choice != 0 && choice != 1) return;
+		if (connecting) {
+			if (api.needsSignIn()) startSignIn(choice == 0);
+		} else if (Objects.equals(token, api.playerToken) && !api.needsSignIn()) {
+			saveEvidenceChoice(token, choice == 0);
+			refreshSignInRow();
+		}
+	}
+
+	/** Apply a decision only to the session for which it was made. Set the switch last. */
+	void saveEvidenceChoice(String token, boolean enable) {
+		if (token == null || token.isBlank()
+			|| !token.equals(configManager.getConfiguration("soulrendbingo", "playerToken"))) return;
+		configManager.setConfiguration("soulrendbingo", "automaticEvidence", false);
+		configManager.setConfiguration("soulrendbingo", EvidenceConsent.KEY, EvidenceConsent.marker(token));
+		if (enable && EvidenceConsent.reviewed(token, configManager.getConfiguration("soulrendbingo", EvidenceConsent.KEY)))
+			configManager.setConfiguration("soulrendbingo", "automaticEvidence", true);
+	}
+
 	/** Run the device sign-in (async, every step on the shared executor); on success store the token —
 	 * onConfigChanged does the rest. Callbacks arrive off the EDT, so they marshal via invokeLater. */
-	void startSignIn() {
+	void startSignIn(boolean enableEvidence) {
 		if (signInInFlight) return;
 		signInInFlight = true;
 		signInButton.setEnabled(false);
@@ -923,7 +970,9 @@ public class SoulrendSidebarPanel extends PluginPanel {
 				if (result.outcome == DeviceSignIn.Outcome.SIGNED_IN) {
 					// Storing the token fires the plugin's onConfigChanged → client reconfigure,
 					// identity stamp + greet, and a sidebar refresh.
+					configManager.setConfiguration("soulrendbingo", "automaticEvidence", false);
 					setToken(result.token);
+					saveEvidenceChoice(result.token, enableEvidence);
 
 					// Read it straight back. A signed-in-but-empty config is the one failure mode a
 					// member can't diagnose: the site says they approved, the panel keeps asking them
@@ -931,7 +980,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 					// take — a synced RuneLite profile clobbered by a second client, most often — and
 					// it MUST NOT look like the sign-in itself failed. Explain what happened.
 					var stored = configManager.getConfiguration("soulrendbingo", "playerToken");
-					if (stored == null || stored.isEmpty()) {
+					if (!Objects.equals(result.token, stored)) {
 						log.warn("Token did not persist");
 						setSignInStatus("Connected, but RuneLite did not save your session. Reconnect or check RuneLite profile settings.");
 					} else {
@@ -987,6 +1036,8 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		connectedWebsiteUser = null;
 		connectedDeviceName = null;
 		// Clearing the token fires onConfigChanged, which drops the session state (configureApiClient).
+		configManager.setConfiguration("soulrendbingo", "automaticEvidence", false);
+		configManager.unsetConfiguration("soulrendbingo", EvidenceConsent.KEY);
 		setToken("");
 		refreshSignInRow();
 		refresh();
@@ -1462,7 +1513,9 @@ public class SoulrendSidebarPanel extends PluginPanel {
         var header = new JPanel(new BorderLayout(5, 0));
         header.setOpaque(false);
         var icon = new JLabel(new GlyphIcon(tile.credited ? CHECK : STAR, 15, BINGO_GOLD));
-        icon.setPreferredSize(new Dimension(27, 25));
+        icon.setPreferredSize(new Dimension(34, 34));
+        icon.setHorizontalAlignment(SwingConstants.CENTER);
+        icon.setVerticalAlignment(SwingConstants.CENTER);
         header.add(icon, WEST);
         if (tile.item_id > 0 && clanView.items != null) {
             var cached = objectiveItems.get(tile.item_id);
@@ -1483,11 +1536,11 @@ public class SoulrendSidebarPanel extends PluginPanel {
                 // Unknown metrics retain the default icon.
             }
         } else if (BingoApiClient.isBingoIconPath(tile.icon_path)) {
-            uiHost().image(tile.icon_path, 24, 24, false, loaded -> {
+            uiHost().image(tile.icon_path, 32, 32, false, loaded -> {
                 if (loaded != null) icon.setIcon(loaded);
             });
         }
-        var title = new ClipLabel(wrapHtml(esc(fontSafe(tile.name)), STATUS_WRAP_PX - 44));
+        var title = new ClipLabel(wrapHtml(esc(fontSafe(tile.name)), STATUS_WRAP_PX - 51));
         title.setFont(BOLD);
         title.setForeground(WHITE);
         title.setVerticalAlignment(SwingConstants.CENTER);

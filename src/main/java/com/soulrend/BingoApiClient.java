@@ -81,15 +81,19 @@ public class BingoApiClient {
 		// Read timeout is generous because some server reads do several round-trips to Turso
 		// and can take a while; tighter timeouts here will trip even on healthy servers.
 		httpClient = client.newBuilder()
+			.followRedirects(false)
+			.followSslRedirects(false)
+			.addInterceptor(pauseGate())
 		// During Phase 2A the only supported production routes are device authorization,
 		// identity and revocation. Never POST inherited Anvil submissions to Soulrend.
 		.addInterceptor(chain -> {
 			var url = chain.request().url();
-			if (!productionRouteAllowed(url) || (isBingoIconPath(url.encodedPath()) && !"GET".equals(chain.request().method())))
+			if (!allowedOrigin(url, HttpUrl.parse(site()))
+				|| (CANONICAL_SITE.equals(site()) && !productionRequestAllowed(url, chain.request().method()))
+				|| (isBingoIconPath(url.encodedPath()) && !"GET".equals(chain.request().method())))
 				throw new IOException("Legacy plugin routes are disabled until Soulrend implements them.");
 			return chain.proceed(chain.request());
 		})
-			.addInterceptor(pauseGate())
 			.connectTimeout(10, TimeUnit.SECONDS)
 			.readTimeout(90, TimeUnit.SECONDS)
 			.writeTimeout(30, TimeUnit.SECONDS)
@@ -105,9 +109,29 @@ public class BingoApiClient {
 
 	/** Prevent unsupported inherited endpoints from reaching the production Django site. */
 	static boolean productionRouteAllowed(HttpUrl url) {
-		return !"soulrend.events".equalsIgnoreCase(url.host())
-			|| url.encodedPath().startsWith("/api/runelite/v1/")
-			|| (url.isHttps() && url.port() == 443 && url.query() == null && isBingoIconPath(url.encodedPath()));
+		return productionRequestAllowed(url, "GET") || productionRequestAllowed(url, "POST");
+	}
+
+	/** Default-deny every production route and verb that is not part of the reviewed API. */
+	static boolean productionRequestAllowed(HttpUrl url, String method) {
+		if (!allowedOrigin(url, HttpUrl.parse(CANONICAL_SITE))) return false;
+		String path = url.encodedPath();
+		boolean get = "GET".equals(method), post = "POST".equals(method);
+		if (isBingoIconPath(path)) return get && url.query() == null;
+		if (path.equals("/api/runelite/v1/device/start") || path.equals("/api/runelite/v1/device/poll")
+			|| path.equals("/api/runelite/v1/session/revoke") || path.equals("/api/runelite/v1/character/verify")) return post;
+		if (path.equals("/api/runelite/v1/me") || path.equals("/api/runelite/v1/events")) return get;
+		if (path.equals("/api/runelite/v1/notifications")) return get || post;
+		if (path.matches("/api/runelite/v1/events/[1-9][0-9]*/board")) return get;
+		return path.matches("/api/runelite/v1/events/[1-9][0-9]*/evidence") && (get || post);
+	}
+
+	static boolean productionMode() { return CANONICAL_SITE.equals(site()); }
+
+	static boolean allowedOrigin(HttpUrl url, HttpUrl expected) {
+		return url != null && expected != null && url.scheme().equals(expected.scheme())
+			&& url.host().equals(expected.host()) && url.port() == expected.port()
+			&& url.username().isEmpty() && url.password().isEmpty();
 	}
 
 	/**
@@ -655,7 +679,7 @@ public class BingoApiClient {
 		var t = isConfigured() ? getOrNull(authedRequest(clanUrl(path)).get(), PushTicket.class) : null;
 		var socket = t == null || t.url == null ? null : HttpUrl.parse(t.url.replaceFirst("^ws", "http"));
 		var site = HttpUrl.parse(getApiUrl());
-		return socket != null && site != null && socket.host().equals(site.host()) ? t : null;
+		return allowedOrigin(socket, site) ? t : null;
 	}
 
 	/**
@@ -666,6 +690,8 @@ public class BingoApiClient {
 	final OkHttpClient pushClient;
 
 	WebSocket openPush(PushTicket ticket, WebSocketListener listener) {
+		var url = ticket == null || ticket.url == null ? null : HttpUrl.parse(ticket.url.replaceFirst("^ws", "http"));
+		if (!allowedOrigin(url, HttpUrl.parse(site()))) throw new IllegalArgumentException("Unexpected push origin");
 		return pushClient.newWebSocket(plainRequest(ticket.url).header("Authorization", "Bearer " + ticket.ticket).build(), listener);
 	}
 
@@ -1196,6 +1222,13 @@ public class BingoApiClient {
 	 * {@code w}x{@code h} and kept. {@code done} gets it (null on any failure) on an OkHttp thread, or at
 	 * once from the cache. Anything bigger than {@link #THUMB_MAX_BYTES} is dropped unread.
 	 */
+	Icon cachedObjectiveIcon(String path) {
+		if (!isBingoIconPath(path)) return null;
+		synchronized (thumbs) {
+			return thumbs.get("32x32:false" + path);
+		}
+	}
+
 	void thumb(String path, int w, int h, boolean motion, Consumer<Icon> done) {
 		var key = w + "x" + h + ":" + motion + path;
 		Icon hit;
@@ -1445,22 +1478,7 @@ public class BingoApiClient {
 	 * caller's per-user account token (must belong to a site admin).
 	 */
 	ClanSyncResponse syncClan(String accountToken, String clanName, List<ClanMember> members) throws IOException, ClanMismatchException, AdminUnauthorizedException {
-		if (getApiUrl().isEmpty()) throw new IOException("Not signed in to Soulrend");
-		// The checked refusals can't leave the lambda, so it hands back the status and they're thrown here.
-		int[] status = new int[1];
-		var responseBody = execute(httpClient, tokenRequest("/api/plugin/clan-sync", accountToken).post(json(obj("clanName", clanName, "members", gson.toJsonTree(members)))),
-			(r, body) -> {
-				status[0] = r.code();
-				return body;
-			});
-		int code = status[0];
-		if (code == 401) throw new AdminUnauthorizedException("Account token is not an admin (or was revoked)");
-		if (code == 409) throw new ClanMismatchException(jsonString(jsonObject(responseBody), "serverClanName"));
-		// The site has a limit and told us how long it is; the caller waits exactly that
-		// long rather than backing off blindly from a message it couldn't read.
-		if (code == 429) throw new RateLimitedException(friendlyError(429, responseBody), retryAfterFrom(responseBody));
-		if (code < 200 || code >= 300) throw new HttpStatusException("HTTP " + code + " — " + responseBody, code);
-		return gson.fromJson(responseBody, ClanSyncResponse.class);
+		throw new IOException("Clan roster export has been retired.");
 	}
 
 	/** A clan-scoped request carrying an explicit account token (the admin probe and roster sync). */

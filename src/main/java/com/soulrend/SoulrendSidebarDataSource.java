@@ -69,7 +69,7 @@ public class SoulrendSidebarDataSource {
 		// answer: this runs while the panel paints, on the EDT, where asking the client directly is a
 		// thread violation.
 		var scrape = p.isClanRosterReadable();
-		return new PanelActions(scrape, scrape ? null : "Join your clan channel to sync the roster");
+		return PanelActions.NONE;
 	}
 
 	/** The logged-in character's row, or {@code null} to hide it (logged out, not signed in). */

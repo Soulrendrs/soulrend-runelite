@@ -22,10 +22,13 @@ public class DiskFilesTest
 {
 	private Path tmp;
 	private Filepath root;
+	private String previousSite;
 
 	@Before
 	public void setUp() throws Exception
 	{
+		previousSite = BingoApiClient.site();
+		BingoApiClient.useDevSite("http://127.0.0.1:9");
 		tmp = Files.createTempDirectory("soulrend-diskfiles");
 		// Filepath has no public way in outside the client; a test-only reflective root.
 		Constructor<Filepath> c = Filepath.class.getDeclaredConstructor(Path.class, Path.class);
@@ -36,7 +39,11 @@ public class DiskFilesTest
 	@After
 	public void tearDown() throws Exception
 	{
-		root.deleteRecursively();
+		try {
+			root.deleteRecursively();
+		} finally {
+			BingoApiClient.useDevSite(previousSite);
+		}
 	}
 
 	@Test
@@ -289,6 +296,27 @@ public class DiskFilesTest
 			p.restorePushes("Zezima", null);
 			assertEquals(1, p.factQueue.size());
 			assertEquals(9, p.factQueue.get(0).getAsJsonObject().get("t").getAsInt());
+		}
+		finally
+		{
+			p.executor.shutdownNow();
+		}
+	}
+
+	@Test
+	public void productionDoesNotQueueLegacyFacts() throws Exception
+	{
+		BingoApiClient.useDevSite(BingoApiClient.CANONICAL_SITE);
+		List<String> bodies = new java.util.concurrent.CopyOnWriteArrayList<>();
+		SoulrendPlugin p = pluginAnswering(new int[]{200}, bodies);
+		p.executor = java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
+		try
+		{
+			p.queueFact(fact(7), false, null);
+			p.queueFact(fact(8), true, null);
+			assertEquals(0, p.factQueue.size());
+			assertEquals(0, p.factBurst.size());
+			assertTrue(bodies.isEmpty());
 		}
 		finally
 		{

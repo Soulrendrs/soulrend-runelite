@@ -5,9 +5,9 @@ import net.runelite.client.config.*;
 @ConfigGroup("soulrendbingo")
 public interface SoulrendConfig extends Config {
 	@ConfigItem(keyName = "automaticEvidence", name = "Automatic bingo evidence", section = bingoSection,
-		description = "Automatically send game screenshots for matching bingo objectives to soulrend.events for review. Turn off to stop capture and retries.",
-		warning = "Game screenshots and matching bingo activity will be sent to soulrend.events.")
-	default boolean automaticEvidence() { return true; }
+		description = "Opt in to sending game screenshots and matching bingo activity to soulrend.events. Turn off to stop capture and retries.",
+		warning = "This feature submits your IP address to a 3rd-party server not controlled or verified by RuneLite developers. Game screenshots and matching bingo activity will be sent to soulrend.events.")
+	default boolean automaticEvidence() { return false; }
 
 	// ---- Sections (collapsible groups, top to bottom) ----
 	// Split by purpose: Setup + Bingo are event-participation; the "Notifications:" sections are
@@ -89,7 +89,7 @@ public interface SoulrendConfig extends Config {
 		section = "chatSection"
 	)
 	default Names menuNames() {
-		return Names.Animated;
+		return Names.Off;
 	}
 
 	// ---- Setup ----
@@ -115,11 +115,12 @@ public interface SoulrendConfig extends Config {
 		keyName = "profileLookupMenu",
 		name = "Soulrend lookup on players",
 		description = "Adds an \"Soulrend\" option on player names that opens their profile; off hides it everywhere.",
+		warning = "This feature submits your IP address to a 3rd-party server not controlled or verified by RuneLite developers",
 		position = 0,
 		section = "lookupSection"
 	)
 	default boolean profileLookupMenu() {
-		return true;
+		return false;
 	}
 
 	@ConfigItem(
@@ -201,6 +202,11 @@ public interface SoulrendConfig extends Config {
 		return true;
 	}
 
+	@ConfigItem(keyName = "evidenceCaptureBanner", name = "Evidence capture popup",
+		description = "Show an unconfirmed capture popup. Off still captures and uploads when automatic evidence is enabled.",
+		position = 18, section = "bingoSection")
+	default boolean evidenceCaptureBanner() { return false; }
+
 	@ConfigItem(
 		keyName = "selfTileBanner",
 		name = "My tile popups",
@@ -256,11 +262,12 @@ public interface SoulrendConfig extends Config {
 		keyName = "autoStartShot",
 		name = "Auto starting shot",
 		description = "Take an event's starting shot automatically once you stand on its pinned spot.",
+		warning = "This feature submits your IP address to a 3rd-party server not controlled or verified by RuneLite developers",
 		position = 8,
 		section = "bingoSection"
 	)
 	default boolean autoStartShot() {
-		return true;
+		return false;
 	}
 
 	@ConfigItem(
@@ -334,22 +341,24 @@ public interface SoulrendConfig extends Config {
 		keyName = "shareActivity",
 		name = "Share clan posts",
 		description = "Post your drops, pets, deaths, levels and achievements to your clan's Discord. Which ones post, and from when, is set on the Soulrend website: Settings > Announcements.",
+		warning = "This feature submits your IP address to a 3rd-party server not controlled or verified by RuneLite developers",
 		position = 0,
 		section = "deathsSection"
 	)
 	default boolean shareActivity() {
-		return true;
+		return false;
 	}
 
 	@ConfigItem(
 		keyName = "shareSeasonal",
 		name = "Share seasonal activity",
 		description = "On Leagues, Deadman and other seasonal worlds, share your progress (relics, areas, tasks, with a screenshot) to your clan. What gets posted is set by your clan on the Soulrend website.",
+		warning = "This feature submits your IP address to a 3rd-party server not controlled or verified by RuneLite developers",
 		position = 1,
 		section = "deathsSection"
 	)
 	default boolean shareSeasonal() {
-		return true;
+		return false;
 	}
 
 	// ---- Profile sync ----
@@ -357,55 +366,60 @@ public interface SoulrendConfig extends Config {
 	@ConfigItem(
 		keyName = "autoSyncClanRoster",
 		name = "Keep the clan roster in sync",
-		description = "Admins: push the in-game clan roster to the site when you log in.",
+		description = "Retired: clan rosters are managed on the website.",
+		hidden = true,
 		position = 0,
 		section = "profileSection"
 	)
 	default boolean autoSyncClanRoster() {
-		return true;
+		return false;
 	}
 
 	@ConfigItem(
 		keyName = "syncClanCoffer",
 		name = "Sync Clan Coffer",
 		description = "Send Clan Coffer deposits and withdrawals to your clan site, from your own clan chat line and the coffer screen.",
+		warning = "This feature submits your IP address to a 3rd-party server not controlled or verified by RuneLite developers",
 		position = 1,
 		section = "profileSection"
 	)
 	default boolean syncClanCoffer() {
-		return true;
+		return false;
 	}
 
 	@ConfigItem(
 		keyName = "syncPersonalBests",
 		name = "Sync personal bests",
 		description = "Send your best boss and raid times as you set them.",
+		warning = "This feature submits your IP address to a 3rd-party server not controlled or verified by RuneLite developers",
 		position = 3,
 		section = "profileSection"
 	)
 	default boolean syncPersonalBests() {
-		return true;
+		return false;
 	}
 
 	@ConfigItem(
 		keyName = "importRuneLitePbs",
 		name = "Import existing bests once",
 		description = "Once per account, copy the bests RuneLite already recorded locally.",
+		warning = "This feature submits your IP address to a 3rd-party server not controlled or verified by RuneLite developers",
 		position = 5,
 		section = "profileSection"
 	)
 	default boolean importRuneLitePbs() {
-		return true;
+		return false;
 	}
 
 	@ConfigItem(
 		keyName = "shareMoments",
 		name = "Share highlights with the clan",
 		description = "Show your pets, uniques, big drops and deaths on the clan site's feed during events, and in the Soulrend chat feed of players who can see them.",
+		warning = "This feature submits your IP address to a 3rd-party server not controlled or verified by RuneLite developers",
 		position = 6,
 		section = "profileSection"
 	)
 	default boolean shareMoments() {
-		return true;
+		return false;
 	}
 }

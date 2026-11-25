@@ -40,8 +40,26 @@ public class RuneLiteAuthRouteGateTest
     }
 
     @Test
-    public void unitTestLocalMockServerContinuesToWork()
+    public void onlyReviewedProductionPathsAndMethodsAreAllowed()
     {
-        assertTrue(BingoApiClient.productionRouteAllowed(HttpUrl.parse("http://127.0.0.1:8080/api/plugin/config")));
+        String base = "https://soulrend.events/api/runelite/v1/";
+        assertTrue(BingoApiClient.productionRequestAllowed(HttpUrl.parse(base + "events/12/evidence"), "POST"));
+        assertTrue(BingoApiClient.productionRequestAllowed(HttpUrl.parse(base + "events/12/board?view=completions"), "GET"));
+        assertFalse(BingoApiClient.productionRequestAllowed(HttpUrl.parse(base + "events/12/board"), "POST"));
+        assertFalse(BingoApiClient.productionRequestAllowed(HttpUrl.parse(base + "device/start"), "GET"));
+        assertFalse(BingoApiClient.productionRequestAllowed(HttpUrl.parse(base + "unknown"), "POST"));
+        assertFalse(BingoApiClient.productionRequestAllowed(HttpUrl.parse(base + "events/12/evidence"), "DELETE"));
+        assertFalse(BingoApiClient.productionRequestAllowed(HttpUrl.parse(base + "events/12/evidence/extra"), "GET"));
+    }
+
+    @Test
+    public void rejectsNonProductionOrigins()
+    {
+        assertFalse(BingoApiClient.productionRouteAllowed(HttpUrl.parse("http://127.0.0.1:8080/api/plugin/config")));
+        assertFalse(BingoApiClient.productionRouteAllowed(HttpUrl.parse("https://evil.example/api/runelite/v1/me")));
+        assertFalse(BingoApiClient.productionRouteAllowed(HttpUrl.parse("http://soulrend.events/api/runelite/v1/me")));
+        assertFalse(BingoApiClient.productionRouteAllowed(HttpUrl.parse("https://soulrend.events:8443/api/runelite/v1/me")));
+        assertFalse(BingoApiClient.productionRouteAllowed(HttpUrl.parse("https://user@soulrend.events/api/runelite/v1/me")));
+        assertTrue(BingoApiClient.allowedOrigin(HttpUrl.parse("http://127.0.0.1:8080/test"), HttpUrl.parse("http://127.0.0.1:8080")));
     }
 }
