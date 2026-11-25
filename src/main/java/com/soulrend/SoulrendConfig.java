@@ -201,6 +201,11 @@ public interface SoulrendConfig extends Config {
 		return true;
 	}
 
+	@ConfigItem(keyName = "evidenceCaptureBanner", name = "Evidence capture popup",
+		description = "Show an unconfirmed capture popup. Off still captures and uploads when automatic evidence is enabled.",
+		position = 18, section = "bingoSection")
+	default boolean evidenceCaptureBanner() { return false; }
+
 	@ConfigItem(
 		keyName = "selfTileBanner",
 		name = "My tile popups",
