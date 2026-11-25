@@ -77,4 +77,19 @@ public class BingoBannerQueueTest {
             assertEquals(i + 1, starts.get());
         }
     }
+    @Test
+    public void confirmedCompletionInterruptsUnrelatedProgress() {
+        var queue = new BingoBannerQueue();
+        var partial = card("1:1", "1 / 5", false);
+        var completion = card("1:2", "Complete", true);
+        queue.offer(partial);
+        assertSame(partial, queue.current(1));
+        queue.offer(completion);
+        assertSame(completion, queue.current(2));
+        var later = card("1:3", "Complete", true);
+        queue.offer(later);
+        assertSame(completion, queue.current(3));
+        assertSame(later, queue.current(5002));
+    }
+
 }

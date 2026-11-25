@@ -105,12 +105,15 @@ final class BingoCompletionMonitor {
         return uploadedCompletions.computeIfAbsent(event, id -> new HashSet<>()).add(tile.id);
     }
 
-    void announceUploadedNpc(EventSummary event, ConfirmedTile tile, String session, String character) {
+    void announceUploadedCompletion(EventSummary event, long participation, ConfirmedTile tile, String session, String character) {
         if (!current(session, character) || !permits(true)) return;
         final Scope origin;
         synchronized (this) {
             origin = scope;
-            if (origin == null || !session.equals(origin.session) || !rememberUploadedNpc(event.id, tile)) return;
+            var board = boards.get(event.id);
+            if (origin == null || !session.equals(origin.session)
+                || (participation > 0 && (board == null || board.participation != participation))
+                || !rememberUploadedNpc(event.id, tile)) return;
         }
         plugin.clientThread.invokeLater(() -> {
             if (!current(session, character) || !Rsn.same(character, plugin.getLocalPlayerName())) return;
@@ -119,6 +122,40 @@ final class BingoCompletionMonitor {
             }
             show(event, tile);
         });
+    }
+
+    /** Accept only a newer receipt for the current, already observed team board. */
+    synchronized boolean rememberUploadedProgress(int event, long participation, ProgressTile tile) {
+        var board = boards.get(event);
+        if (board == null || board.participation != participation || tile == null || !tile.self
+            || tile.id <= 0 || tile.revision <= 0 || tile.value <= 0 || tile.target <= 0
+            || tile.name == null || tile.name.isBlank() || board.seen.contains(tile.id)
+            || uploadedCompletions.getOrDefault(event, Set.of()).contains(tile.id)) return false;
+        var before = board.progress.get(tile.id);
+        if (before != null && tile.revision <= before.revision) return false;
+        board.progress.put(tile.id, tile);
+        return true;
+    }
+
+    boolean announceUploadedProgress(EventSummary event, long participation, ProgressTile tile, String session, String character) {
+        if (!current(session, character) || !permits(true)) return false;
+        final Scope origin;
+        synchronized (this) {
+            origin = scope;
+            if (origin == null || !session.equals(origin.session)
+                || !rememberUploadedProgress(event.id, participation, tile)) return false;
+        }
+        plugin.clientThread.invokeLater(() -> {
+            if (!current(session, character) || !Rsn.same(character, plugin.getLocalPlayerName())) return;
+            synchronized (this) {
+                var board = boards.get(event.id);
+                if (scope != origin || board == null || board.participation != participation
+                    || board.progress.get(tile.id) != tile || board.seen.contains(tile.id)
+                    || uploadedCompletions.getOrDefault(event.id, Set.of()).contains(tile.id)) return;
+            }
+            showProgress(event, tile);
+        });
+        return true;
     }
 
     synchronized List<ProgressTile> observeProgress(int event, CompletionFeed feed) {

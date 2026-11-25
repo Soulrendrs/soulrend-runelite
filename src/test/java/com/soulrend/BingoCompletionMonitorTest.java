@@ -69,6 +69,36 @@ public class BingoCompletionMonitorTest {
         assertEquals(List.of(teammate), monitor.observe(5, feed(10, npc, teammate)));
     }
 
+    private static BingoApiClient.ProgressTile progress(int id, long revision, long value) {
+        var tile = new BingoApiClient.ProgressTile();
+        tile.id = id;
+        tile.name = "Coins";
+        tile.self = true;
+        tile.revision = revision;
+        tile.value = value;
+        tile.target = 5;
+        return tile;
+    }
+
+    @Test
+    public void confirmedProgressReceiptIsScopedAndDeduplicatedAgainstPolls() {
+        var monitor = new BingoCompletionMonitor(null);
+        var first = feed(10);
+        monitor.observe(5, first);
+        monitor.observeProgress(5, first);
+        var latest = progress(7, 100, 2);
+        assertFalse(monitor.rememberUploadedProgress(5, 20, latest));
+        assertTrue(monitor.rememberUploadedProgress(5, 10, latest));
+        assertFalse(monitor.rememberUploadedProgress(5, 10, latest));
+        assertFalse(monitor.rememberUploadedProgress(5, 10, progress(7, 99, 1)));
+        first.progress = List.of(latest);
+        assertTrue(monitor.observeProgress(5, first).isEmpty());
+        var next = progress(7, 101, 3);
+        first.progress = List.of(next);
+        assertEquals(List.of(next), monitor.observeProgress(5, first));
+        assertFalse(monitor.rememberUploadedProgress(5, 10, latest));
+    }
+
     private static UnlockedTile unlocked(int id, String name) {
         var tile = new UnlockedTile();
         tile.id = id;
