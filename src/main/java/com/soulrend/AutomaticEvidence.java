@@ -35,7 +35,7 @@ final class AutomaticEvidence {
         String kind;
         Integer item_id, quantity, task_id, npc_id;
         int[] npc_ids;
-        String source, task_name;
+        String source, task_name, npc_name;
         boolean allow_repeat;
 
         boolean matchesNpc(int observedNpcId) {
@@ -408,6 +408,14 @@ final class AutomaticEvidence {
         pending.evidenceSource = source;
         pending.evidenceRepeat = repeat;
         pending.label = "Bingo evidence";
+        if ("npc_kill".equals(pending.evidenceKind)) {
+            pending.evidenceName = match.rule.npc_name;
+        } else if ("ca".equals(pending.evidenceKind)) {
+            pending.evidenceName = match.rule.task_name;
+        } else if ("drop".equals(pending.evidenceKind) || "gain".equals(pending.evidenceKind)) {
+            var item = plugin.itemManager.getItemComposition(evidenceId);
+            if (item != null) pending.evidenceName = item.getName();
+        }
         pending.timestamp = now;
         return pending;
     }
@@ -424,7 +432,7 @@ final class AutomaticEvidence {
                     if (plugin.pendingSubmissionStore.save(proof, screenshot) != null) {
                         saved = true;
                         plugin.clientThread.invokeLater(() -> {
-                            if (sameSession(snapshot.session, snapshot.character) && plugin.config.selfTileBanner())
+                            if (sameSession(snapshot.session, snapshot.character) && plugin.config.evidenceCaptureBanner())
                                 plugin.clogBanner.bingoCards.offer(card);
                         });
                     }
