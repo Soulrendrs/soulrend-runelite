@@ -27,9 +27,13 @@ public class EvidenceCaptureCardTest {
         proof.evidenceKind = "npc_kill";
         proof.evidenceId = 2790;
         proof.evidenceName = "Cow (level 2)";
+        proof.objectiveName = "Final bonus objective";
+        proof.evidenceIconPath = "/runescape-assets/npc-icon/2790/";
         proof.amount = 1;
         var card = EvidenceCaptureCard.forProof(proof);
         assertEquals("Cow (level 2) (+1)", card.objective);
+        assertEquals("Final bonus objective", card.team);
+        assertEquals("/runescape-assets/npc-icon/2790/", card.iconPath);
         assertFalse(card.completed);
         assertEquals(2790, proof.evidenceId);
     }
@@ -46,6 +50,29 @@ public class EvidenceCaptureCardTest {
         assertNotEquals(frame.getRGB(320, 30), copy.getRGB(320, 30));
         assertEquals(frame.getRGB(10, 400), copy.getRGB(10, 400));
         assertEquals(frame.getRGB(320, 100), copy.getRGB(320, 100));
+    }
+
+    @Test public void oldRuleWithoutDisplayMetadataUsesGenericLabel() {
+        var proof = new PendingSubmissionStore.PendingSubmission();
+        proof.evidenceKind = "npc_kill";
+        proof.tileId = 343;
+        assertEquals("Bingo objective", EvidenceCaptureCard.forProof(proof).team);
+    }
+
+    @Test public void cachedPortraitPaintsIntoCopyOnly() {
+        var frame = new BufferedImage(640, 480, BufferedImage.TYPE_INT_RGB);
+        var proof = new PendingSubmissionStore.PendingSubmission();
+        proof.evidenceKind = "npc_kill";
+        var card = EvidenceCaptureCard.forProof(proof);
+        var portrait = new BufferedImage(32, 32, BufferedImage.TYPE_INT_RGB);
+        var graphics = portrait.createGraphics();
+        graphics.setColor(java.awt.Color.RED);
+        graphics.fillRect(0, 0, 32, 32);
+        graphics.dispose();
+        card.icon = new javax.swing.ImageIcon(portrait);
+        var copy = EvidenceCaptureCard.annotate(frame, card);
+        assertEquals(0xff000000, frame.getRGB(226, 28));
+        assertEquals(0xffff0000, copy.getRGB(226, 28));
     }
 
     @Test public void confirmedPopupImmediatelyReplacesVisibleEvidenceCard() {
