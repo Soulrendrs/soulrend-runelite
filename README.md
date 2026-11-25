@@ -12,7 +12,7 @@ Device approval connects RuneLite to your Soulrend website account. The sidebar 
 
 ## Automatic bingo evidence
 
-Connecting to Soulrend offers a choice to enable automatic evidence or connect without it. Evidence is disabled by default and requires explicit consent for the connected session; existing installations must review screenshot privacy once. Enabled evidence sends screenshots of matching objective activity to soulrend.events for event review. Visible chat may appear in screenshots. You can disable the feature in RuneLite settings; previously queued evidence may retry when re-enabled. Soulrend is an external service not controlled or verified by RuneLite developers.
+Connecting to soulrend.events sends your IP address, installation metadata and linked character/bingo data. In the connection dialog, **Enable** connects with automatic bingo evidence, **Disable screenshots** connects without automatic bingo evidence, and **Cancel** leaves the connection unchanged. Other separately configured screenshot features retain their own settings. Evidence is disabled by default and requires explicit consent for the connected session; existing installations must review screenshot privacy once. Enabled evidence sends screenshots of matching objective activity to soulrend.events for event review. Visible chat may appear in screenshots. You can disable the feature in RuneLite settings; previously queued evidence may retry when re-enabled. Soulrend is an external service not controlled or verified by RuneLite developers.
 
 ## Bingo completion popups
 
