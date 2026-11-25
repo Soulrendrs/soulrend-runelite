@@ -19,10 +19,9 @@ final class EvidenceCaptureCard {
         return new BingoBannerQueue.Card(proof.eventId + ":" + proof.tileId,
             (proof.evidenceName == null || proof.evidenceName.isBlank()
                 ? kind + " #" + proof.evidenceId : proof.evidenceName.strip()) + " (+" + proof.amount + ")",
-
-            "Tile #" + proof.tileId, "Awaiting server confirmation", false,
+            proof.objectiveName == null || proof.objectiveName.isBlank() ? "Bingo objective" : proof.objectiveName.strip(), "Awaiting server confirmation", false,
             () -> {}, "drop".equals(proof.evidenceKind) || "gain".equals(proof.evidenceKind)
-                ? proof.evidenceId : 0, null, null, true);
+                ? proof.evidenceId : 0, proof.evidenceIconPath, null, true);
     }
 
     static BufferedImage annotate(BufferedImage frame, BingoBannerQueue.Card card) {
