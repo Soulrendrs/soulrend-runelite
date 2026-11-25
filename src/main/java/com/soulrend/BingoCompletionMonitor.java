@@ -137,13 +137,13 @@ final class BingoCompletionMonitor {
         return true;
     }
 
-    void announceUploadedProgress(EventSummary event, long participation, ProgressTile tile, String session, String character) {
-        if (!current(session, character) || !permits(true)) return;
+    boolean announceUploadedProgress(EventSummary event, long participation, ProgressTile tile, String session, String character) {
+        if (!current(session, character) || !permits(true)) return false;
         final Scope origin;
         synchronized (this) {
             origin = scope;
             if (origin == null || !session.equals(origin.session)
-                || !rememberUploadedProgress(event.id, participation, tile)) return;
+                || !rememberUploadedProgress(event.id, participation, tile)) return false;
         }
         plugin.clientThread.invokeLater(() -> {
             if (!current(session, character) || !Rsn.same(character, plugin.getLocalPlayerName())) return;
@@ -155,6 +155,7 @@ final class BingoCompletionMonitor {
             }
             showProgress(event, tile);
         });
+        return true;
     }
 
     synchronized List<ProgressTile> observeProgress(int event, CompletionFeed feed) {
