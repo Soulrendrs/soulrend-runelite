@@ -38,6 +38,7 @@ public class PendingSubmissionStore {
 		String runeliteCaptureId;
 		String runeliteSession;
 		String evidenceKind;
+		String evidenceName; // display only; never used to establish credit
 		int evidenceId;
 		String evidenceSource;
 		boolean evidenceRepeat;
