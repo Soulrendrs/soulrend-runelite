@@ -923,12 +923,11 @@ public class SoulrendSidebarPanel extends PluginPanel {
 			"Cancel"
 		};
 		String message = (connecting
-			? "Connecting shares your IP address, installation details and character/bingo data\n"
-				+ "with soulrend.events.\n\n"
-			: "Automatic evidence sends your IP address and bingo data to soulrend.events.\n\n")
-			+ "Optional evidence uploads bingo progress screenshots for review (may include chat).\n"
-			+ "Disable anytime in settings; queued uploads may retry when re-enabled.\n\n"
-			+ "Soulrend is a third-party service not controlled or verified by RuneLite developers.";
+			? "Connect to soulrend.events: shares IP, installation and character/bingo data.\n"
+			: "Automatic evidence sends IP and bingo data to soulrend.events.\n")
+			+ "Third-party server not controlled or verified by RuneLite developers.\n"
+			+ "Optional: auto-upload bingo screenshots for review (may include chat).\n"
+			+ "Change in settings; queued uploads may retry when enabled.";
 		int choice = showOptionDialog(this, message,
 			connecting ? "Connect to Soulrend" : "Automatic evidence",
 			DEFAULT_OPTION, PLAIN_MESSAGE, null, options, options[1]);
