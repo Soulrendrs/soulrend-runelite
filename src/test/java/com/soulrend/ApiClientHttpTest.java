@@ -134,6 +134,34 @@ public class ApiClientHttpTest
         assertEquals(200, c.lastBingoHttpStatus);
     }
 
+    @Test
+    public void renameRecoveryOnlyForCurrentCharacterAndOnlyOncePerHour() {
+        BingoApiClient c = client();
+        c.playerToken = "test-bearer";
+        c.setCurrentRsn("New Name");
+        reply = "{\"username\":\"member\",\"events\":[],\"rename_check_available\":true}";
+        c.bingoEvents("test-bearer", "Other Name");
+        assertEquals(1, seen.size());
+        c.bingoEvents("test-bearer", "New Name");
+        assertEquals(3, seen.size());
+        assertEquals("POST", seen.get(2).method());
+        assertEquals("/api/runelite/v1/character/verify", seen.get(2).url().encodedPath());
+        assertEquals("New Name", seen.get(2).url().queryParameter("character"));
+        assertEquals("Bearer test-bearer", seen.get(2).header("Authorization"));
+        c.bingoEvents("test-bearer", "New Name");
+        assertEquals(4, seen.size());
+    }
+
+    @Test
+    public void olderServerWithoutRenameFlagDoesNotTriggerVerification() {
+        BingoApiClient c = client();
+        c.playerToken = "test-bearer";
+        c.setCurrentRsn("New Name");
+        reply = "{\"username\":\"member\",\"events\":[]}";
+        c.bingoEvents("test-bearer", "New Name");
+        assertEquals(1, seen.size());
+    }
+
 	@Test
 	public void conditionalGetReusesTheCachedBodyOn304() throws IOException
 	{
