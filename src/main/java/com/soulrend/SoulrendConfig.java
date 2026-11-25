@@ -5,8 +5,8 @@ import net.runelite.client.config.*;
 @ConfigGroup("soulrendbingo")
 public interface SoulrendConfig extends Config {
 	@ConfigItem(keyName = "automaticEvidence", name = "Automatic bingo evidence", section = bingoSection,
-		description = "Opt in to sending game screenshots and matching bingo activity to soulrend.events. Turn off to stop capture and retries.",
-		warning = "This feature submits your IP address to a 3rd-party server not controlled or verified by RuneLite developers. Game screenshots and matching bingo activity will be sent to soulrend.events.")
+		description = "Automatically submit bingo proof.",
+		warning = "This feature submits your IP address to a 3rd-party server not controlled or verified by RuneLite developers. Sends bingo screenshots and activity to soulrend.events.")
 	default boolean automaticEvidence() { return false; }
 
 	// ---- Sections (collapsible groups, top to bottom) ----
