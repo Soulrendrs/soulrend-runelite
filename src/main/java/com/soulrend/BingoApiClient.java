@@ -498,13 +498,17 @@ public class BingoApiClient {
         final String proofStatus;
         final Integer value, target;
         final ConfirmedTile completion;
+        final ProgressTile progress;
+        final long participation;
 
-        EvidenceUpload(int httpStatus, String proofStatus, Integer value, Integer target, ConfirmedTile completion) {
+        EvidenceUpload(int httpStatus, String proofStatus, Integer value, Integer target, ConfirmedTile completion, ProgressTile progress, long participation) {
             this.httpStatus = httpStatus;
             this.proofStatus = proofStatus;
             this.value = value;
             this.target = target;
             this.completion = completion;
+            this.progress = progress;
+            this.participation = participation;
         }
     }
 
@@ -512,6 +516,8 @@ public class BingoApiClient {
         String status;
         Integer value, target;
         ConfirmedTile completion;
+        ProgressTile progress;
+        long participation;
     }
 
     EvidenceUpload uploadEvidence(PendingSubmissionStore.PendingSubmission proof, String token, byte[] image) throws IOException {
@@ -534,6 +540,8 @@ public class BingoApiClient {
                 String proofStatus = null;
                 Integer value = null, target = null;
                 ConfirmedTile completion = null;
+                ProgressTile progress = null;
+                long participation = 0;
                 if (reply.isSuccessful()) {
                     try {
                         var receipt = gson.fromJson(data, EvidenceReceipt.class);
@@ -542,12 +550,14 @@ public class BingoApiClient {
                             value = receipt.value;
                             target = receipt.target;
                             completion = receipt.completion;
+                            progress = receipt.progress;
+                            participation = receipt.participation;
                         }
                     } catch (JsonParseException ignored) {
                         // The HTTP receipt still acknowledges the upload.
                     }
                 }
-                return new EvidenceUpload(reply.code(), proofStatus, value, target, completion);
+                return new EvidenceUpload(reply.code(), proofStatus, value, target, completion, progress, participation);
             });
     }
 
