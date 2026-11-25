@@ -8943,34 +8943,29 @@ public class SoulrendPlugin extends Plugin {
 	 * on the executor. Asked for on the client thread, so the hide and the request land between frames.
 	 */
 	/**
-	 * Capture automatic evidence without altering live game widgets. Redact the visible private-chat
-	 * surface in a copy. The full chat scroll area is covered when private chat is visible, since
-	 * line layout can change between the widget read and rendered frame.
+	 * Capture automatic evidence without altering live game widgets. Redact chat surfaces in a
+	 * copy, including the full scroll area, rather than attempting to classify each changing line.
 	 */
 	void onEvidenceFrame(Consumer<BufferedImage> work) {
 		clientThread.invoke(() -> {
+			if (!execLive() || drawManager == null) return;
+			var masks = new ArrayList<Rectangle>();
+			var split = client.getWidget(InterfaceID.PmChat.CONTAINER);
+			if (split != null && !split.isHidden()) masks.add(split.getBounds());
+			var area = client.getWidget(InterfaceID.Chatbox.SCROLLAREA);
+			if (area != null && !area.isHidden()) masks.add(area.getBounds());
+			var input = client.getWidget(InterfaceID.Chatbox.INPUT);
+			if (input != null && !input.isHidden()) masks.add(input.getBounds());
+			var prompt = client.getWidget(InterfaceID.Chatbox.MES_LAYER);
+			if (prompt != null && !prompt.isHidden()) masks.add(prompt.getBounds());
+			int width = client.getCanvasWidth(), height = client.getCanvasHeight();
 			drawManager.requestNextFrameListener(image -> {
 				if (!execLive() || !(image instanceof BufferedImage)) return;
-				clientThread.invokeLater(() -> {
-					if (!execLive()) return;
-					var masks = new ArrayList<Rectangle>();
-					var split = client.getWidget(InterfaceID.PmChat.CONTAINER);
-					if (split != null && !split.isHidden()) masks.add(split.getBounds());
-					var area = client.getWidget(InterfaceID.Chatbox.SCROLLAREA);
-					if (area != null && !area.isHidden()) {
-						// Conservative: protect all chat, including names and message text.
-						masks.add(area.getBounds());
-					}
-					var input = client.getWidget(InterfaceID.Chatbox.INPUT);
-					if (input != null && !input.isHidden()) masks.add(input.getBounds());
-					var prompt = client.getWidget(InterfaceID.Chatbox.MES_LAYER);
-					if (prompt != null && !prompt.isHidden()) masks.add(prompt.getBounds());
-					int width = client.getCanvasWidth(), height = client.getCanvasHeight();
-					var redacted = EvidenceFramePrivacy.redact((BufferedImage) image, masks, width, height);
-					if (redacted == null || !execLive()) return;
-					try { executor.submit(() -> work.accept(redacted)); }
-					catch (RejectedExecutionException ignored) { }
-				});
+				// Copy during the frame callback; the renderer can reuse its backing image.
+				var redacted = EvidenceFramePrivacy.redact((BufferedImage) image, masks, width, height);
+				if (redacted == null || !execLive()) return;
+				try { executor.submit(() -> work.accept(redacted)); }
+				catch (RejectedExecutionException ignored) { }
 			});
 		});
 	}
