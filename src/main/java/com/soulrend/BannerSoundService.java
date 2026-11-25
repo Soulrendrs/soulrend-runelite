@@ -42,7 +42,7 @@ public class BannerSoundService {
 	final AudioPlayer audioPlayer;
 	// The service is a singleton that outlives a plugin stop/start, so shutdown() can't leave a dead
 	// executor behind: the next play() would throw RejectedExecutionException into the loot handler.
-	ExecutorService audioExecutor;
+	ScheduledExecutorService audioExecutor;
 
 
 	void setRoot(Filepath dir) {
@@ -259,24 +259,22 @@ public class BannerSoundService {
 		queueBingoCue(cue, true);
 	}
 
-	private void queueBingoCue(BingoCue cue, boolean preview) {
+	private synchronized void queueBingoCue(BingoCue cue, boolean preview) {
 		if (!config.bannerSound() || config.bannerSoundVolume() <= 0 || !preview && !cue.enabled(config)) return;
 		if (BannerSoundService.class.getResource(cue.resource) == null) return;
 		try {
-			executor().execute(() -> playBingoCueOnWorker(cue, preview));
+			long now = System.nanoTime();
+			long delay = Math.max(0L, bingoAudioReady - now);
+			executor().schedule(() -> playBingoCueOnWorker(cue, preview), delay, TimeUnit.NANOSECONDS);
+			bingoAudioReady = now + delay + cueSpacingNanos(cue);
 		} catch (RejectedExecutionException ignored) {
 		}
 	}
 
 	private void playBingoCueOnWorker(BingoCue cue, boolean preview) {
 		try {
-			long remaining = bingoAudioReady - System.nanoTime();
-			if (remaining > 0) TimeUnit.NANOSECONDS.sleep(remaining);
 			if (!config.bannerSound() || config.bannerSoundVolume() <= 0 || !preview && !cue.enabled(config)) return;
 			audioPlayer.play(BannerSoundService.class, cue.resource, gainDb());
-			bingoAudioReady = System.nanoTime() + cueSpacingNanos(cue);
-		} catch (InterruptedException e) {
-			Thread.currentThread().interrupt();
 		} catch (Exception e) {
 			log.warn("Unable to play Soulrend {} cue: {}", cue, e.getMessage());
 		}
@@ -290,9 +288,9 @@ public class BannerSoundService {
 		}
 	}
 
-	synchronized ExecutorService executor() {
+	synchronized ScheduledExecutorService executor() {
 		if (audioExecutor == null || audioExecutor.isShutdown()) {
-			audioExecutor = Executors.newSingleThreadExecutor(r -> {
+			audioExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
 				var t = new Thread(r, "soulrend-banner-sound");
 				t.setDaemon(true);
 				return t;
@@ -397,6 +395,7 @@ public class BannerSoundService {
 		if (audioExecutor != null) {
 			audioExecutor.shutdownNow();
 			audioExecutor = null;
+			bingoAudioReady = 0;
 		}
 	}
 }

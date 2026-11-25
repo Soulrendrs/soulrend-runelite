@@ -259,7 +259,9 @@ public class SoulrendSidebarPanel extends PluginPanel {
 
 		// Sign-in affordance — visible whenever there is no token (see refreshSignInRow).
 		styleFlatButton(signInButton, BRAND_ORANGE);
-		signInButton.addActionListener(e -> startSignIn());
+		signInButton.addActionListener(e -> {
+			if (showConfirmDialog(this, "Connecting sends your IP address, installation metadata and, after approval, linked character and bingo activity to soulrend.events, a third-party server not controlled or verified by RuneLite developers. Optional screenshot uploads require a separate setting. Continue?", "Connect to Soulrend", YES_NO_OPTION) == YES_OPTION) startSignIn();
+		});
 		signInStatus.setVisible(false);
 		signInRow.setBackground(DARK_GRAY_COLOR);
 		signInRow.add(signInButton, NORTH);
