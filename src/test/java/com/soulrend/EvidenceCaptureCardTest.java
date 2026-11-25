@@ -22,6 +22,18 @@ public class EvidenceCaptureCardTest {
         }
     }
 
+    @Test public void namedNpcEvidenceShowsNameRatherThanId() {
+        var proof = new PendingSubmissionStore.PendingSubmission();
+        proof.evidenceKind = "npc_kill";
+        proof.evidenceId = 2790;
+        proof.evidenceName = "Cow (level 2)";
+        proof.amount = 1;
+        var card = EvidenceCaptureCard.forProof(proof);
+        assertEquals("Cow (level 2) (+1)", card.objective);
+        assertFalse(card.completed);
+        assertEquals(2790, proof.evidenceId);
+    }
+
     @Test public void annotationDoesNotMutateOriginalFrame() {
         var frame = new BufferedImage(640, 480, BufferedImage.TYPE_INT_RGB);
         var proof = new PendingSubmissionStore.PendingSubmission();
@@ -33,6 +45,7 @@ public class EvidenceCaptureCardTest {
         assertEquals(0xff000000, frame.getRGB(320, 30));
         assertNotEquals(frame.getRGB(320, 30), copy.getRGB(320, 30));
         assertEquals(frame.getRGB(10, 400), copy.getRGB(10, 400));
+        assertEquals(frame.getRGB(320, 100), copy.getRGB(320, 100));
     }
 
     @Test public void confirmedPopupImmediatelyReplacesVisibleEvidenceCard() {
