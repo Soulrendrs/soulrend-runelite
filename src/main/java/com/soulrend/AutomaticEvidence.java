@@ -35,7 +35,7 @@ final class AutomaticEvidence {
         String kind;
         Integer item_id, quantity, task_id, npc_id;
         int[] npc_ids;
-        String source, task_name;
+        String source, task_name, npc_name, objective_name, icon_path;
         boolean allow_repeat;
 
         boolean matchesNpc(int observedNpcId) {
@@ -96,6 +96,27 @@ final class AutomaticEvidence {
     private final AtomicInteger queuedThisSync = new AtomicInteger();
     private final AtomicBoolean flushScheduled = new AtomicBoolean();
     private volatile BoardRules rules;
+    // Sync runs on the worker. Bound retries for missing portraits; capture never waits for a fetch.
+    private final Map<String, Long> portraitAttempts = new LinkedHashMap<String, Long>(64, 0.75f, true) {
+        @Override protected boolean removeEldestEntry(Map.Entry<String, Long> entry) {
+            return size() > 256;
+        }
+    };
+
+    private void prefetchPortraits(List<Match> matches) {
+        int requested = 0;
+        long now = System.currentTimeMillis();
+        for (var match : matches) {
+            String path = match.rule.icon_path;
+            if (!BingoApiClient.isBingoIconPath(path) || plugin.apiClient.cachedObjectiveIcon(path) != null)
+                continue;
+            Long previous = portraitAttempts.get(path);
+            if (previous != null && now - previous < 60_000) continue;
+            portraitAttempts.put(path, now);
+            plugin.apiClient.thumb(path, 32, 32, false, icon -> {});
+            if (++requested >= 8) break;
+        }
+    }
     private final Map<String, Integer> skillTicks = new HashMap<>(); // client thread
 
     AutomaticEvidence(SoulrendPlugin plugin) {
@@ -234,6 +255,7 @@ final class AutomaticEvidence {
             }
         }
         if (sameSession(session, character)) {
+            prefetchPortraits(matches);
             rules = new BoardRules(session, character,
                 System.currentTimeMillis() + RULE_TTL_MS, List.copyOf(matches), held);
             queuedThisSync.set(0);
@@ -411,6 +433,16 @@ final class AutomaticEvidence {
         pending.evidenceSource = source;
         pending.evidenceRepeat = repeat;
         pending.label = "Bingo evidence";
+        pending.objectiveName = match.rule.objective_name;
+        pending.evidenceIconPath = match.rule.icon_path;
+        if ("npc_kill".equals(pending.evidenceKind)) {
+            pending.evidenceName = match.rule.npc_name;
+        } else if ("ca".equals(pending.evidenceKind)) {
+            pending.evidenceName = match.rule.task_name;
+        } else if ("drop".equals(pending.evidenceKind) || "gain".equals(pending.evidenceKind)) {
+            var item = plugin.itemManager.getItemComposition(evidenceId);
+            if (item != null) pending.evidenceName = item.getName();
+        }
         pending.timestamp = now;
         return pending;
     }
@@ -424,11 +456,12 @@ final class AutomaticEvidence {
                 for (var proof : captures) {
                     if (!sameSession(snapshot.session, snapshot.character)) break;
                     var card = EvidenceCaptureCard.forProof(proof);
+                    card.icon = plugin.apiClient.cachedObjectiveIcon(card.iconPath);
                     byte[] screenshot = SoulrendPlugin.jpeg(EvidenceCaptureCard.annotate(image, card));
                     if (plugin.pendingSubmissionStore.save(proof, screenshot) != null) {
                         saved = true;
                         plugin.clientThread.invokeLater(() -> {
-                            if (sameSession(snapshot.session, snapshot.character) && plugin.config.selfTileBanner())
+                            if (sameSession(snapshot.session, snapshot.character) && plugin.config.evidenceCaptureBanner())
                                 plugin.clogBanner.bingoCards.offer(card);
                         });
                     }

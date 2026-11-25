@@ -1222,6 +1222,13 @@ public class BingoApiClient {
 	 * {@code w}x{@code h} and kept. {@code done} gets it (null on any failure) on an OkHttp thread, or at
 	 * once from the cache. Anything bigger than {@link #THUMB_MAX_BYTES} is dropped unread.
 	 */
+	Icon cachedObjectiveIcon(String path) {
+		if (!isBingoIconPath(path)) return null;
+		synchronized (thumbs) {
+			return thumbs.get("32x32:false" + path);
+		}
+	}
+
 	void thumb(String path, int w, int h, boolean motion, Consumer<Icon> done) {
 		var key = w + "x" + h + ":" + motion + path;
 		Icon hit;

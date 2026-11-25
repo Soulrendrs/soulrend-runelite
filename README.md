@@ -16,6 +16,8 @@ Connecting to Soulrend offers a choice to enable automatic evidence or connect w
 
 ## Bingo completion popups
 
+The separate **Evidence capture popup** setting is off by default and only changes the live notification, not the upload preference. Confirmed objective and team-completion notifications remain independent.
+
 RuneLite shows confirmed completions for your active team boards in the in-game banner. Use **My tile popups** and **Team completion popups** in Soulrend's Bingo settings to control them. The first board read after sign-in establishes a silent baseline. Approval and official stat credit are picked up on the next background poll.
 
 ## Architecture

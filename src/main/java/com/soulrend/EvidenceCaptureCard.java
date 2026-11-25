@@ -17,10 +17,11 @@ final class EvidenceCaptureCard {
             default: kind = "Objective evidence";
         }
         return new BingoBannerQueue.Card(proof.eventId + ":" + proof.tileId,
-            kind + " #" + proof.evidenceId + " (+" + proof.amount + ")",
-            "Tile #" + proof.tileId, "Awaiting server confirmation", false,
+            (proof.evidenceName == null || proof.evidenceName.isBlank()
+                ? kind + " #" + proof.evidenceId : proof.evidenceName.strip()) + " (+" + proof.amount + ")",
+            proof.objectiveName == null || proof.objectiveName.isBlank() ? "Bingo objective" : proof.objectiveName.strip(), "Awaiting server confirmation", false,
             () -> {}, "drop".equals(proof.evidenceKind) || "gain".equals(proof.evidenceKind)
-                ? proof.evidenceId : 0, null, null, true);
+                ? proof.evidenceId : 0, proof.evidenceIconPath, null, true);
     }
 
     static BufferedImage annotate(BufferedImage frame, BingoBannerQueue.Card card) {
@@ -28,12 +29,12 @@ final class EvidenceCaptureCard {
         var g = copy.createGraphics();
         try {
             g.drawImage(frame, 0, 0, null);
-            double scale = Math.min(1.0, Math.min((frame.getWidth() - 4.0) / BingoCompletionCard.WIDTH,
+            double scale = Math.min(0.75, Math.min((frame.getWidth() - 4.0) / BingoCompletionCard.WIDTH,
                 (frame.getHeight() - 4.0) / BingoCompletionCard.HEIGHT));
             if (scale > 0) {
                 g.translate((frame.getWidth() - BingoCompletionCard.WIDTH * scale) / 2.0, 2);
                 g.scale(scale, scale);
-                BingoCompletionCard.paint(g, card, 180);
+                BingoCompletionCard.paint(g, card, 180, false);
             }
         } finally {
             g.dispose();
