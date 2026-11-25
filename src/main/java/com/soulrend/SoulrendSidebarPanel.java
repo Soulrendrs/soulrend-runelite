@@ -1462,7 +1462,9 @@ public class SoulrendSidebarPanel extends PluginPanel {
         var header = new JPanel(new BorderLayout(5, 0));
         header.setOpaque(false);
         var icon = new JLabel(new GlyphIcon(tile.credited ? CHECK : STAR, 15, BINGO_GOLD));
-        icon.setPreferredSize(new Dimension(27, 25));
+        icon.setPreferredSize(new Dimension(34, 34));
+        icon.setHorizontalAlignment(SwingConstants.CENTER);
+        icon.setVerticalAlignment(SwingConstants.CENTER);
         header.add(icon, WEST);
         if (tile.item_id > 0 && clanView.items != null) {
             var cached = objectiveItems.get(tile.item_id);
@@ -1483,11 +1485,11 @@ public class SoulrendSidebarPanel extends PluginPanel {
                 // Unknown metrics retain the default icon.
             }
         } else if (BingoApiClient.isBingoIconPath(tile.icon_path)) {
-            uiHost().image(tile.icon_path, 24, 24, false, loaded -> {
+            uiHost().image(tile.icon_path, 32, 32, false, loaded -> {
                 if (loaded != null) icon.setIcon(loaded);
             });
         }
-        var title = new ClipLabel(wrapHtml(esc(fontSafe(tile.name)), STATUS_WRAP_PX - 44));
+        var title = new ClipLabel(wrapHtml(esc(fontSafe(tile.name)), STATUS_WRAP_PX - 51));
         title.setFont(BOLD);
         title.setForeground(WHITE);
         title.setVerticalAlignment(SwingConstants.CENTER);
