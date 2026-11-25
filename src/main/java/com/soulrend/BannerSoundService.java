@@ -271,10 +271,16 @@ public class BannerSoundService {
 		}
 	}
 
+	// The longer victory recording is substantially louder than the short cues.
+	// Apply a relative trim in addition to the user's master volume, including previews.
+	static float cueGainDb(BingoCue cue, float masterGainDb) {
+		return cue == BingoCue.TEAM_BINGO_COMPLETE ? Math.max(-80f, masterGainDb - 8f) : masterGainDb;
+	}
+
 	private void playBingoCueOnWorker(BingoCue cue, boolean preview) {
 		try {
 			if (!config.bannerSound() || config.bannerSoundVolume() <= 0 || !preview && !cue.enabled(config)) return;
-			audioPlayer.play(BannerSoundService.class, cue.resource, gainDb());
+			audioPlayer.play(BannerSoundService.class, cue.resource, cueGainDb(cue, gainDb()));
 		} catch (Exception e) {
 			log.warn("Unable to play Soulrend {} cue: {}", cue, e.getMessage());
 		}
