@@ -48,6 +48,18 @@ public class BannerSoundServiceTest
 	}
 
 	@Test
+	public void teamVictoryHasItsOwnSwitchAndLongerAudioSpacing() {
+		var cue = BannerSoundService.BingoCue.TEAM_BINGO_COMPLETE;
+		org.junit.Assert.assertFalse(cue.enabled(new SoulrendConfig() {
+			@Override public boolean teamBingoCompleteSound() { return false; }
+		}));
+		org.junit.Assert.assertTrue(cue.enabled(new SoulrendConfig() {
+			@Override public boolean bingoCompletionSound() { return false; }
+		}));
+		org.junit.Assert.assertEquals(4300L, java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(BannerSoundService.cueSpacingNanos(cue)));
+	}
+
+	@Test
 	public void bundledCuesHaveDistinctResourcesAndEnabledDefaults() throws java.io.IOException {
 		SoulrendConfig settings = new SoulrendConfig() {};
 		java.util.Set<String> resources = new java.util.HashSet<>();

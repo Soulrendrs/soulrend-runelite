@@ -417,10 +417,17 @@ final class AutomaticEvidence {
         plugin.onNextFrame(image -> {
             if (!sameSession(snapshot.session, snapshot.character)) return;
             try {
-                byte[] screenshot = SoulrendPlugin.jpeg(image);
                 boolean saved = false;
                 for (var proof : captures) {
-                    if (plugin.pendingSubmissionStore.save(proof, screenshot) != null) saved = true;
+                    var card = EvidenceCaptureCard.forProof(proof);
+                    byte[] screenshot = SoulrendPlugin.jpeg(EvidenceCaptureCard.annotate(image, card));
+                    if (plugin.pendingSubmissionStore.save(proof, screenshot) != null) {
+                        saved = true;
+                        plugin.clientThread.invokeLater(() -> {
+                            if (sameSession(snapshot.session, snapshot.character) && plugin.config.selfTileBanner())
+                                plugin.clogBanner.bingoCards.offer(card);
+                        });
+                    }
                 }
                 if (saved) flushSoon();
             } catch (IOException ignored) {

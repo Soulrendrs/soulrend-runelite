@@ -4,6 +4,7 @@ import com.soulrend.BingoApiClient.CompletionFeed;
 import com.soulrend.BingoApiClient.ConfirmedTile;
 import com.soulrend.BingoApiClient.EventSummary;
 import com.soulrend.BingoApiClient.ProgressTile;
+import com.soulrend.BingoApiClient.UnlockedTile;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -33,6 +34,10 @@ final class BingoCompletionMonitor {
         final Set<Integer> seen = new HashSet<>();
         final Map<Integer, ProgressTile> progress = new HashMap<>();
         boolean progressInitialized;
+        Boolean teamFinished;
+        boolean finishAnnounced;
+        boolean unlockInitialized;
+        final Set<Integer> seenUnlocked = new HashSet<>();
 
         Board(long participation) {
             this.participation = participation;
@@ -133,6 +138,30 @@ final class BingoCompletionMonitor {
         return updated;
     }
 
+    synchronized boolean observeTeamFinish(int event, CompletionFeed feed) {
+        var board = boards.get(event);
+        if (board == null || feed == null || board.participation != feed.participation
+            || feed.team_finished == null) return false;
+        boolean changed = !board.finishAnnounced && Boolean.FALSE.equals(board.teamFinished) && feed.team_finished;
+        board.teamFinished = feed.team_finished;
+        if (changed) board.finishAnnounced = true;
+        return changed;
+    }
+
+    synchronized List<UnlockedTile> observeUnlocks(int event, CompletionFeed feed) {
+        var board = boards.get(event);
+        if (board == null || feed == null || feed.completed == null
+            || board.participation != feed.participation || feed.unlocked == null) return List.of();
+        var added = new ArrayList<UnlockedTile>();
+        for (var tile : feed.unlocked) {
+            if (tile != null && tile.id > 0 && tile.name != null && !tile.name.isBlank()
+                && board.seenUnlocked.add(tile.id) && board.unlockInitialized
+                && !board.seen.contains(tile.id)) added.add(tile);
+        }
+        board.unlockInitialized = true;
+        return added;
+    }
+
     void poll(List<EventSummary> events, String token, String session, String character) {
         if (!current(session, character)) return;
         useScope(session, character);
@@ -149,18 +178,24 @@ final class BingoCompletionMonitor {
             if (!current(session, character)) return;
             final List<ConfirmedTile> additions;
             final List<ProgressTile> progress;
+            final boolean teamFinished;
+            final List<UnlockedTile> unlocked;
             synchronized (this) {
                 if (scope != origin) return;
                 additions = observe(event.id, feed);
                 progress = observeProgress(event.id, feed);
+                teamFinished = observeTeamFinish(event.id, feed);
+                unlocked = observeUnlocks(event.id, feed);
             }
-            if (!additions.isEmpty() || !progress.isEmpty()) plugin.clientThread.invokeLater(() -> {
+            if (teamFinished || !additions.isEmpty() || !progress.isEmpty() || !unlocked.isEmpty()) plugin.clientThread.invokeLater(() -> {
                 if (!current(session, character) || !Rsn.same(character, plugin.getLocalPlayerName())) return;
                 synchronized (this) {
                     if (scope != origin) return;
                 }
                 for (var tile : additions) show(event, tile);
                 for (var tile : progress) showProgress(event, tile);
+                if (teamFinished) showTeamFinish(event);
+                else if (!unlocked.isEmpty()) showUnlocks(event, unlocked);
             });
         }
         synchronized (this) {
@@ -180,6 +215,29 @@ final class BingoCompletionMonitor {
         return self ? plugin.config.selfTileBanner() : plugin.config.teamCompletionBanner();
     }
 
+    private void showUnlocks(EventSummary event, List<UnlockedTile> unlocked) {
+        if (!plugin.config.teamCompletionBanner() || !plugin.config.bingoUnlockPopups()) return;
+        var first = unlocked.get(0);
+        String detail = unlocked.size() == 1 ? "Now available on your board"
+            : unlocked.size() == 2 ? unlocked.get(1).name
+            : unlocked.get(1).name + " +" + (unlocked.size() - 2) + " more";
+        plugin.clogBanner.bingoCards.offer(new BingoBannerQueue.Card(event.id + ":unlock:" + first.id,
+            first.name, event.team, detail, false, () -> {}, first.item_id, first.icon_path, first.skill));
+        var names = new ArrayList<String>();
+        for (var tile : unlocked) names.add(tile.name);
+        plugin.sendChatMessage(ChatPalette.Tone.DONE, "Unlocked: " + String.join(", ", names));
+    }
+
+    private void showTeamFinish(EventSummary event) {
+        if (!plugin.config.teamCompletionBanner()) return;
+        String team = event.team == null ? "Your team" : event.team;
+        plugin.clogBanner.bingoCards.offer(new BingoBannerQueue.Card(event.id + ":team-finished",
+            event.name, team, "All objectives confirmed", true,
+            () -> plugin.bannerSound.playBingoCue(BannerSoundService.BingoCue.TEAM_BINGO_COMPLETE),
+            0, null, null));
+        plugin.sendChatMessage(ChatPalette.Tone.DONE, team + " completed " + event.name + "!");
+    }
+
     private void show(EventSummary event, ConfirmedTile tile) {
         if (!permits(tile.self)) return;
         var contributor = tile.contributor == null || tile.contributor.isBlank()
@@ -188,7 +246,8 @@ final class BingoCompletionMonitor {
             : String.format(Locale.ROOT, "%,d / %,d · %s", tile.value, tile.target, contributor);
         var card = new BingoBannerQueue.Card(event.id + ":" + tile.id, tile.name, event.team,
             detail, true, () -> plugin.bannerSound.playBingoCue(BannerSoundService.BingoCue.COMPLETION),
-            tile.item_id, tile.icon_path, tile.skill);
+            tile.item_id, tile.icon_path, tile.skill, false, tile.self, tile.value, tile.target,
+            0, tile.contributor, null);
         plugin.clogBanner.bingoCards.offer(card);
         plugin.sendChatMessage(ChatPalette.Tone.DONE, "Bingooooo! " + tile.name + " · " + contributor);
     }
@@ -204,6 +263,7 @@ final class BingoCompletionMonitor {
             : BannerSoundService.BingoCue.TEAM_PROGRESS;
         plugin.clogBanner.bingoCards.offer(new BingoBannerQueue.Card(event.id + ":" + tile.id,
             tile.name, event.team, progress + " · " + contributor, false,
-            () -> plugin.bannerSound.playBingoCue(cue), tile.item_id, tile.icon_path, null));
+            () -> plugin.bannerSound.playBingoCue(cue), tile.item_id, tile.icon_path, null,
+            false, tile.self, tile.value, tile.target, tile.quantity, tile.contributor, tile.scope));
     }
 }
