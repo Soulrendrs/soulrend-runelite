@@ -48,6 +48,16 @@ public class BannerSoundServiceTest
 	}
 
 	@Test
+	public void victorySoundHasIndependentGainTrim() {
+		for (var cue : BannerSoundService.BingoCue.values()) {
+			float expected = cue == BannerSoundService.BingoCue.TEAM_BINGO_COMPLETE ? -20f : -12f;
+			org.junit.Assert.assertEquals(expected, BannerSoundService.cueGainDb(cue, -12f), 0.001f);
+		}
+		org.junit.Assert.assertEquals(-80f, BannerSoundService.cueGainDb(
+			BannerSoundService.BingoCue.TEAM_BINGO_COMPLETE, -80f), 0.001f);
+	}
+
+	@Test
 	public void teamVictoryHasItsOwnSwitchAndLongerAudioSpacing() {
 		var cue = BannerSoundService.BingoCue.TEAM_BINGO_COMPLETE;
 		org.junit.Assert.assertFalse(cue.enabled(new SoulrendConfig() {
