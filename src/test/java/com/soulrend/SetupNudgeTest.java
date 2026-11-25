@@ -9,11 +9,7 @@ import static org.junit.Assert.assertTrue;
 /**
  * What the plugin says about its own setup.
  *
- * THE CASE THIS EXISTS FOR: nothing configured at all. It used to fall out of the comparison as
- * "both agree, so say nothing", which is right for a connected install and wrong for a fresh one —
- * and a fresh one is now the normal way in, since an Soulrend account is a person's rather than a
- * clan's hand-me-down. The cap is the other half: it has to stop, and it has to stop across
- * restarts, or the nudge becomes the reason somebody removes the plugin.
+ * A fresh install gets one connection instruction, with a cap that survives restarts.
  */
 public class SetupNudgeTest
 {
@@ -43,19 +39,16 @@ public class SetupNudgeTest
 	}
 
 	@Test
-	public void theFreshInstallLinesNameTheSiteAndTheButton()
+	public void theFreshInstallShowsOnlyTheConnectionInstruction()
 	{
-		String[] lines = SetupNudge.lines(SetupNudge.Kind.FIRST_RUN);
-		assertEquals(2, lines.length);
-		assertTrue("the instruction names the button that does it", lines[0].contains("Connect to Soulrend"));
-		assertTrue("the reason names where the account lives", lines[1].contains(SetupNudge.SITE_HOST));
-		assertTrue("and that a clan is not a prerequisite", lines[1].contains("No clan needed"));
+		assertArrayEquals(new String[]{"Open the Soulrend panel and click \"Connect to Soulrend\"."},
+			SetupNudge.lines(SetupNudge.Kind.FIRST_RUN));
 	}
 
 	@Test
 	public void theSiteHostIsTheAddressThePluginUses()
 	{
-		// One source of truth: the chat line and the plugin's only server cannot drift apart.
+		// One source of truth: the connection instructions and the plugin's only server cannot drift apart.
 		assertEquals("soulrend.events", SetupNudge.SITE_HOST);
 		assertTrue(BingoApiClient.CANONICAL_SITE.endsWith(SetupNudge.SITE_HOST));
 	}
