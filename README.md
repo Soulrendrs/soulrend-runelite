@@ -10,6 +10,10 @@ Official RuneLite companion for the [Soulrend Bingo Portal](https://soulrend.eve
 
 Device approval connects RuneLite to your Soulrend website account. The sidebar shows character-specific bingo boards once you enter the game with an eligible RuneScape character.
 
+## Automatic bingo evidence
+
+Connecting to Soulrend offers a choice to enable automatic evidence or connect without it. Evidence is disabled by default and requires explicit consent for the connected session; existing installations must review screenshot privacy once. Enabled evidence sends screenshots of matching objective activity to soulrend.events for event review. Visible chat may appear in screenshots. You can disable the feature in RuneLite settings; previously queued evidence may retry when re-enabled. Soulrend is an external service not controlled or verified by RuneLite developers.
+
 ## Bingo completion popups
 
 RuneLite shows confirmed completions for your active team boards in the in-game banner. Use **My tile popups** and **Team completion popups** in Soulrend's Bingo settings to control them. The first board read after sign-in establishes a silent baseline. Approval and official stat credit are picked up on the next background poll.

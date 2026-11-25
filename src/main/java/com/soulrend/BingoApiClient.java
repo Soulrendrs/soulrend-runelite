@@ -83,6 +83,7 @@ public class BingoApiClient {
 		httpClient = client.newBuilder()
 			.followRedirects(false)
 			.followSslRedirects(false)
+			.addInterceptor(pauseGate())
 		// During Phase 2A the only supported production routes are device authorization,
 		// identity and revocation. Never POST inherited Anvil submissions to Soulrend.
 		.addInterceptor(chain -> {
@@ -93,7 +94,6 @@ public class BingoApiClient {
 				throw new IOException("Legacy plugin routes are disabled until Soulrend implements them.");
 			return chain.proceed(chain.request());
 		})
-			.addInterceptor(pauseGate())
 			.connectTimeout(10, TimeUnit.SECONDS)
 			.readTimeout(90, TimeUnit.SECONDS)
 			.writeTimeout(30, TimeUnit.SECONDS)

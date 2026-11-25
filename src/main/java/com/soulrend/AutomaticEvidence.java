@@ -108,8 +108,10 @@ final class AutomaticEvidence {
     }
 
     private boolean enabled() {
-        return plugin.config != null && plugin.config.automaticEvidence()
-            && plugin.apiClient != null && BingoApiClient.CANONICAL_SITE.equals(BingoApiClient.site())
+        return plugin.config != null && plugin.configManager != null && plugin.apiClient != null
+            && EvidenceConsent.enabled(plugin.config.automaticEvidence(), plugin.apiClient.playerToken,
+                plugin.cfgGet(EvidenceConsent.KEY))
+            && BingoApiClient.CANONICAL_SITE.equals(BingoApiClient.site())
             && !plugin.apiClient.needsSignIn() && !plugin.apiClient.isAccountPaused();
     }
 
@@ -178,6 +180,7 @@ final class AutomaticEvidence {
                 || !reachable.contains(proof.eventId)) continue;
             ++sent;
             var screenshot = plugin.pendingSubmissionStore.readScreenshot(proof);
+            if (!sameSession(session, character)) break;
             if (screenshot == null) {
                 plugin.pendingSubmissionStore.remove(proof);
                 held--;
@@ -419,6 +422,7 @@ final class AutomaticEvidence {
             try {
                 boolean saved = false;
                 for (var proof : captures) {
+                    if (!sameSession(snapshot.session, snapshot.character)) break;
                     var card = EvidenceCaptureCard.forProof(proof);
                     byte[] screenshot = SoulrendPlugin.jpeg(EvidenceCaptureCard.annotate(image, card));
                     if (plugin.pendingSubmissionStore.save(proof, screenshot) != null) {
