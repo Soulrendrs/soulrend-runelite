@@ -80,13 +80,18 @@ final class AutomaticEvidence {
         final long expires;
         final List<Match> matches;
         final int pending;
+        final List<BingoApiClient.EventSummary> events;
+        final Set<Integer> reachable;
 
-        BoardRules(String session, String character, long expires, List<Match> matches, int pending) {
+        BoardRules(String session, String character, long expires, List<Match> matches, int pending,
+                   List<BingoApiClient.EventSummary> events, Set<Integer> reachable) {
             this.session = session;
             this.character = character;
             this.expires = expires;
             this.matches = matches;
             this.pending = pending;
+            this.events = events;
+            this.reachable = reachable;
         }
     }
 
@@ -95,6 +100,7 @@ final class AutomaticEvidence {
     private final Map<Integer, Long> attempted = new HashMap<>(); // CA de-dup only, client thread
     private final AtomicInteger queuedThisSync = new AtomicInteger();
     private final AtomicBoolean flushScheduled = new AtomicBoolean();
+    private final AtomicBoolean flushAgain = new AtomicBoolean();
     private volatile BoardRules rules;
     // Sync runs on the worker. Bound retries for missing portraits; capture never waits for a fetch.
     private final Map<String, Long> portraitAttempts = new LinkedHashMap<String, Long>(64, 0.75f, true) {
@@ -137,20 +143,32 @@ final class AutomaticEvidence {
     }
 
     void sync() {
+        sync(false);
+    }
+
+    private void sync(boolean preferUpload) {
         if (!enabled()) clear();
         if (!enabled() && !plugin.bingoCompletions.enabled() && !BingoStartReminder.enabled(plugin)) {
             plugin.bingoCompletions.clear();
             return;
         }
-        if (!syncing.compareAndSet(false, true)) return;
+        if (!syncing.compareAndSet(false, true)) {
+            // A capture saved during a slow sync must not wait for the next periodic poll.
+            if (preferUpload) {
+                flushAgain.set(true);
+                if (!syncing.get() && flushAgain.getAndSet(false)) flushSoon();
+            }
+            return;
+        }
         try {
-            refreshAndRetry();
+            refreshAndRetry(preferUpload);
         } finally {
             syncing.set(false);
+            if (flushAgain.getAndSet(false)) flushSoon();
         }
     }
 
-    private void refreshAndRetry() {
+    private void refreshAndRetry(boolean preferUpload) {
         String token = plugin.apiClient.playerToken;
         String character = plugin.apiClient.getCurrentRsn();
         if (token == null || token.isBlank() || character == null || character.isBlank()) {
@@ -161,28 +179,41 @@ final class AutomaticEvidence {
         String session = DiskFiles.fingerprint(token);
         if (plugin.bingoCompletions.enabled()) plugin.bingoCompletions.useScope(session, character);
         else plugin.bingoCompletions.clear();
-        var events = plugin.apiClient.bingoEvents(token, character);
-        if (events == null || events.events == null) return;
-        plugin.bingoStartReminder.showDue(plugin, events.events, token, character);
-        if (plugin.bingoCompletions.enabled()) {
-            plugin.bingoCompletions.poll(events.events, token, session, character);
-        }
-        if (!sameSession(session, character)) {
-            clear();
-            return;
-        }
+        var snapshot = rules;
+        boolean fast = preferUpload && snapshot != null && sameSession(snapshot.session, snapshot.character)
+            && System.currentTimeMillis() < snapshot.expires;
+        List<BingoApiClient.EventSummary> events;
         var matches = new ArrayList<Match>();
         var reachable = new HashSet<Integer>();
-        var considered = 0;
-        for (var event : events.events) {
-            if (!"active".equals(event.status) || event.characters == null
-                || event.characters.stream().noneMatch(name -> Rsn.same(character, name))) continue;
-            if (++considered > MAX_ACTIVE_BOARDS) break;
-            var response = plugin.apiClient.evidenceRules(event.id, token, character);
-            if (response == null || response.rules == null) continue;
-            reachable.add(event.id);
-            for (var rule : response.rules) {
-                if (rule != null && rule.tile > 0) matches.add(new Match(event.id, rule));
+        if (fast) {
+            // The server still validates membership, event state and every capture.
+            // Use only a previously authorized, unexpired board snapshot for prompt uploads.
+            events = snapshot.events;
+            matches.addAll(snapshot.matches);
+            reachable.addAll(snapshot.reachable);
+        } else {
+            var response = plugin.apiClient.bingoEvents(token, character);
+            if (response == null || response.events == null) return;
+            events = response.events;
+            plugin.bingoStartReminder.showDue(plugin, events, token, character);
+            if (plugin.bingoCompletions.enabled()) {
+                plugin.bingoCompletions.poll(events, token, session, character);
+            }
+            if (!sameSession(session, character)) {
+                clear();
+                return;
+            }
+            var considered = 0;
+            for (var event : events) {
+                if (!"active".equals(event.status) || event.characters == null
+                    || event.characters.stream().noneMatch(name -> Rsn.same(character, name))) continue;
+                if (++considered > MAX_ACTIVE_BOARDS) break;
+                var rulesResponse = plugin.apiClient.evidenceRules(event.id, token, character);
+                if (rulesResponse == null || rulesResponse.rules == null) continue;
+                reachable.add(event.id);
+                for (var rule : rulesResponse.rules) {
+                    if (rule != null && rule.tile > 0) matches.add(new Match(event.id, rule));
+                }
             }
         }
         if (!sameSession(session, character)) {
@@ -214,17 +245,23 @@ final class AutomaticEvidence {
                     // A small individual observation updates the website's
                     // progress bar; printing every +1 kill/drop would flood chat.
                     String message = null;
-                    if ("tracking".equals(upload.proofStatus) || "approved".equals(upload.proofStatus)) {
-                        progressUploaded = true;
+                    if ("tracking".equals(upload.proofStatus)) {
+                        var event = events.stream().filter(row -> row.id == proof.eventId).findFirst().orElse(null);
+                        boolean shown = event != null && upload.progress != null && upload.progress.id == proof.tileId
+                            && plugin.bingoCompletions.announceUploadedProgress(event, upload.participation,
+                                upload.progress, session, character);
+                        // Older servers and retry receipts still use the authoritative board feed.
+                        if (!shown) progressUploaded = true;
+                    } else if ("approved".equals(upload.proofStatus)) {
+                        progressUploaded = true; // also check unlocks and team victory
+                        completedEvents.add(proof.eventId);
+                        if (upload.completion != null && upload.completion.id == proof.tileId) {
+                            events.stream().filter(event -> event.id == proof.eventId).findFirst()
+                                .ifPresent(event -> plugin.bingoCompletions.announceUploadedCompletion(
+                                    event, upload.participation, upload.completion, session, character));
+                        }
                     } else if ("pending".equals(upload.proofStatus)) message = "Bingo evidence sent for review.";
                     else if ("rejected".equals(upload.proofStatus)) message = "Bingo evidence was rejected. See the website.";
-                    if ("approved".equals(upload.proofStatus)) completedEvents.add(proof.eventId);
-                    if ("npc_kill".equals(proof.evidenceKind) && "approved".equals(upload.proofStatus)
-                        && upload.completion != null && upload.completion.id == proof.tileId) {
-                        events.events.stream().filter(event -> event.id == proof.eventId).findFirst()
-                            .ifPresent(event -> plugin.bingoCompletions.announceUploadedNpc(
-                                event, upload.completion, session, character));
-                    }
                     if ("approved".equals(upload.proofStatus) && !plugin.bingoCompletions.enabled()) {
                         message = "Bingo objective completed automatically.";
                     }
@@ -240,7 +277,7 @@ final class AutomaticEvidence {
             }
         }
         if (progressUploaded && plugin.bingoCompletions.enabled()) {
-            plugin.bingoCompletions.poll(events.events, token, session, character);
+            plugin.bingoCompletions.poll(events, token, session, character);
         }
         // Rules were fetched before uploads. Re-read only affected boards so a
         // completed parent does not leave its children untracked for another poll.
@@ -257,7 +294,8 @@ final class AutomaticEvidence {
         if (sameSession(session, character)) {
             prefetchPortraits(matches);
             rules = new BoardRules(session, character,
-                System.currentTimeMillis() + RULE_TTL_MS, List.copyOf(matches), held);
+                fast ? snapshot.expires : System.currentTimeMillis() + RULE_TTL_MS,
+                List.copyOf(matches), held, List.copyOf(events), Set.copyOf(reachable));
             queuedThisSync.set(0);
         }
     }
@@ -480,7 +518,7 @@ final class AutomaticEvidence {
         try {
             executor.schedule(() -> {
                 flushScheduled.set(false);
-                if (enabled()) sync();
+                if (enabled()) sync(true);
             }, EVIDENCE_FLUSH_DELAY_MS, TimeUnit.MILLISECONDS);
         } catch (RejectedExecutionException ignored) {
             flushScheduled.set(false);
