@@ -32,6 +32,25 @@ public class AutomaticEvidenceTest {
     }
 
     @Test
+    public void combinedLootMatchesNpcAndRewardWindowsButNotOtherSources() {
+        var rule = new AutomaticEvidence.Rule();
+        rule.kind = "drop";
+        rule.item_id = 995;
+        var items = Map.of(995, 2);
+        for (String source : new String[] {null, ""}) {
+            rule.source = source;
+            assertTrue(rule.matchesDrop(items, "npc"));
+            assertTrue(rule.matchesDrop(items, "event"));
+            assertFalse(rule.matchesDrop(items, "pvp"));
+            assertFalse(rule.matchesDrop(items, "pickpocket"));
+            assertFalse(rule.matchesDrop(Map.of(996, 2), "event"));
+        }
+        rule.source = "event";
+        assertTrue(rule.matchesDrop(items, "event"));
+        assertFalse(rule.matchesDrop(items, "npc"));
+    }
+
+    @Test
     public void everySkillAttributedGainCountsEvenBelowTheTarget() {
         var rule = new AutomaticEvidence.Rule();
         rule.kind = "gain";

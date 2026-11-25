@@ -50,7 +50,9 @@ final class AutomaticEvidence {
         boolean matchesDrop(Map<Integer, Integer> items, String actualSource) {
             return "drop".equals(kind) && item_id != null
                 && items.getOrDefault(item_id, 0) > 0
-                && (source == null || source.isEmpty() || source.equals(actualSource));
+                && (source == null || source.isEmpty()
+                    ? "npc".equals(actualSource) || "event".equals(actualSource)
+                    : source.equals(actualSource));
         }
 
         boolean matchesGain(String skill, Map<Integer, Integer> gains) {
