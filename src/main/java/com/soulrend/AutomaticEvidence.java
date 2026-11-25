@@ -138,7 +138,7 @@ final class AutomaticEvidence {
         String session = DiskFiles.fingerprint(token);
         if (plugin.bingoCompletions.enabled()) plugin.bingoCompletions.useScope(session, character);
         else plugin.bingoCompletions.clear();
-        var events = plugin.apiClient.bingoRead("", token, character, BingoApiClient.EventList.class);
+        var events = plugin.apiClient.bingoEvents(token, character);
         if (events == null || events.events == null) return;
         plugin.bingoStartReminder.showDue(plugin, events.events, token, character);
         if (plugin.bingoCompletions.enabled()) {

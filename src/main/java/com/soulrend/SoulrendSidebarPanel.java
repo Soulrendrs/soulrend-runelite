@@ -1276,7 +1276,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
         int selected = selectedEvent;
         reading = true;
         interactive().execute(() -> {
-            var list = api.bingoRead("", token, character, BingoApiClient.EventList.class);
+            var list = api.bingoEvents(token, character);
             var event = selectBingoEvent(list == null ? null : list.events, selected);
             var board = event == null ? null : api.bingoRead("/" + event.id + "/board", token, character, BingoApiClient.TeamBoard.class);
             invokeLater(() -> {
@@ -1317,7 +1317,11 @@ public class SoulrendSidebarPanel extends PluginPanel {
                 else {
                     connectedWebsiteUser = list.username;
                     refreshAccountRow();
-                    if (list.events.isEmpty()) rows.add(boardText("No eligible bingos for this character."));
+                    if (list.events.isEmpty()) {
+                        rows.add(boardText(list.rename_check_available
+                            ? "Character not verified yet. If you changed your name, approve it on Wise Old Man. Soulrend will check again automatically."
+                            : "No eligible bingos for this character."));
+                    }
                     for (var e : list.events) {
                         if (e.id == selectedEvent) {
                             var hero = bingoCard(BINGO_GOLD);

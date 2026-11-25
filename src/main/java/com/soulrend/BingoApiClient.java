@@ -333,6 +333,7 @@ public class BingoApiClient {
 	static final class EventList {
         String username;
         List<EventSummary> events;
+        boolean rename_check_available;
     }
     static final class EventSummary {
         int id;
@@ -413,6 +414,39 @@ public class BingoApiClient {
             lastBingoHttpStatus = 0; // Offline/invalid response is not a revoked session.
             return null;
         }
+    }
+
+    // Both the sidebar and evidence polling use this gate. A failed lookup
+    // must not turn each 15-second poll into an upstream WOM request.
+    private long nextRenameCheckAt;
+
+    private synchronized boolean reserveRenameCheck(String token, String character) {
+        if (token == null || !token.equals(playerToken) || isAccountPaused()
+            || character == null || character.isBlank() || !Rsn.same(character, getCurrentRsn())
+            || System.currentTimeMillis() < nextRenameCheckAt) return false;
+        nextRenameCheckAt = System.currentTimeMillis() + 3_600_000L;
+        return true;
+    }
+
+    EventList bingoEvents(String token, String character) {
+        EventList list = bingoRead("", token, character, EventList.class);
+        if (list == null || list.events == null || !list.events.isEmpty()
+            || !list.rename_check_available || !reserveRenameCheck(token, character)) return list;
+        // Only the actual observed RSN is submitted. The server independently
+        // verifies already-owned WOM IDs; no aliases or linking on trust.
+        var url = HttpUrl.parse(authUrl("/api/runelite/v1/character/verify")).newBuilder()
+            .addQueryParameter("character", character).build().toString();
+        var request = plainRequest(url).header("Authorization", "Bearer " + token)
+            .post(RequestBody.create(JSON, "{}"));
+        try {
+            EventList verified = execute(readClient, request, (response, body) ->
+                response.isSuccessful() ? gson.fromJson(body, EventList.class) : null);
+            if (token.equals(playerToken) && Rsn.same(character, getCurrentRsn())
+                && !isAccountPaused() && verified != null && verified.events != null) return verified;
+        } catch (IOException | JsonParseException ignored) {
+            // Existing read remains valid. Retry only after cooldown.
+        }
+        return list;
     }
 
     CompletionFeed bingoCompletions(int eventId, String token, String character) {

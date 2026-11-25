@@ -35,3 +35,7 @@ The Soulrend plugin uses its own plugin identity, configuration namespace (`soul
 Backend integration design: [soulrend-bingos/docs/runelite-plugin-integration.md](https://github.com/Soulrendrs/soulrend-bingos/blob/main/docs/runelite-plugin-integration.md) (pending review/merge).
 
 The bingo start reminder is a local **Soulrend Events** banner. The plugin does not relay player chat or sync collection logs. Use RuneProfile for collection-log data.
+
+### RuneScape name changes
+
+After WOM processes a rename, the sidebar and evidence poll can request an identity check for the observed logged-in name. Soulrend verifies its existing linked WOM player IDs and resumes the same bingo without device re-pairing. The client never grants access using a historical alias or rewrites queued capture identities. Older queued screenshots remain on disk under their original captured RSN; use the website's proof review path if necessary. The check is throttled and requires the matching server feature.
