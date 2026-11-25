@@ -95,6 +95,12 @@ final class BingoBannerQueue {
             if (partial != null) waiting.remove(partial);
         }
         waiting.addLast(next);
+        // A confirmed win should not sit behind an ordinary progress card.
+        // Keep existing celebrations and unlocks intact; audio remains serialized.
+        if (next.completed && visible != null && !visible.completed && !visible.unlocked()) {
+            visible = null;
+            started = 0;
+        }
         return true;
     }
 
