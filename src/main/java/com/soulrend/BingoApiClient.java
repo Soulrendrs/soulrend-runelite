@@ -89,7 +89,7 @@ public class BingoApiClient {
 		.addInterceptor(chain -> {
 			var url = chain.request().url();
 			if (!allowedOrigin(url, HttpUrl.parse(site()))
-				|| (CANONICAL_SITE.equals(site()) && !productionRouteAllowed(url))
+				|| (CANONICAL_SITE.equals(site()) && !productionRequestAllowed(url, chain.request().method()))
 				|| (isBingoIconPath(url.encodedPath()) && !"GET".equals(chain.request().method())))
 				throw new IOException("Legacy plugin routes are disabled until Soulrend implements them.");
 			return chain.proceed(chain.request());
@@ -109,10 +109,24 @@ public class BingoApiClient {
 
 	/** Prevent unsupported inherited endpoints from reaching the production Django site. */
 	static boolean productionRouteAllowed(HttpUrl url) {
-		return allowedOrigin(url, HttpUrl.parse(CANONICAL_SITE))
-			&& (url.encodedPath().startsWith("/api/runelite/v1/")
-			|| (url.query() == null && isBingoIconPath(url.encodedPath())));
+		return productionRequestAllowed(url, "GET") || productionRequestAllowed(url, "POST");
 	}
+
+	/** Default-deny every production route and verb that is not part of the reviewed API. */
+	static boolean productionRequestAllowed(HttpUrl url, String method) {
+		if (!allowedOrigin(url, HttpUrl.parse(CANONICAL_SITE))) return false;
+		String path = url.encodedPath();
+		boolean get = "GET".equals(method), post = "POST".equals(method);
+		if (isBingoIconPath(path)) return get && url.query() == null;
+		if (path.equals("/api/runelite/v1/device/start") || path.equals("/api/runelite/v1/device/poll")
+			|| path.equals("/api/runelite/v1/session/revoke") || path.equals("/api/runelite/v1/character/verify")) return post;
+		if (path.equals("/api/runelite/v1/me") || path.equals("/api/runelite/v1/events")) return get;
+		if (path.equals("/api/runelite/v1/notifications")) return get || post;
+		if (path.matches("/api/runelite/v1/events/[1-9][0-9]*/board")) return get;
+		return path.matches("/api/runelite/v1/events/[1-9][0-9]*/evidence") && (get || post);
+	}
+
+	static boolean productionMode() { return CANONICAL_SITE.equals(site()); }
 
 	static boolean allowedOrigin(HttpUrl url, HttpUrl expected) {
 		return url != null && expected != null && url.scheme().equals(expected.scheme())

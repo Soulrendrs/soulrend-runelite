@@ -417,7 +417,7 @@ final class AutomaticEvidence {
 
     private void capture(BoardRules snapshot, List<PendingSubmission> captures) {
         if (captures.isEmpty()) return;
-        plugin.onNextFrame(image -> {
+        plugin.onEvidenceFrame(image -> {
             if (!sameSession(snapshot.session, snapshot.character)) return;
             try {
                 boolean saved = false;
@@ -437,7 +437,7 @@ final class AutomaticEvidence {
             } catch (IOException ignored) {
                 // No evidence file was committed. Never send a capture without an image.
             }
-        }, null);
+        });
     }
 
     /** Keep the server's progress counter responsive after each game occurrence. */

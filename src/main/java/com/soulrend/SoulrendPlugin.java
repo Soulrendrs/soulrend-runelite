@@ -3614,6 +3614,7 @@ public class SoulrendPlugin extends Plugin {
 	}
 
 	void queueFact(JsonObject fact, boolean shot, CoopFingerprint coop) {
+		if (BingoApiClient.productionMode()) return; // legacy facts must never capture or queue
 		// Its id (27 URL-safe characters of a random UUID), once and for good: the site credits an id one time (POST /api/plugin/facts), so
 		// every resend — a retry, the stash after a restart — carries this one. A fact restored from an
 		// older stash file has none yet and gets it here.
@@ -4501,6 +4502,7 @@ public class SoulrendPlugin extends Plugin {
 	}
 
 	void captureStartProofOnClientThread() {
+		if (BingoApiClient.productionMode()) return; // unsupported legacy endpoint; no capture
 		var cfg = pluginConfig;
 		if (cfg == null || cfg.startProof == null || cfg.event == null || !cfg.startProof.drawn) {
 			sendChatMessage("No starting shot is being asked for right now.");
@@ -4610,7 +4612,7 @@ public class SoulrendPlugin extends Plugin {
 	 */
 	void retryPendingSubmissions() {
 		automaticEvidence.sync();
-		if (!apiClient.isConfigured()) return;
+		if (BingoApiClient.productionMode() || !apiClient.isConfigured()) return;
 
 		if (!proofBackoff.ready(now())) return; // the last pass failed; wait out the backoff (the site coming back cuts it short)
 		var pending = pendingSubmissionStore.loadAll();
@@ -4925,6 +4927,7 @@ public class SoulrendPlugin extends Plugin {
 
 	/** Read last session's config off disk for the panel. Executor only (disk). */
 	void loadSavedResponses() {
+		if (BingoApiClient.productionMode()) return; // do not revive unsupported legacy UI/config
 		var rc = responseCache;
 		if (rc == null || !apiClient.isConfigured() || liveConfigAnswered) return;
 		var cfgEntry = rc.load(ResponseDiskCache.CONFIG);
@@ -5522,11 +5525,11 @@ public class SoulrendPlugin extends Plugin {
 
 	/** The panel's tracked name: its Supporter look, or null. */
 	boolean flairOn() {
-		return config.chatNames() != SoulrendConfig.Names.Off;
+		return !BingoApiClient.productionMode() && config.chatNames() != SoulrendConfig.Names.Off;
 	}
 
 	boolean menusFlair() {
-		return config.menuNames() != SoulrendConfig.Names.Off;
+		return !BingoApiClient.productionMode() && config.menuNames() != SoulrendConfig.Names.Off;
 	}
 
 	/**
@@ -6376,6 +6379,7 @@ public class SoulrendPlugin extends Plugin {
 	}
 
 	void refreshConfig() {
+		if (BingoApiClient.productionMode()) return; // dedicated v1 polling lives in AutomaticEvidence/sidebar
 		configFetchLock.lock();
 		fetchConfigAndUnlock();
 	}
@@ -7457,6 +7461,7 @@ public class SoulrendPlugin extends Plugin {
 	 * no event running, and it never gates on tracking being enabled.
 	 */
 	void trackVestigeRolls(String source, Collection<ItemStack> items) {
+		if (BingoApiClient.productionMode()) return;
 		if (pluginConfig == null || pluginConfig.rollTables == null || empty(items)) return;
 		var table = pluginConfig.rollTables.stream().filter(t -> t != null && t.boss != null && t.boss.equalsIgnoreCase(source)).findFirst().orElse(null);
 		if (table == null) return;
@@ -8833,6 +8838,7 @@ public class SoulrendPlugin extends Plugin {
 	 * notification (a Maggot King fang post vanished this way).
 	 */
 	void captureFrameAsync(Consumer<byte[]> consumer) {
+		if (BingoApiClient.productionMode()) return; // legacy notification endpoint is unavailable
 		var delivered = new AtomicBoolean(false);
 		onNextFrame(image -> {
 			byte[] png = null;
@@ -8857,6 +8863,7 @@ public class SoulrendPlugin extends Plugin {
 	 * ends, so a plugin stopped in between can't leave every overlay hidden.
 	 */
 	void onCleanFrame(Consumer<BufferedImage> work) {
+		if (BingoApiClient.productionMode()) return; // legacy proof path
 		clientThread.invokeLater(() -> {
 			capturing = true;
 			onNextFrame(work, null);
@@ -8870,6 +8877,7 @@ public class SoulrendPlugin extends Plugin {
 	 * Returns how to show them again, or null.
 	 */
 	Runnable hideChatForShot() {
+		if (BingoApiClient.productionMode()) return null;
 		var cfg = pluginConfig;
 		int mask = ChatFlair.hideMask(cfg == null || cfg.me == null ? null : cfg.me.hide);
 		if (mask == 0 || !client.isClientThread()) return null;
@@ -8934,6 +8942,39 @@ public class SoulrendPlugin extends Plugin {
 	 * The next frame, with this person's hidden chat left out (hideChatForShot), handed to {@code work}
 	 * on the executor. Asked for on the client thread, so the hide and the request land between frames.
 	 */
+	/**
+	 * Capture automatic evidence without altering live game widgets. Redact the visible private-chat
+	 * surface in a copy. The full chat scroll area is covered when private chat is visible, since
+	 * line layout can change between the widget read and rendered frame.
+	 */
+	void onEvidenceFrame(Consumer<BufferedImage> work) {
+		clientThread.invoke(() -> {
+			drawManager.requestNextFrameListener(image -> {
+				if (!execLive() || !(image instanceof BufferedImage)) return;
+				clientThread.invokeLater(() -> {
+					if (!execLive()) return;
+					var masks = new ArrayList<Rectangle>();
+					var split = client.getWidget(InterfaceID.PmChat.CONTAINER);
+					if (split != null && !split.isHidden()) masks.add(split.getBounds());
+					var area = client.getWidget(InterfaceID.Chatbox.SCROLLAREA);
+					if (area != null && !area.isHidden()) {
+						// Conservative: protect all chat, including names and message text.
+						masks.add(area.getBounds());
+					}
+					var input = client.getWidget(InterfaceID.Chatbox.INPUT);
+					if (input != null && !input.isHidden()) masks.add(input.getBounds());
+					var prompt = client.getWidget(InterfaceID.Chatbox.MES_LAYER);
+					if (prompt != null && !prompt.isHidden()) masks.add(prompt.getBounds());
+					int width = client.getCanvasWidth(), height = client.getCanvasHeight();
+					var redacted = EvidenceFramePrivacy.redact((BufferedImage) image, masks, width, height);
+					if (redacted == null || !execLive()) return;
+					try { executor.submit(() -> work.accept(redacted)); }
+					catch (RejectedExecutionException ignored) { }
+				});
+			});
+		});
+	}
+
 	void onNextFrame(Consumer<BufferedImage> work, Runnable dead) {
 		clientThread.invoke(() -> {
 			var show = hideChatForShot();
