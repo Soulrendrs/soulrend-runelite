@@ -1417,22 +1417,13 @@ public class SoulrendSidebarPanel extends PluginPanel {
                                     && event.characters != null && event.characters.stream().anyMatch(rsn -> Rsn.same(rsn, character));
                                 for (var tile : available) {
                                     rows.add(Box.createVerticalStrut(4));
-                                    var accent = tile.credited ? BINGO_GREEN : "pending".equals(tile.status) ? BINGO_GOLD
+                                    var accent = "pending".equals(tile.status) ? BINGO_GOLD : tile.credited ? BINGO_GREEN
                                         : "rejected".equals(tile.status) ? BINGO_RED : BINGO_PURPLE;
                                     var card = bingoCard(accent);
                                     card.add(objectiveHeading(tile));
-                                    String status = tile.credited ? "Completed" : "pending".equals(tile.status) ? "Pending approval"
-                                        : "rejected".equals(tile.status) ? "Rejected"
-                                        : tile.value_amount != null && tile.value_amount > 0 ? "In progress" : "Available";
-                                    card.add(boardText(status, SMALL, accent));
+                                    String status = bingoStatus(tile);
                                     String scope = "solo".equals(tile.scope) ? "Solo" : "Team";
-                                    card.add(boardText(tile.target == null ? scope
-                                        : scope + " · " + tile.value + " / " + tile.target, SMALL, BINGO_TEXT));
-                                    if (tile.target != null) {
-                                        if (tile.value_amount != null && tile.target_amount != null) {
-                                            card.add(bingoMeter(tile.value_amount, tile.target_amount, accent));
-                                        }
-                                    }
+                                    addBingoProgress(card, tile, status, scope, accent);
                                     card.add(left(flatButton("Details", tile.name, BINGO_TEXT,
                                         () -> showObjectiveDetails(tile, status, scope))));
                                     rows.add(card);
@@ -1577,6 +1568,21 @@ public class SoulrendSidebarPanel extends PluginPanel {
         card.setBorder(createCompoundBorder(createMatteBorder(1, 3, 1, 1, accent),
             createEmptyBorder(7, 8, 7, 8)));
         return left(card);
+    }
+
+    static String bingoStatus(BingoApiClient.BoardTile tile) {
+        return "pending".equals(tile.status) ? "Pending approval" : tile.credited ? "Completed"
+            : "rejected".equals(tile.status) ? "Rejected"
+            : tile.value_amount != null && tile.value_amount > 0 ? "In progress" : "Available";
+    }
+
+    static void addBingoProgress(JPanel card, BingoApiClient.BoardTile tile, String status, String scope, Color accent) {
+        card.add(boardText(status, SMALL, accent));
+        card.add(boardText(tile.target == null ? scope
+            : scope + " · " + tile.value + " / " + tile.target, SMALL, BINGO_TEXT));
+        if (tile.target != null && tile.value_amount != null && tile.target_amount != null) {
+            card.add(bingoMeter(tile.value_amount, tile.target_amount, accent));
+        }
     }
 
     private static JProgressBar bingoMeter(long value, long target, Color accent) {
