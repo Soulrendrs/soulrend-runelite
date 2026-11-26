@@ -50,8 +50,8 @@ final class AdvancedLootRule {
         catch (NumberFormatException ex) { return false; }
     }
 
-    /** Server currently accepts only canonical raw IDs. Never turn a note into
-     * a fictional unnoted raw stack to bypass the server's identity check. */
+    /** Preserve real raw IDs. Send notes only when the server advertises its
+     * independently verified alias catalog; never invent an unnoted stack. */
     static JsonObject prepare(UUID captureId, ObjectiveRule rule, String source,
                               Iterable<int[]> rawStacks, IntUnaryOperator resolveAlias) {
         if (!"npc".equals(source) && !"event".equals(source)) return null;
@@ -61,7 +61,7 @@ final class AdvancedLootRule {
             if (payload == null) return null;
             for (JsonElement row : payload.getAsJsonArray("stacks")) {
                 int id = row.getAsJsonArray().get(0).getAsInt();
-                if (resolveAlias.applyAsInt(id) != id) return null;
+                if (!rule.note_aliases && resolveAlias.applyAsInt(id) != id) return null;
             }
             return payload;
         } catch (IllegalArgumentException ex) {

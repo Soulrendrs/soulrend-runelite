@@ -295,7 +295,7 @@ final class BingoCompletionMonitor {
             java.util.Set.of("kills", "items", "sets", "unique items", "GP").contains(tile.unit == null ? "" : tile.unit)
                 ? tile.unit : "items");
         var contributor = tile.contributor == null ? "Progress recorded" : "Latest: " + tile.contributor;
-        if (tile.quantity > 0) contributor += "  +" + tile.quantity;
+        if (tile.quantity > 0) contributor += "  +" + String.format(Locale.ROOT, "%,d", tile.quantity);
         if ("solo".equals(tile.scope)) contributor += "  ·  Best solo";
         var cue = tile.self ? BannerSoundService.BingoCue.SELF_PROGRESS
             : BannerSoundService.BingoCue.TEAM_PROGRESS;

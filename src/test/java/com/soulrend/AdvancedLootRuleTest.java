@@ -29,6 +29,19 @@ public class AdvancedLootRuleTest {
             List.of(new int[]{101, 3}, new int[]{200, 1}), AdvancedLootRuleTest::resolve));
     }
 
+    @Test public void verifiedServerCapabilityPreservesRawNotedIds() {
+        var rule = rule("{\"kind\":\"item_pool\",\"strategy\":\"quantity\",\"scope\":\"team\",\"target\":10,"
+            + "\"items\":[{\"item_id\":100,\"quantity\":1}],\"note_aliases\":true}");
+        var payload = AdvancedLootRule.prepare(CAPTURE, rule, "npc",
+            List.of(new int[]{101, 3}, new int[]{100, 2}, new int[]{999, 20}), AdvancedLootRuleTest::resolve);
+        assertNotNull(payload);
+        assertEquals("[[100,2],[101,3]]", payload.get("stacks").toString());
+        assertFalse(payload.has("note_aliases"));
+        rule.note_aliases = false;
+        assertNull(AdvancedLootRule.prepare(CAPTURE, rule, "npc",
+            List.of(new int[]{101, 3}), AdvancedLootRuleTest::resolve));
+    }
+
     @Test public void valueRuleSupportsLongTargetButNoClientPrice() {
         var rule = rule("{\"kind\":\"loot_value\",\"scope\":\"solo\",\"target\":10000000000,\"item_ids\":[100,200]}");
         assertEquals(Set.of(100, 200), AdvancedLootRule.allowedItems(rule, AdvancedLootRuleTest::resolve));
