@@ -322,15 +322,6 @@ public class SoulrendPlugin extends Plugin {
 	final SessionGains sessionGains = new SessionGains();
 
 	/**
-	 * The "Soulrend" button in the CLAN window's header, beside other plugins' buttons.
-	 *
-	 * Gated on the same three things the sidebar's Sync-roster button is: a configured site, site
-	 * admin in the clan being addressed, and a readable clan channel. The admin answer is per clan
-	 * and dropped on a switch (see forgetAdminAnswerOnClanChange), so this cannot linger into a clan
-	 * where pressing it could only collect a 403.
-	 */
-	HeaderButton clanSyncButton;
-	/**
 	 * The most recent "Your X kill count is: N" line, and when it landed.
 	 *
 	 * A collection-log unlock names the ITEM and nothing else, so on its own the server can't say
@@ -781,40 +772,6 @@ public class SoulrendPlugin extends Plugin {
 		"5+ players", "10+ players", "11-15 players", "16-23 players", "24+ players",
 		"25+ players", "50+ players", "100+ players",
 	};
-	/** Last automatic roster push, so a channel reload storm can't fire a request per event. */
-	long lastAutoRosterSyncAt;
-	/** Guard against a second automatic push overlapping the first. */
-	volatile boolean autoRosterSyncRunning;
-	/** Same, for the sidebar button — a double click should be one push, not two. */
-	volatile boolean panelRosterSyncRunning;
-	/**
-	 * The next roster push was started by the plugin, not a person, so it reports itself ONLY if the
-	 * roster actually moved. Silence on a login where nothing changed; a line when someone joined,
-	 * left or was renamed, because that is news whether or not you asked for it.
-	 */
-	volatile boolean autoRosterAnnounce;
-	/**
-	 * Has an automatic sync already reported itself this login?
-	 *
-	 * <p>The first one of a session always speaks, even to say nothing moved: that line is how you
-	 * know the plugin is talking to your site at all, and its absence is what made a working sync
-	 * look broken. Every one after it speaks only when the roster changes.
-	 */
-	volatile boolean autoRosterReportedThisLogin;
-	static final long AUTO_ROSTER_MIN_GAP_MS = 30 * 60 * 1000;
-	/**
-	 * When another roster push is allowed.
-	 *
-	 * <p>A roster push rewrites every member row on the site, and the button is right there in two
-	 * places — so it was one impatient double-click away from doing that twice, and nothing but the
-	 * in-flight guard limited repeated requests.
-	 */
-	volatile long rosterPushAllowedAt;
-	static final long ROSTER_PUSH_COOLDOWN_MS = 60_000L;
-	/** Doubling wait after a push that failed for a reason that might clear (site down, no network). */
-	final SyncBackoff rosterBackoff = new SyncBackoff();
-	/** The clan list lands a moment after the channel does; give it time rather than racing it. */
-	static final long AUTO_ROSTER_DELAY_MS = 5_000;
 	final SyncBackoff pbBackoff = new SyncBackoff();
 	final PersonalBests personalBests = new PersonalBests();
 	/** The account the personal-best state belongs to, so a character switch reloads rather than merges. */
@@ -998,18 +955,6 @@ public class SoulrendPlugin extends Plugin {
 	volatile long lastAdminProbeAt;
 	/** How often to re-ask while the answer is still "no". Cheap request, rare enough to be invisible. */
 	static final long ADMIN_REPROBE_MS = 5 * 60_000L;
-	// Last clan-sync result summary, surfaced in chat after a sync.
-	volatile String lastSyncSummary;
-
-	/**
-	 * Callback for the async clan-sync action invoked from the side panel.
-	 */
-	interface AdminActionCallback {
-
-		void onResult(boolean ok, String message);
-	}
-
-
 	protected void startUp() {
 		// A capture cut short by the last shutdown must not keep every overlay hidden.
 		capturing = false;
@@ -1065,11 +1010,6 @@ public class SoulrendPlugin extends Plugin {
 			log.warn("No soulrend_text.json", e);
 		}
 
-		clanSyncButton = new HeaderButton(
-				client, InterfaceID.ClansInfo.UNIVERSE, InterfaceID.ClansInfo.CLOSE,
-				33 /* CLAN_BUTTON_OFFSET */, "Soulrend", "Sync roster to",
-				() -> false,
-				this::syncClanRosterFromPanel);
 		// The stat table as it stands right now, before any XP arrives. A plugin started mid-session
 		// — every reload during development, every enable from the sidebar — has no other chance to
 		// learn it, and what it doesn't know it mistakes for a level-up that already happened.
@@ -1416,10 +1356,6 @@ public class SoulrendPlugin extends Plugin {
 		tileTracker.shutDown();
 		overlayManager.remove(startProofOverlay);
 		clientThread.invokeLater(startSpotMarker::clear);
-		// OUR WIDGETS ARE OURS TO CLEAR. Disabling the plugin left the buttons sitting in the game's
-		// title bars until the interface happened to be rebuilt — a control for a plugin that is no
-		// longer running, which does nothing when pressed.
-		if (clanSyncButton != null) clientThread.invokeLater(() -> clanSyncButton.hideParts());
 		if (sidebarNavButton != null) {
 			clientToolbar.removeNavigation(sidebarNavButton);
 			sidebarNavButton = null;
@@ -1712,7 +1648,6 @@ public class SoulrendPlugin extends Plugin {
 		// Names, rows and the clan window's header are filled in by scripts just after the group appears:
 		// paint before the next frame (onBeforeRender), which is after all of them and never a frame late.
 		if (flairInterfaceRoot(g) != -1 || g == InterfaceID.CLANS_SIDEPANEL || g == InterfaceID.CLANS_GUEST_SIDEPANEL) flairDue = true;
-		if (g == InterfaceID.CLANS_INFO) headerDue = true;
 		// The scroll's text child isn't populated yet on the load event — read it next tick,
 		// with a couple of retries in case the text lands late.
 		if (g == InterfaceID.QUESTSCROLL) scheduleQuestScrollRead(3);
@@ -1864,9 +1799,6 @@ public class SoulrendPlugin extends Plugin {
 		startSpotMarker.update(here != null && config.startSpotGuide() && cfgNow != null ? StartSpotMarker.target(sp) : null, sp != null ? sp.location : null);
 		resolveDuplicateScroll();
 		flushModeLines();
-		// Keep the roster button current while the clan window is open.
-		if (clanSyncButton != null) clanSyncButton.refresh();
-		updateClanRosterReadable();
 		// Play time for the recap. Counted from ticks rather than wall-clock so it measures time
 		// actually in-game — a client left open on the login screen doesn't earn anyone an award.
 		recordEventTick();
@@ -2119,11 +2051,6 @@ public class SoulrendPlugin extends Plugin {
 			unsettleStats();
 			helloSent = false;
 			identityStampPending = false;
-			// Refreshed on game ticks, and none run at the login screen — so the last in-game answer
-			// would stand and keep "Sync clan roster" on offer while logged out. There is no clan
-			// channel to read here.
-			clanRosterReadable = false;
-			clanRosterMissingTicks = 0;
 			tileTracker.forAccount(-1);
 			repaintSidebar(); // drop "Track on screen" with the session
 			// Back at the login screen: the next LOGGED_IN really is a new session, and until it
@@ -2153,7 +2080,6 @@ public class SoulrendPlugin extends Plugin {
 			startProofCreditWarned = false;
 			// Next login gets its one line back: "it ran and agreed with the site" is worth saying
 			// once per session, and only once.
-			autoRosterReportedThisLogin = false;
 			recentClogUnlocks.clear();
 			// Nothing is attacking a logged-out player, and whatever was is not attacking the next
 			// account either.
@@ -2846,7 +2772,7 @@ public class SoulrendPlugin extends Plugin {
 
 	/**
 	 * Opens the OS file picker to add WAVs of {@code kind}. Wired to the "Banner sounds" and "Mission
-	 * sounds" buttons in the side panel (see SoulrendSidebarPanel.buildPanelActions).
+	 * sounds" buttons in the side panel (see SoulrendSidebarPanel.renderSettings).
 	 *
 	 * <p>New banner clips join the cycle automatically (empty allowlist = all clips play); users curate
 	 * it by tapping them in the tab list. Missions get a separate folder rather than a separate
@@ -4796,7 +4722,6 @@ public class SoulrendPlugin extends Plugin {
 	void onSiteRecovered() {
 		log.info("Site back");
 		pbBackoff.reset();
-		rosterBackoff.reset();
 		proofBackoff.reset();
 		kcPush.kick();
 		skillXpPush.kick();
@@ -4873,70 +4798,6 @@ public class SoulrendPlugin extends Plugin {
 		lastAdminProbeAt = now();
 		// Repaint the side panel so the admin button appears/disappears.
 		if (isAdmin != (isAdmin = apiClient.fetchIsAdmin(token))) repaintSidebar();
-	}
-
-	/**
-	 * Is the clan roster readable RIGHT NOW, as last seen from the client thread?
-	 *
-	 * <p>The side panel renders on Swing's EDT and has to know whether to offer a roster sync, but
-	 * asking the client directly from there is a thread violation. This is refreshed on the game
-	 * tick and read from anywhere.
-	 */
-	@Getter
-	volatile boolean clanRosterReadable;
-	/** Consecutive ticks the clan channel has been missing — see updateClanRosterReadable. */
-	int clanRosterMissingTicks;
-	/** ~6 seconds of a genuinely absent channel before the button goes away. */
-	static final int CLAN_ROSTER_GRACE_TICKS = 10;
-
-	/**
-	 * Refresh the cached "can we read the roster" answer, with hysteresis.
-	 *
-	 * <p>{@code getClanChannel()} is momentarily null on login, on a world hop, and while the clan
-	 * tab loads. Mirroring that straight into the panel made the roster button appear and disappear
-	 * for no reason a player could see, so it takes a few seconds of genuinely NOT being there
-	 * before we withdraw the button — while it comes back the instant the channel does.
-	 */
-	void updateClanRosterReadable() {
-		var before = clanRosterReadable;
-		if (isClanScrapeAvailable()) {
-			clanRosterReadable = true;
-			clanRosterMissingTicks = 0;
-		} else if (!clanRosterReadable || ++clanRosterMissingTicks >= CLAN_ROSTER_GRACE_TICKS) clanRosterReadable = false;
-		// The roster button follows this; the clan channel usually loads a few seconds after login.
-		if (before != clanRosterReadable) {
-			var cs = client.getClanSettings();
-			log.info("Clan roster {} (channel={}, settings={}, members={})",
-					clanRosterReadable ? "readable" : "not readable",
-					client.getClanChannel() != null, cs != null,
-					cs == null || cs.getMembers() == null ? 0 : cs.getMembers().size());
-			repaintSidebar();
-		}
-	}
-
-	boolean isClanScrapeAvailable() {
-		if (client == null) return false;
-		var settings = client.getClanSettings();
-		return client.getClanChannel() != null && settings != null && settings.getMembers() != null && !settings.getMembers().isEmpty();
-	}
-
-
-	/**
-	 * Scrape the in-game clan roster (on the client thread) then POST it to the
-	 * site (off the client thread), authenticated with the player's account
-	 * token.
-	 */
-	void syncClanRoster(AdminActionCallback cb) {
-		cb.onResult(false, "Clan roster export has been retired. Manage your roster on the website.");
-	}
-
-	/**
-	 * A roster sync that didn't happen: say why in chat when {@code say} — by default "Clan sync
-	 * failed: " and the reason — and hand the reason to the button.
-	 */
-	void syncFailed(AdminActionCallback cb, boolean say, String chat, String why) {
-		if (say) sendChatMessage(WARN, chat != null ? chat : "Clan sync failed: " + Character.toLowerCase(why.charAt(0)) + why.substring(1));
-		cb.onResult(false, why);
 	}
 
 	static boolean empty(String s) {
@@ -5854,10 +5715,6 @@ public class SoulrendPlugin extends Plugin {
 	 */
 	@Subscribe
 	void onBeforeRender(BeforeRender event) {
-		if (headerDue && clanSyncButton != null) {
-			headerDue = false;
-			clanSyncButton.render();
-		}
 		// The game rebuilt a member list (a tab switch, a sort, a join): its rows are new and plain.
 		if (flairDue || !menusOff() && nameListsRebuilt()) flairNameLists();
 		if (flairDue) {
@@ -5879,7 +5736,7 @@ public class SoulrendPlugin extends Plugin {
 	}
 
 	/** Client thread: a title-bar button, or a just-opened interface's names, to draw before the next frame. */
-	boolean headerDue, flairDue;
+	boolean flairDue;
 
 
 	/** Client thread: each FLAIR_LISTS list's first row when we last painted it. */
@@ -9189,36 +9046,6 @@ public class SoulrendPlugin extends Plugin {
 	// accepts (nothing here reads or reports anybody else). Everything is opt-out in config, and
 	// nothing is read at all while the toggles are off.
 
-	/**
-	 * The sidebar's "Sync clan roster" button.
-	 *
-	 * <p>Same work as the in-game one, with its own in-flight guard so a double click is one push,
-	 * and the result reported in chat where the player is looking. Refused outright when the clan
-	 * channel isn't readable — the roster is scraped from it, so there is nothing to send.
-	 */
-	void syncClanRosterFromPanel() {
-		if (!isAdmin) {
-			sendChatMessage("Only clan admins can sync the roster.");
-			return;
-		}
-		// Cached, because this is called from the side panel on the EDT — reading the clan channel
-		// from there is the same thread violation that swallowed the profile button's message.
-		if (!clanRosterReadable) {
-			sendChatMessage("Join your clan channel first — the roster is read from it.");
-			return;
-		}
-		if (panelRosterSyncRunning) {
-			sendChatMessage("Already syncing the roster.");
-			return;
-		}
-		panelRosterSyncRunning = true;
-		sendChatMessage("Syncing the clan roster...");
-		syncClanRoster((ok, msg) -> {
-			panelRosterSyncRunning = false;
-			repaintSidebar(); // the callback lands on the executor or client thread, never the EDT
-		});
-	}
-
 	/** Client thread: logged in on a separate-save (seasonal) world, cached for the side panel. */
 	void markSeasonalWorld() {
 		var on = client.getGameState() == GameState.LOGGED_IN && WorldInfo.separateSave(client.getWorldType());
@@ -9444,17 +9271,7 @@ public class SoulrendPlugin extends Plugin {
 	void onClanChannelChanged(ClanChannelChanged event) {
 		// Joined or left a guest channel: tell the guest bridge now rather than on the next tick.
 		if (event.isGuest()) submit(() -> safely("pushGuestChannel", this::pushGuestChannel));
-		// The member list arrives just after the channel; a delay is cheaper than polling for it.
-		// Roster export retired; do not schedule an automatic collection.
 	}
 
-	/**
-	 * Push the in-game roster if we're allowed to and haven't recently. Every guard here is a reason
-	 * NOT to send: not an admin, no token, roster not loaded yet, one already running, or one ran
-	 * within the last half hour.
-	 */
-	void autoSyncClanRoster() {
-		// Roster export retired.
-	}
 
 }

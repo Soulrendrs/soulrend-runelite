@@ -739,14 +739,11 @@ public class SoulrendSidebarPanel extends PluginPanel {
 	 * here is urgent.
 	 */
 	void renderSettings() {
-		var actions = data.actionsFor();
 		// Asked on every refresh, but what it shows only moves with these: rebuild only when one does.
-		var key = settingsKey(actions);
+		var key = settingsKey();
 		if (key.equals(settingsShown)) return;
 		settingsShown = key;
 		settingsPanel.removeAll();
-		var sync = buildPanelActions(actions);
-		if (sync.getComponentCount() > 0) addCard(sync);
 		addCard(buildBannerSounds());
 		addAll(settingsPanel, bold("On the Soulrend website"), gap(6));
 		siteRow("Discord posts & screenshot privacy", "What you post to your clan's Discord", "/settings/announcements");
@@ -791,9 +788,8 @@ public class SoulrendSidebarPanel extends PluginPanel {
 	/** What the settings tab last drew from (settingsKey), so an unchanged refresh skips the rebuild. */
 	String settingsShown;
 
-	String settingsKey(PanelActions actions) {
-		var k = new StringBuilder()
-			.append(actions.canSyncRoster).append('|').append(actions.rosterNote);
+	String settingsKey() {
+		var k = new StringBuilder();
 		for (var clip : data.sounds(BANNER)) k.append('|').append(clip).append(data.bannerSoundOn(clip) ? '+' : '-');
 		return k.append("|m").append(data.sounds(MISSION).size()).toString();
 	}
@@ -1924,24 +1920,6 @@ public class SoulrendSidebarPanel extends PluginPanel {
 	/**
 
 	// ---- Events list (a clan running more than one thing) ------------------------------------------
-
-	/**
-	 * Roster sync and profile sync, when this account can do them here.
-	 *
-	 * <p>A roster is scraped from the clan channel you're standing in, so the button is absent for
-	 * any clan but your own — an admin elsewhere still can't see a roster they aren't in — and it
-	 * says why when the clan channel is unavailable.
-	 */
-	JPanel buildPanelActions(PanelActions actions) {
-		var panel = column();
-		// Nothing this account can do here: no empty card either.
-		if (!actions.canSyncRoster && actions.rosterNote == null) return panel;
-		panel.add(cardTitle("Syncing"));
-		if (actions.canSyncRoster) {
-			addAll(panel, fullWidthButton("Sync clan roster", "Push the in-game clan member list to the site", data::syncRoster), gap(4), note("Clan admins: push the in-game member list to the site", 165));
-		} else if (actions.rosterNote != null) panel.add(note(actions.rosterNote, 165));
-		return panel;
-	}
 
 	/** Muted small text that wraps at {@code widthPt} rather than clipping. */
 	static JLabel note(String text, int widthPt) {

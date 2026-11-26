@@ -6,6 +6,7 @@ import sys
 
 root = Path(__file__).resolve().parents[1]
 patterns = {
+    "retired clan roster sync": r"\b(?:syncClanRoster|syncClanRosterFromPanel|autoSyncClanRoster|updateClanRosterReadable|isClanScrapeAvailable|clanSyncButton)\b",
     "retired clan coffer integration": r"\b(?:ClanCofferTracker|submitClanCoffer|submitCofferLine|syncClanCoffer)\b",
     "retired player menu lookup or vestige prediction": r"\b(?:ProfileLookup|VestigeRolls|trackVestigeRolls|profileLookupMenu)\b",
     "blocking sleep": r"\b(?:Thread\s*\.\s*sleep|TimeUnit\s*\.\s*\w+\s*\.\s*sleep)\s*\(",
