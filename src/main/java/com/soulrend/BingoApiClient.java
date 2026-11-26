@@ -1719,10 +1719,6 @@ public class BingoApiClient {
 		submitStats(values, "activities", "key", "value", "Activity push failed");
 	}
 
-	/**
-	 * POST /api/plugin/coffer/broadcast — this player's own coffer line from clan chat. The site parses
-	 * it and books it once a coffer reading shows the money.
-	 */
 	/** POST /api/plugin/mode-lines — highlighted game messages from a game-mode world (ModeLines). */
 
 	/** The same mode-line batch with the frame that was visible when it was sent. */
@@ -1735,23 +1731,6 @@ public class BingoApiClient {
 		addWorld(payload);
 		// Without a frame, notifyBody is the plain JSON body.
 		post("/api/plugin/mode-lines", notifyBody(payload.toString(), png, filename), "Mode lines failed", false);
-	}
-
-	void submitCofferLine(String line, String clanName) throws IOException {
-		postJson("/api/plugin/coffer/broadcast", obj("line", line, "clanName", clanName), "Coffer line failed", false);
-	}
-
-	/**
-	 * POST /api/plugin/coffer — one absolute in-game Clan Coffer transition. The event key makes a
-	 * retry idempotent; the server also serializes distinct clients observing the same final balance.
-	 */
-	void submitClanCoffer(String eventKey, ClanCofferTracker.Observation observation) throws IOException {
-		if (observation == null) return;
-		postJson("/api/plugin/coffer", obj("eventKey", eventKey, "kind", observation.kind.wire, "beforeBalance", observation.beforeBalance,
-			"afterBalance", observation.afterBalance, "actorConfirmed", observation.actorConfirmed), "Coffer sync failed", false);
-		log.info("Clan Coffer {} synced: {} -> {}{}", observation.kind.wire,
-			observation.beforeBalance, observation.afterBalance,
-			observation.actorConfirmed ? " (local actor confirmed)" : "");
 	}
 
 	/**

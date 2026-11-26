@@ -302,18 +302,6 @@ public interface SoulrendConfig extends Config {
 	}
 
 	@ConfigItem(
-		keyName = "syncClanCoffer",
-		name = "Sync Clan Coffer",
-		description = "Send Clan Coffer deposits and withdrawals to your clan site, from your own clan chat line and the coffer screen.",
-		warning = "This feature submits your IP address to a 3rd-party server not controlled or verified by RuneLite developers",
-		position = 1,
-		section = "profileSection"
-	)
-	default boolean syncClanCoffer() {
-		return false;
-	}
-
-	@ConfigItem(
 		keyName = "syncPersonalBests",
 		name = "Sync personal bests",
 		description = "Send your best boss and raid times as you set them.",

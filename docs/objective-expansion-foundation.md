@@ -44,3 +44,7 @@ Neither was enabled in production. Existing loot collection, supported evidence,
 raid completion parsers and item/overlay components remain intact. Historical
 vestige config keys are ignored; no stored user data is deleted. The targeted
 source guard prevents these retired implementations from being reintroduced.
+
+Removed the unused Clan Coffer widget polling, chat attribution, settings,
+tracker and network methods. The general widget walker and gameplay chat
+parsing remain for supported evidence and future reviewed activities.
