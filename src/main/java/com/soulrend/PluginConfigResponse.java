@@ -233,7 +233,6 @@ public class PluginConfigResponse {
 	List<RosterEntry> pvpRoster;           // event roster (RSN -> teamId) for 'team:other' matching; empty unless a pvp tile exists
 	List<CompletedTile> completedTiles;   // team-level tile completions (all tile types)
 	List<TrackedCombo> trackedCombos;     // combo tiles: their parts ride the lists above (partOf)
-	List<RollTable> rollTables;           // bosses whose vestige is on a fixed roll rotation
 
 	// Merged read-bootstrap (GET /api/plugin/config now returns these so login is one call):
 	Me me;
@@ -369,21 +368,6 @@ public class PluginConfigResponse {
 		Integer partOf;
 		/** Another board's tile (its eventId); null on the addressed board. */
 		HomeBoard board;
-	}
-
-	/**
-	 * A boss whose vestige is on a fixed rotation (the DT2 four): its unique table rolls
-	 * non-vestige, non-vestige, VESTIGE, so the count since the last vestige tells a player how
-	 * close they are. Server-side data (the site's lib/rollTables) so a cadence change or a
-	 * corrected item list needs no plugin release. Empty/absent on older servers — the tracker
-	 * then simply says nothing.
-	 */
-	static class RollTable {
-		String boss;                 // NPC name as the loot event reports it
-		List<Integer> rollItemIds;   // every item that counts as one roll
-		int vestigeItemId;
-		String vestigeName;
-		int rollsPerVestige;         // counting the vestige itself: 1, 2, vestige
 	}
 
 	static class CompletedTile {

@@ -162,9 +162,6 @@ public class SoulrendPlugin extends Plugin {
 	/** The board and team a pushed view last made us refetch the config for (applyPush). */
 	volatile String seatRefetchedFor;
 
-	@Inject
-	ProfileLookup profileLookup;
-
 	// The last thing we landed a hit on, and when.
 	volatile String lastCombatTarget;
 	volatile long lastCombatTargetAt;
@@ -751,9 +748,6 @@ public class SoulrendPlugin extends Plugin {
 	// 2: the notify settings moved to the site (moveNotifyPrefs).
 	static final int CURRENT_DEFAULTS_VERSION = 2;
 
-	// Vestige-rotation counts, per RSN ("boss=rolls:exact;…"). Per-account because the cycle is
-	// account state; a shared config key would smear an alt's rolls into the main's.
-	static final String CFG_VESTIGE_ROLLS = "vestigeRolls";
 	/** The member's clan pick from the sidebar dropdown. "" (or absent) = Auto, let the site decide. */
 	static final String CFG_ACTIVE_CLAN = "activeClan";
 
@@ -1127,15 +1121,6 @@ public class SoulrendPlugin extends Plugin {
 		executor = Executors.newSingleThreadScheduledExecutor();
 		pushSocket = new PushSocket(apiClient, executor, gson, this::onPush);
 		sidebarPanel.setPushLive(pushSocket::live);
-		profileLookup.setPanelOpener(name -> {
-			var nav = sidebarNavButton;
-			if (nav == null || !sidebarPanel.playerCardsAvailable()) return false;
-			invokeLater(() -> clientToolbar.openPanel(nav));
-			sidebarPanel.showLookup(name);
-			return true;
-		});
-		profileLookup.startUp();
-
 		liveConfigAnswered = false;
 		configureApiClient();
 		optedOutAccounts = AccountOptOut.parse(cfgGet(CFG_OPTED_OUT_ACCOUNTS));
@@ -1449,7 +1434,6 @@ public class SoulrendPlugin extends Plugin {
 		bannerSound.shutdown();
 		resetCoffer(false);
 		capturing = false;
-		profileLookup.shutDown();
 		if (sidebarPanel != null) sidebarPanel.cancelSignIn();
 		cancelScheduledTasks();
 		var outbox = notifyOutbox;
@@ -1677,7 +1661,7 @@ public class SoulrendPlugin extends Plugin {
 			CFG_COUNTER_BIGHIT, CFG_COUNTER_MINUTES, CFG_COUNTER_CATASKS, "settingsMovedNoted");
 	// Per-RSN state keys are stored as "<prefix>:<rsn>".
 	static final List<String> INTERNAL_STATE_PREFIXES = List.of(
-			CFG_VESTIGE_ROLLS + ":", CFG_PB_STATE + ":", CFG_PB_IMPORTED + ":");
+			"vestigeRolls:", CFG_PB_STATE + ":", CFG_PB_IMPORTED + ":");
 
 	static boolean isInternalStateKey(String key) {
 		return key != null && (INTERNAL_STATE_KEYS.contains(key) || INTERNAL_STATE_PREFIXES.stream().anyMatch(key::startsWith));
@@ -1702,7 +1686,6 @@ public class SoulrendPlugin extends Plugin {
 		if (isInternalStateKey(key)) return;
 		if ("playerToken".equals(key)) sessionGains.reset();
 		configureApiClient();
-		if ("profileLookupMenu".equals(key) || "lookupPlayers".equals(key)) profileLookup.syncPlayerItem();
 		if ("trackerOnePanel".equals(key)) tileTracker.setOnePanel(config.trackerOnePanel());
 		if ("chatFeed".equals(key)) {
 			syncPush();
@@ -1839,16 +1822,6 @@ public class SoulrendPlugin extends Plugin {
 			VarbitID.TOB_CLIENT_P0, VarbitID.TOB_CLIENT_P1, VarbitID.TOB_CLIENT_P2,
 			VarbitID.TOB_CLIENT_P3, VarbitID.TOB_CLIENT_P4,
 	};
-	// Where this account sits in each DT2 boss's vestige rotation (VestigeRolls owns the rule).
-	// Loaded lazily per RSN and written back after every counted roll.
-	VestigeRolls vestigeRolls;
-	String vestigeRollsRsn;
-	// The roll line from the loot event the drop post is about — postRareDrop runs off the same
-	// event a moment later, so a short window is enough to pair them without threading it through.
-	volatile String lastVestigeLine;
-	volatile long lastVestigeLineAt;
-	static final long VESTIGE_LINE_WINDOW_MS = 5000;
-
 	// Captured on the client thread (onGameTick) so the party-size tile gates — which can run off the
 	// client thread — read it safely. 0 = not in a recognised raid (gates then fall back to the scene
 	// count, which still covers instanced content without a party varbit).
@@ -2701,12 +2674,11 @@ public class SoulrendPlugin extends Plugin {
 		processNpcKill(name);
 	}
 
-	/** A kill's loot: its vestige rolls, then the drop tiles for whatever no chat line already credited. */
+	/** A kill's loot: drop tiles for whatever no chat line already credited. */
 	void npcLoot(String name, Collection<ItemStack> items, boolean creditAutomaticEvidence) {
 		// ServerNpcLoot owns the canonical count; client-side NpcLootReceived
 		// can also fire for the same kill and must not double the totals.
 		if (creditAutomaticEvidence) automaticEvidence.drop(items, "npc");
-		trackVestigeRolls(name, items);
 		processLoot(name, chatCredits.unclaimed(items, now()), "npc");
 	}
 
@@ -7465,35 +7437,6 @@ public class SoulrendPlugin extends Plugin {
 	}
 
 	/**
-	 * Fold a kill's loot into the vestige rotation of whichever boss dropped it, and say where the
-	 * player now stands. Independent of bingo: the cycle is account state, so it keeps counting with
-	 * no event running, and it never gates on tracking being enabled.
-	 */
-	void trackVestigeRolls(String source, Collection<ItemStack> items) {
-		if (BingoApiClient.productionMode()) return;
-		if (pluginConfig == null || pluginConfig.rollTables == null || empty(items)) return;
-		var table = pluginConfig.rollTables.stream().filter(t -> t != null && t.boss != null && t.boss.equalsIgnoreCase(source)).findFirst().orElse(null);
-		if (table == null) return;
-		var rsn = getLocalPlayerName();
-		var rsnKey = rsn == null ? "" : rsn.trim().toLowerCase(ROOT);
-		if (vestigeRolls == null || !rsnKey.equals(vestigeRollsRsn)) {
-			vestigeRolls = VestigeRolls.parse(cfgGet(accountKey(CFG_VESTIGE_ROLLS, rsnKey)));
-			vestigeRollsRsn = rsnKey;
-		}
-		for (var item : items) {
-			// Each unique in the loot is its own roll — a kill that somehow hands you two advances
-			// the cycle twice, which is what the table did.
-			var r = vestigeRolls.record(table, item.getId());
-			if (r == null) continue;
-			cfgSet(accountKey(CFG_VESTIGE_ROLLS, rsnKey), vestigeRolls.serialise());
-			sendChatMessage(table.boss + ": " + r.line);
-			// Remembered for the drop post, which is built moments later off the same loot event.
-			lastVestigeLine = r.line;
-			lastVestigeLineAt = now();
-		}
-	}
-
-	/**
 	 * What this client can see of its company right now: roster teammates in the instance, and the
 	 * party headcount. Deliberately two signals — names are reliable for a single-arena boss and
 	 * useless inside a raid (the party splits across rooms), while the raid party varbits are
@@ -7809,13 +7752,6 @@ public class SoulrendPlugin extends Plugin {
 		}
 		if (n == 0 || key && (me.keyMin <= 0 || total < me.keyMin
 			|| !claim(lastAggregateNotifyAt, source == null ? "" : source, now, RARE_DEDUP_WINDOW_MS))) return;
-		// Where this leaves their vestige rotation, when the drop was a roll of one (set moments ago by
-		// trackVestigeRolls off the same loot event). The site keeps it on a single-item post.
-		var rollLine = lastVestigeLine;
-		if (rollLine != null && now - lastVestigeLineAt < VESTIGE_LINE_WINDOW_MS) {
-			f.put("note", rollLine);
-			lastVestigeLine = null;
-		}
 		postDrop(f);
 	}
 

@@ -28,13 +28,6 @@ public interface SoulrendConfig extends Config {
 	String deathsSection = "deathsSection";
 
 	@ConfigSection(
-		name = "Player lookup",
-		description = "The \"Soulrend\" option on player names, and where it appears.",
-		position = 1
-	)
-	String lookupSection = "lookupSection";
-
-	@ConfigSection(
 		name = "Profile sync",
 		description = "Send best times to your Soulrend profile.",
 		position = 9,
@@ -109,73 +102,6 @@ public interface SoulrendConfig extends Config {
 	)
 	default String playerToken() {
 		return "";
-	}
-
-	@ConfigItem(
-		keyName = "profileLookupMenu",
-		name = "Soulrend lookup on players",
-		description = "Adds an \"Soulrend\" option on player names that opens their profile; off hides it everywhere.",
-		warning = "This feature submits your IP address to a 3rd-party server not controlled or verified by RuneLite developers",
-		position = 0,
-		section = "lookupSection"
-	)
-	default boolean profileLookupMenu() {
-		return false;
-	}
-
-	@ConfigItem(
-		keyName = "lookupPlayers",
-		name = "Players in the world",
-		description = "Right-clicking a player standing near you.",
-		position = 1,
-		section = "lookupSection"
-	)
-	default boolean lookupPlayers() {
-		return true;
-	}
-
-	@ConfigItem(
-		keyName = "lookupChat",
-		name = "Chatbox and private messages",
-		description = "Names in the chatbox and private chat; never the left-click option.",
-		position = 2,
-		section = "lookupSection"
-	)
-	default boolean lookupChat() {
-		return true;
-	}
-
-	@ConfigItem(
-		keyName = "lookupClan",
-		name = "Clan panels",
-		description = "Your clan and guest-clan member lists.",
-		position = 3,
-		section = "lookupSection"
-	)
-	default boolean lookupClan() {
-		return true;
-	}
-
-	@ConfigItem(
-		keyName = "lookupFriendsChat",
-		name = "Friends chat",
-		description = "The friends chat channel member list.",
-		position = 4,
-		section = "lookupSection"
-	)
-	default boolean lookupFriendsChat() {
-		return true;
-	}
-
-	@ConfigItem(
-		keyName = "lookupLists",
-		name = "Friends, ignore and party lists",
-		description = "Your friends and ignore lists and the raid party panel.",
-		position = 5,
-		section = "lookupSection"
-	)
-	default boolean lookupLists() {
-		return true;
 	}
 
 	// ---- Bingo ----
