@@ -36,7 +36,7 @@
     "accepted": false
   },
   {
-    "label": "explicit PvP",
+    "label": "retired explicit PvP",
     "kind": "drop",
     "id": 995,
     "quantity": 1,
@@ -46,7 +46,7 @@
       "item_id": 995,
       "source": "pvp"
     },
-    "accepted": true
+    "accepted": false
   },
   {
     "label": "unknown source",
