@@ -917,22 +917,13 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		if (signInInFlight || configManager == null) return;
 		boolean connecting = api.needsSignIn();
 		String token = api.playerToken;
-		Object[] options = {
-			connecting ? "Enable & connect" : "Enable",
-			connecting ? "Connect only" : "Keep off",
-			"Cancel"
-		};
-		String message = (connecting
-			? "Connecting shares your IP address, installation details and character/bingo data\n"
-				+ "with soulrend.events.\n\n"
-			: "Automatic evidence sends your IP address and bingo data to soulrend.events.\n\n")
-			+ "Optional evidence uploads bingo progress screenshots for review (may include chat).\n"
-			+ "Disable anytime in settings; queued uploads may retry when re-enabled.\n\n"
-			+ "Soulrend is a third-party service not controlled or verified by RuneLite developers.";
+		Object[] options = {"Enable", "Cancel", "Disable screenshots"};
+		String message = "Sends bingo screenshots, activity and your IP address to soulrend.events, "
+			+ "a third-party server not controlled or verified by RuneLite.";
 		int choice = showOptionDialog(this, message,
 			connecting ? "Connect to Soulrend" : "Automatic evidence",
 			DEFAULT_OPTION, PLAIN_MESSAGE, null, options, options[1]);
-		if (choice != 0 && choice != 1) return;
+		if (choice != 0 && choice != 2) return;
 		if (connecting) {
 			if (api.needsSignIn()) startSignIn(choice == 0);
 		} else if (Objects.equals(token, api.playerToken) && !api.needsSignIn()) {
