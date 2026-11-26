@@ -51,6 +51,25 @@ public class AutomaticEvidenceTest {
     }
 
     @Test
+    public void rulesCannotIntroduceArbitraryLootOrSkillSources() {
+        var rule = new AutomaticEvidence.Rule();
+        rule.kind = "drop";
+        rule.item_id = 995;
+        rule.source = "unreviewed";
+        assertFalse(rule.matchesDrop(Map.of(995, 1), "unreviewed"));
+        assertFalse(rule.matchesDrop(Map.of(995, 1), null));
+        rule.source = "pvp";
+        assertTrue(rule.matchesDrop(Map.of(995, 1), "pvp"));
+        rule.item_id = -1;
+        assertFalse(rule.matchesDrop(Map.of(-1, 1), "pvp"));
+        rule.kind = "gain";
+        rule.item_id = 995;
+        rule.source = "unreviewed";
+        assertFalse(rule.matchesGain("unreviewed", Map.of(995, 1)));
+        assertFalse(rule.matchesGain(null, Map.of(995, 1)));
+    }
+
+    @Test
     public void everySkillAttributedGainCountsEvenBelowTheTarget() {
         var rule = new AutomaticEvidence.Rule();
         rule.kind = "gain";
@@ -115,5 +134,9 @@ public class AutomaticEvidenceTest {
         rule.allow_repeat = true;
         assertTrue(rule.matchesTask("A task", true));
         assertFalse(rule.matchesTask("Another task", true));
+        rule.task_id = 0; // the website CA catalog permits ID zero
+        assertTrue(rule.matchesTask("A task", false));
+        rule.task_id = -1;
+        assertFalse(rule.matchesTask("A task", false));
     }
 }

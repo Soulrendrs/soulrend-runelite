@@ -59,13 +59,8 @@ tasks.register('runClient', JavaExec) {
     }
 }
 
-// Preserve the upstream BSD-2-Clause notice in every distributed plugin JAR.
-tasks.named('jar', Jar) {
-    from('LICENSE') {
-        into 'META-INF'
-        rename { 'LICENSE-Anvil.txt' }
-    }
-}
+// The upstream BSD notice lives under src/main/resources/META-INF so the Plugin Hub
+// standard build (which replaces this Gradle script) also packages it.
 
 // Fail the normal Gradle check if packaging silently drops the notice.
 tasks.register('verifyBinaryLicense') {

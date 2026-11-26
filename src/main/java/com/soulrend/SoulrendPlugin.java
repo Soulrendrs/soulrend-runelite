@@ -1995,7 +1995,9 @@ public class SoulrendPlugin extends Plugin {
 				judgeHeldToaRuns(lastToaRaidLevel);
 				lastToaRaidLevel = 0;
 			}
-			for (var p : client.getPlayers()) noteInstancePlayer(p);
+			if (!BingoApiClient.productionMode()) {
+				for (var p : client.getPlayers()) noteInstancePlayer(p);
+			}
 		}
 		wasInInstance = inInstance;
 		// Raid party size, read from client varbits. Each raid is scoped by its own "am I in this
@@ -2063,6 +2065,7 @@ public class SoulrendPlugin extends Plugin {
 
 	@Subscribe
 	void onPlayerSpawned(PlayerSpawned event) {
+		if (BingoApiClient.productionMode()) return; // inherited functionality is not part of Soulrend bingo
 		if (wasInInstance) noteInstancePlayer(event.getPlayer());
 	}
 
@@ -2824,6 +2827,7 @@ public class SoulrendPlugin extends Plugin {
 
 	@Subscribe
 	void onPlayerLootReceived(PlayerLootReceived event) {
+		if (BingoApiClient.productionMode()) return; // inherited functionality is not part of Soulrend bingo
 		if (lmsInGame) return; // LMS PvP loot is minigame loot — not a real drop; skip tiles + the drops channel.
 		var name = event.getPlayer().getName();
 		processLoot(name, event.getItems(), "pvp");
@@ -2869,6 +2873,7 @@ public class SoulrendPlugin extends Plugin {
 	 */
 	@Subscribe
 	void onInteractingChanged(InteractingChanged event) {
+		if (BingoApiClient.productionMode()) return; // inherited functionality is not part of Soulrend bingo
 		var source = event.getSource();
 		if (source == null || source == client.getLocalPlayer()) return; // our own target changing is the other question entirely
 		var name = source.getName();
@@ -2886,12 +2891,14 @@ public class SoulrendPlugin extends Plugin {
 	/** An NPC that despawns while on us never "stops targeting" us: drop it, or a Kephri scarab is blamed at Zebak. */
 	@Subscribe
 	void onNpcDespawned(NpcDespawned event) {
+		if (BingoApiClient.productionMode()) return; // inherited functionality is not part of Soulrend bingo
 		var npc = event.getNpc();
 		if (npc.getInteracting() == client.getLocalPlayer()) deathAttribution.stoppedTargetingUs(npc.getName());
 	}
 
 	@Subscribe
 	void onHitsplatApplied(HitsplatApplied event) {
+		if (BingoApiClient.productionMode()) return; // inherited functionality is not part of Soulrend bingo
 		var ourHit = event.getHitsplat();
 		var actor = event.getActor();
 		var self = client.getLocalPlayer();
@@ -4473,6 +4480,7 @@ public class SoulrendPlugin extends Plugin {
 	 * login nudge. False on every site/event that doesn't ask for one, and the moment one is filed.
 	 */
 	boolean needsStartProof() {
+		if (BingoApiClient.productionMode()) return false;
 		var cfg = pluginConfig;
 		var sp = cfg == null ? null : cfg.startProof;
 		return sp != null
@@ -4704,7 +4712,7 @@ public class SoulrendPlugin extends Plugin {
 	 * nearby — read on the client thread, then handed to {@code then} there. Empty while logged out.
 	 */
 	void lookupNames(Consumer<LookupSuggestions.Names> then) {
-		if (client == null || clientThread == null) {
+		if (BingoApiClient.productionMode() || client == null || clientThread == null) {
 			then.accept(LookupSuggestions.Names.EMPTY);
 			return;
 		}
@@ -4783,6 +4791,7 @@ public class SoulrendPlugin extends Plugin {
 
 	/** The sidebar's "Route me there": hand the start spot to Shortest Path, if it's installed. */
 	void routeToStartSpot() {
+		if (BingoApiClient.productionMode()) return; // inherited functionality is not part of Soulrend bingo
 		var cfg = pluginConfig;
 		var target = cfg == null ? null : StartSpotMarker.target(cfg.startProof);
 		clientThread.invokeLater(() -> startSpotMarker.route(target));
@@ -7581,6 +7590,7 @@ public class SoulrendPlugin extends Plugin {
 
 	@Subscribe
 	void onActorDeath(ActorDeath event) {
+		if (BingoApiClient.productionMode()) return; // inherited functionality is not part of Soulrend bingo
 		// Runs on the client thread — keep this cheap: a reference check + (optionally) a frame
 		// request. Encoding and the network send happen off-thread.
 		var actor = event.getActor();

@@ -149,7 +149,7 @@ final class ProfileLookup {
 
 	/** Add or remove the in-world player item to match the settings. Called on start and config change. */
 	void syncPlayerItem() {
-		var want = config.profileLookupMenu() && config.lookupPlayers();
+		var want = !BingoApiClient.productionMode() && config.profileLookupMenu() && config.lookupPlayers();
 		if (want == playerItemShown) return;
 		if (want) {
 			menuManager.addPlayerMenuItem(OPTION);
@@ -159,7 +159,7 @@ final class ProfileLookup {
 
 	@Subscribe
 	void onMenuEntryAdded(MenuEntryAdded event) {
-		if (!config.profileLookupMenu()) return;
+		if (BingoApiClient.productionMode() || !config.profileLookupMenu()) return;
 		int groupId = WidgetUtil.componentToInterface(event.getActionParam1());
 		int placement = listPlacement(groupId, event.getOption());
 		if (placement == 0 || !surfaceOn(groupId)) return;
@@ -178,6 +178,7 @@ final class ProfileLookup {
 
 	@Subscribe
 	void onMenuOptionClicked(MenuOptionClicked event) {
+		if (BingoApiClient.productionMode()) return;
 		if (event.getMenuAction() != MenuAction.RUNELITE_PLAYER || !OPTION.equals(event.getMenuOption())) return;
 		var player = event.getMenuEntry().getPlayer();
 		if (player != null) lookUp(player.getName());
