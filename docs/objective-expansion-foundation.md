@@ -35,3 +35,12 @@ for reviewers. No independent license verification is claimed.
 Physical removal of unrelated legacy functionality, complete backend privacy
 and retention checks, actual Hub packaging and live client validation remain.
 Do not remove the listed useful parsers before replacement coverage exists.
+
+## Physical cleanup slice
+
+Removed the inherited right-click profile menu, its settings/event listeners,
+and the vestige prediction feature (including server-supplied roll tables).
+Neither was enabled in production. Existing loot collection, supported evidence,
+raid completion parsers and item/overlay components remain intact. Historical
+vestige config keys are ignored; no stored user data is deleted. The targeted
+source guard prevents these retired implementations from being reintroduced.

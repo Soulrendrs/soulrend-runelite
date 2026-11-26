@@ -6,6 +6,7 @@ import sys
 
 root = Path(__file__).resolve().parents[1]
 patterns = {
+    "retired player menu lookup or vestige prediction": r"\b(?:ProfileLookup|VestigeRolls|trackVestigeRolls|profileLookupMenu)\b",
     "blocking sleep": r"\b(?:Thread\s*\.\s*sleep|TimeUnit\s*\.\s*\w+\s*\.\s*sleep)\s*\(",
     "thread interrupt": r"\bThread\s*\.\s*currentThread\s*\(\s*\)\s*\.\s*interrupt\s*\(",
     "reflection": r"\b(?:java\.lang\.reflect|Class\s*\.\s*forName|getDeclaredMethod|getDeclaredField|setAccessible)\b",
