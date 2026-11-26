@@ -244,11 +244,6 @@ public class RacePanelRenderTest {
 	public void rendersTheSettingsTab() throws Exception {
 		SoulrendSidebarDataSource ds = new SoulrendSidebarDataSource(() -> null, null) {
 			@Override
-			public PanelActions actionsFor() {
-				return new PanelActions(true, null);
-			}
-
-			@Override
 			public List<String> sounds(BannerSoundService.Kind kind) {
 				return kind == BannerSoundService.Kind.MISSION ? Collections.singletonList("mission-drop.wav") : Collections.emptyList();
 			}
@@ -267,6 +262,7 @@ public class RacePanelRenderTest {
 		SwingUtilities.invokeAndWait(() -> {
 			SoulrendSidebarPanel p = new SoulrendSidebarPanel(ds, null, null, null, null, null, null);
 			p.renderSettings();
+			assertNull("Retired roster sync must not appear", label(p.settingsPanel, "Syncing"));
 			img[0] = paint(panel(p.settingsPanel));
 		});
 		ImageIO.write(img[0], "png", out("settings.png"));
