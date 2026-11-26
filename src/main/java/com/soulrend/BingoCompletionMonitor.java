@@ -280,7 +280,8 @@ final class BingoCompletionMonitor {
         var contributor = tile.contributor == null || tile.contributor.isBlank()
             ? "Team completion" : "By: " + tile.contributor;
         var detail = tile.value == null || tile.target == null ? contributor
-            : String.format(Locale.ROOT, "%,d / %,d · %s", tile.value, tile.target, contributor);
+            : String.format(Locale.ROOT, "%,d / %,d%s · %s", tile.value, tile.target,
+                BingoApiClient.unitSuffix(tile.unit), contributor);
         var card = new BingoBannerQueue.Card(event.id + ":" + tile.id, tile.name, event.team,
             detail, true, () -> plugin.bannerSound.playBingoCue(BannerSoundService.BingoCue.COMPLETION),
             tile.item_id, tile.icon_path, tile.skill, false, tile.self, tile.value, tile.target,

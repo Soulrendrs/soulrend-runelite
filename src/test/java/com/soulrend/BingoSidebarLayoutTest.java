@@ -97,6 +97,29 @@ public class BingoSidebarLayoutTest {
         });
     }
 
+    @Test
+    public void advancedProgressShowsUnitsAndLongTargets() throws Exception {
+        SwingUtilities.invokeAndWait(() -> {
+            var tile = new BingoApiClient.BoardTile();
+            tile.status = "open";
+            tile.scope = "team";
+            tile.objective_type = "loot_value";
+            tile.unit = "GP";
+            tile.value = "5,000,000,000";
+            tile.target = "10,000,000,000";
+            tile.value_amount = 5_000_000_000L;
+            tile.target_amount = 10_000_000_000L;
+            var card = SoulrendSidebarPanel.bingoCard(Color.GREEN);
+            SoulrendSidebarPanel.addBingoProgress(card, tile, "In progress", "Team", Color.GREEN);
+            assertTrue(((JLabel) card.getComponent(1)).getText().contains("10,000,000,000 GP"));
+            assertEquals(50, ((javax.swing.JProgressBar) card.getComponent(2)).getValue());
+            assertEquals(" sets", BingoApiClient.unitSuffix("sets"));
+            assertEquals(" unique items", BingoApiClient.unitSuffix("unique items"));
+            assertEquals("", BingoApiClient.unitSuffix("<html>invalid"));
+            assertEquals("", BingoApiClient.unitSuffix(null));
+        });
+    }
+
     private static void layout(Container container) {
         container.doLayout();
         for (var child : container.getComponents()) {

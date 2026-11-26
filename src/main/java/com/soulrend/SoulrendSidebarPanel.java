@@ -1529,7 +1529,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
 
     private void showObjectiveDetails(BingoApiClient.BoardTile tile, String status, String scope) {
         String text = status + " · " + scope;
-        if (tile.target != null) text += "\n" + tile.value + " / " + tile.target;
+        if (tile.target != null) text += "\n" + tile.value + " / " + tile.target + BingoApiClient.unitSuffix(tile.unit);
         if (tile.description != null && !tile.description.isBlank()) text += "\n\n" + tile.description;
         if (visibleCombatAchievement(tile)) {
             text += tile.allow_repeat ? "\n\nThis objective allows repeat completions."
@@ -1579,7 +1579,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
     static void addBingoProgress(JPanel card, BingoApiClient.BoardTile tile, String status, String scope, Color accent) {
         card.add(boardText(status, SMALL, accent));
         card.add(boardText(tile.target == null ? scope
-            : scope + " · " + tile.value + " / " + tile.target, SMALL, BINGO_TEXT));
+            : scope + " · " + tile.value + " / " + tile.target + BingoApiClient.unitSuffix(tile.unit), SMALL, BINGO_TEXT));
         if (tile.target != null && tile.value_amount != null && tile.target_amount != null) {
             card.add(bingoMeter(tile.value_amount, tile.target_amount, accent));
         }
