@@ -19,6 +19,7 @@ class ObjectiveRule {
     String source, task_name, npc_name, objective_name, icon_path;
     boolean allow_repeat;
     JsonElement strategy, scope, target, items, item_ids;
+    boolean note_aliases; // server-owned capability, absent on older deployments
 
     boolean isItemBatch() {
         return "item_pool".equals(kind) || "loot_value".equals(kind);
