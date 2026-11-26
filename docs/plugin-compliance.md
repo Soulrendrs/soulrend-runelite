@@ -37,9 +37,9 @@ Production now skips legacy player spawn, hitsplat, death, interaction and playe
 handlers, nearby/clan/friends lookup suggestions, in-game profile menu additions, and
 starting-shot routing. Instance membership names are no longer collected by the tick path
 on the canonical site. This is further quarantine, not physical removal of the imported
-code. Generic own loot observations remain passive, including explicitly selected PvP
-loot (no victim name in the v1 proof payload). The ordinary combined drop rule still
-matches NPC/reward-window drops only. Fixed loot/skill source sets, positive item IDs and nonnegative CA IDs
+code. Generic own loot observations remain passive. Wave 1 subsequently retired PvP loot,
+including explicitly selected historical rules, and removed named opponent tracking.
+The ordinary combined drop rule matches NPC/reward-window drops only. Fixed loot/skill source sets, positive item IDs and nonnegative CA IDs
 are checked in the client. A server rule is a selector over locally observed events, not
 executable code; no attack, movement, prayer or menu automation is intended.
 RuneLite's prohibition on unrestricted ID-based plugins warrants explicit reviewer
@@ -73,3 +73,6 @@ evidence behavior in a real client; test fixed/resizable/stretched screenshot re
 no-chat leakage, offline retries, own/team-only sidebar and Wilderness/PvP loot.
 Verify actual Hub packager output (including BSD notice), native consent prompt and
 official reviewer feedback. Do not equate passing repository CI with Hub approval.
+
+## Wave 1 transport follow-up
+All nine v1 HTTP path patterns match Django's URL configuration; redirects are disabled. The inherited push ticket fetch and WebSocket handshake are explicitly disabled on the canonical site, and production never schedules a legacy push scope. The active v1 board/evidence/notification polling is unchanged. Legacy development-only transport remains quarantined. Official Hub packaging and manual client/privacy verification remain outstanding.
