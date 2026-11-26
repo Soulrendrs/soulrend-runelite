@@ -64,7 +64,7 @@ final class AutomaticEvidence {
         }
 
         boolean matchesTask(String task, boolean repeat) {
-            return "ca".equals(kind) && task_id != null && task_id > 0 && task_name != null
+            return "ca".equals(kind) && task_id != null && task_id >= 0 && task_name != null
                 && task != null && !task.isBlank() && task_name.strip().equalsIgnoreCase(task.strip()) && (!repeat || allow_repeat);
         }
     }

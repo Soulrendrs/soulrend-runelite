@@ -134,5 +134,9 @@ public class AutomaticEvidenceTest {
         rule.allow_repeat = true;
         assertTrue(rule.matchesTask("A task", true));
         assertFalse(rule.matchesTask("Another task", true));
+        rule.task_id = 0; // the website CA catalog permits ID zero
+        assertTrue(rule.matchesTask("A task", false));
+        rule.task_id = -1;
+        assertFalse(rule.matchesTask("A task", false));
     }
 }

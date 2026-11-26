@@ -39,7 +39,7 @@ starting-shot routing. Instance membership names are no longer collected by the 
 on the canonical site. This is further quarantine, not physical removal of the imported
 code. Generic own loot observations remain passive, including explicitly selected PvP
 loot (no victim name in the v1 proof payload). The ordinary combined drop rule still
-matches NPC/reward-window drops only. Fixed loot/skill source sets and positive item/task IDs
+matches NPC/reward-window drops only. Fixed loot/skill source sets, positive item IDs and nonnegative CA IDs
 are checked in the client. A server rule is a selector over locally observed events, not
 executable code; no attack, movement, prayer or menu automation is intended.
 RuneLite's prohibition on unrestricted ID-based plugins warrants explicit reviewer
