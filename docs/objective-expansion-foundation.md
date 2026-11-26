@@ -48,3 +48,7 @@ source guard prevents these retired implementations from being reintroduced.
 Removed the unused Clan Coffer widget polling, chat attribution, settings,
 tracker and network methods. The general widget walker and gameplay chat
 parsing remain for supported evidence and future reviewed activities.
+
+Removed the retired clan-roster synchronization entry points, hidden configuration,
+roster-readability polling, dormant header button and sidebar action. General
+team management, active-account identity and own clan membership are unaffected.

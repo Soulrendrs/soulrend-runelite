@@ -172,9 +172,5 @@ public class HeaderButtonTest {
 			// The rest of the handler wants an injected plugin.
 		}
 		assertTrue(p.flairDue);
-		assertFalse(p.headerDue);
-		loaded.setGroupId(InterfaceID.CLANS_INFO);
-		p.onWidgetLoaded(loaded);
-		assertTrue(p.headerDue);
 	}
 }

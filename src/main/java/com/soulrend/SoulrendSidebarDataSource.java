@@ -60,18 +60,6 @@ public class SoulrendSidebarDataSource {
 		return p == null ? none : f.apply(p);
 	}
 
-	/** Actions available for the clan on screen. Never null. */
-	PanelActions actionsFor() {
-		var p = plugin;
-		if (p == null) return PanelActions.NONE;
-		if (!p.isAdmin()) return PanelActions.NONE;
-		// Admin — but the roster comes from the clan channel, so it has to be readable. The CACHED
-		// answer: this runs while the panel paints, on the EDT, where asking the client directly is a
-		// thread violation.
-		var scrape = p.isClanRosterReadable();
-		return PanelActions.NONE;
-	}
-
 	/** The logged-in character's row, or {@code null} to hide it (logged out, not signed in). */
 	AccountRow accountRow() {
 		return fromPlugin(SoulrendPlugin::accountRow, null);
@@ -85,11 +73,6 @@ public class SoulrendSidebarDataSource {
 	/** Run a row action; {@code done} gets a one-line outcome, off the EDT. */
 	void accountAction(AccountRow.Action action, Consumer<String> done) {
 		withPlugin(p -> p.accountAction(action, done));
-	}
-
-	/** Push the in-game clan roster to the home site. */
-	void syncRoster() {
-		withPlugin(SoulrendPlugin::syncClanRosterFromPanel);
 	}
 
 	/** Is this clip in the play cycle? */
@@ -312,19 +295,5 @@ public class SoulrendSidebarDataSource {
 
 	}
 
-	/**
-	 * What the panel may DO for the addressed clan.
-	 *
-	 * <p>A roster sync scrapes the clan channel you are standing in, so it needs an admin with that
-	 * channel readable.
-	 */
-	@RequiredArgsConstructor
-	static final class PanelActions {
-		static final PanelActions NONE = new PanelActions(false, null);
 
-		/** Show "Sync clan roster": admin, at home, with a readable clan channel. */
-		final boolean canSyncRoster;
-		/** Why the roster button is absent, when the reason is worth saying. Null when it isn't. */
-		final String rosterNote;
-	}
 }

@@ -290,18 +290,6 @@ public interface SoulrendConfig extends Config {
 	// ---- Profile sync ----
 
 	@ConfigItem(
-		keyName = "autoSyncClanRoster",
-		name = "Keep the clan roster in sync",
-		description = "Retired: clan rosters are managed on the website.",
-		hidden = true,
-		position = 0,
-		section = "profileSection"
-	)
-	default boolean autoSyncClanRoster() {
-		return false;
-	}
-
-	@ConfigItem(
 		keyName = "syncPersonalBests",
 		name = "Sync personal bests",
 		description = "Send your best boss and raid times as you set them.",
