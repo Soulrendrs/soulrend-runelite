@@ -1,0 +1,193 @@
+[
+  {
+    "label": "ordinary stack",
+    "stacks": [
+      [
+        995,
+        3
+      ]
+    ],
+    "aliases": {},
+    "expected": {
+      "995": 3
+    }
+  },
+  {
+    "label": "noted and unnoted combine once",
+    "stacks": [
+      [
+        100,
+        2
+      ],
+      [
+        101,
+        4
+      ],
+      [
+        100,
+        1
+      ]
+    ],
+    "aliases": {
+      "101": 100
+    },
+    "expected": {
+      "100": 7
+    }
+  },
+  {
+    "label": "multiple canonical items",
+    "stacks": [
+      [
+        101,
+        2
+      ],
+      [
+        201,
+        5
+      ],
+      [
+        200,
+        1
+      ],
+      [
+        300,
+        1
+      ]
+    ],
+    "aliases": {
+      "101": 100,
+      "201": 200
+    },
+    "expected": {
+      "100": 2,
+      "200": 6,
+      "300": 1
+    }
+  },
+  {
+    "label": "identity mapping",
+    "stacks": [
+      [
+        100,
+        1
+      ]
+    ],
+    "aliases": {
+      "100": 100
+    },
+    "expected": {
+      "100": 1
+    }
+  },
+  {
+    "label": "empty loot",
+    "stacks": [],
+    "aliases": {},
+    "expected": {}
+  },
+  {
+    "label": "invalid item",
+    "stacks": [
+      [
+        0,
+        1
+      ]
+    ],
+    "aliases": {},
+    "expected": null
+  },
+  {
+    "label": "invalid quantity",
+    "stacks": [
+      [
+        100,
+        0
+      ]
+    ],
+    "aliases": {},
+    "expected": null
+  },
+  {
+    "label": "negative quantity",
+    "stacks": [
+      [
+        100,
+        -1
+      ]
+    ],
+    "aliases": {},
+    "expected": null
+  },
+  {
+    "label": "invalid base",
+    "stacks": [
+      [
+        101,
+        1
+      ]
+    ],
+    "aliases": {
+      "101": 0
+    },
+    "expected": null
+  },
+  {
+    "label": "alias chain rejected",
+    "stacks": [
+      [
+        101,
+        1
+      ]
+    ],
+    "aliases": {
+      "100": 99,
+      "101": 100
+    },
+    "expected": null
+  },
+  {
+    "label": "alias cycle rejected",
+    "stacks": [
+      [
+        101,
+        1
+      ]
+    ],
+    "aliases": {
+      "100": 101,
+      "101": 100
+    },
+    "expected": null
+  },
+  {
+    "label": "maximum integer count",
+    "stacks": [
+      [
+        100,
+        2147483647
+      ]
+    ],
+    "aliases": {},
+    "expected": {
+      "100": 2147483647
+    }
+  },
+  {
+    "label": "overflow rejected",
+    "stacks": [
+      [
+        100,
+        2147483647
+      ],
+      [
+        101,
+        1
+      ]
+    ],
+    "aliases": {
+      "101": 100
+    },
+    "expected": null
+  }
+]
