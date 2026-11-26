@@ -37,7 +37,7 @@ public interface SoulrendConfig extends Config {
 
 	@ConfigSection(
 		name = "General",
-		description = "Soulrend's own lines in your chatbox, and Supporters' names. Chat colours are on the Soulrend website: Settings > In-game chat.",
+		description = "Soulrend's own notification messages.",
 		position = 6,
 		closedByDefault = true
 	)
@@ -52,37 +52,6 @@ public interface SoulrendConfig extends Config {
 	)
 	default boolean chatFeed() {
 		return true;
-	}
-
-	/** How Supporters' names look in one part of the game: moving gradients, frozen colours, or plain. */
-	enum Names {
-		Animated, Still_colours, Off;
-
-		public String toString() {
-			return name().replace('_', ' ');
-		}
-	}
-
-	@ConfigItem(
-		keyName = "chatNames",
-		name = "Supporter names in chat",
-		description = "Soulrend Supporters' name colours and badges in the chatbox. The list of names is downloaded from Soulrend; nothing about who you see is sent. The side panel shows them either way.",
-		position = 2,
-		section = "chatSection"
-	)
-	default Names chatNames() {
-		return Names.Animated;
-	}
-
-	@ConfigItem(
-		keyName = "menuNames",
-		name = "Supporter & clan looks in game (outside chat)",
-		description = "Supporters' names on right-click menus, your friends list and channel member lists, and a boosted clan's name in the clan panel. Never in PvP areas. The side panel shows them either way.",
-		position = 3,
-		section = "chatSection"
-	)
-	default Names menuNames() {
-		return Names.Off;
 	}
 
 	// ---- Setup ----

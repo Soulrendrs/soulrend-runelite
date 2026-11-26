@@ -85,9 +85,6 @@ public class SoulrendPlugin extends Plugin {
 	@Inject
 	net.runelite.client.ui.overlay.tooltip.TooltipManager tooltipManager;
 
-	/** Hover a Supporter's name in the chatbox: their tier (ChatFlairTooltip). */
-	ChatFlairTooltip chatFlairTooltip;
-
 	// Always-on progress sidebar — a toolbar PluginPanel showing per-clan tile progress. Reads
 	// through SoulrendSidebarDataSource (see provideSidebarDataSource).
 	@Inject
@@ -947,13 +944,6 @@ public class SoulrendPlugin extends Plugin {
 		// Every chat parser reads its line shape from here — before anything can see a chat line.
 		ChatPatterns.loadDefaults(gson);
 		OffThread.bindClientThread(client::isClientThread);
-		// The Patron star's chat icon loads asynchronously; asked for now, it's ready by the first line
-		// that needs it instead of that line going out without it.
-		chatStar();
-		chatFlair.tenureIcon = (e, opaque, shift) -> {
-			long f = e.t == TENURE_STEPS ? currentChatNameFrame() : -1;
-			return tenureIcon(e, opaque, f < 0 || f / 3 % 30 > 3 ? -1 : (int) (f / 3 % 30), shift);
-		};
 		// Built before the directory is known: without one they still work, in memory, for the session.
 		var outbox = new NotifyOutbox(gson, () -> executor, apiClient::interactiveExecutor);
 		outbox.setSender(apiClient::sendQueuedNotification);
@@ -1010,8 +1000,6 @@ public class SoulrendPlugin extends Plugin {
 		// A count the site lowered (a deleted submission): the panel asks for its views again now,
 		// not at the 15s catch-up, so the old number doesn't sit on screen.
 		optimistic.onDrop(this::boardChanged);
-		chatFlairTooltip = new ChatFlairTooltip(client, tooltipManager, chatFlair, this::flairOn);
-		overlayManager.add(chatFlairTooltip);
 		tileTracker.setShownProgress(this::shownProgress);
 		tileTracker.setNotes(this::tileNotes);
 		tileTracker.setBoards(() -> {
@@ -1036,7 +1024,6 @@ public class SoulrendPlugin extends Plugin {
 				.panel(sidebarPanel)
 				.build();
 		clientToolbar.addNavigation(sidebarNavButton);
-		migrateChatSettings();
 
 		resetCompletionBaseline();
 		executor = Executors.newSingleThreadScheduledExecutor();
@@ -1291,12 +1278,6 @@ public class SoulrendPlugin extends Plugin {
 			cancel(gainsFlush);
 			gainsFlush = null;
 		}
-		// shutdownNow drops these without cancelling them: left as they were, isDone() stayed false and
-		// neither scheduled again for the rest of the session.
-		synchronized (chatFlairSync) {
-			cancel(chatFlairSave);
-			chatFlairSave = null;
-		}
 	}
 
 	String cfgGet(String key) {
@@ -1329,14 +1310,9 @@ public class SoulrendPlugin extends Plugin {
 		automaticEvidence.clear();
 		npcKillEvidenceSignals.clear();
 		sessionGains.reset();
-		clientThread.invokeLater(this::unflairAll);
 		invokeLater(() -> GradientLabel.watch(null));
 		overlayManager.remove(overlay);
 		overlayManager.remove(clogBanner);
-		if (chatFlairTooltip != null) {
-			overlayManager.remove(chatFlairTooltip);
-			chatFlairTooltip = null;
-		}
 		tileTracker.shutDown();
 		overlayManager.remove(startProofOverlay);
 		clientThread.invokeLater(startSpotMarker::clear);
@@ -1588,15 +1564,6 @@ public class SoulrendPlugin extends Plugin {
 		var key = event.getKey();
 		// The plugin's own bookkeeping (recap counters, sync state, nudges) is persisted from the
 		// client thread, often several keys at once — none of it changes what the site sends back.
-		// Colours off (or the plugin about to stop): show the game's own plain text at once, rather
-		// than whenever the game next redraws the chat (the next Enter or private message).
-		// Supporter names changed: strip what's painted and paint again now (chat, member and friends lists,
-		// interfaces), not on the game's next rebuild of each.
-		if ("chatNames".equals(key) || "menuNames".equals(key)) {
-			// The chat setting only governs the chatbox: leave the lists and interfaces alone (they flickered).
-			repaintFlair("chatNames".equals(key));
-			return;
-		}
 		if ("shareSeasonal".equals(key) && sidebarPanel != null) invokeLater(sidebarPanel::seasonalChanged);
 		if (isInternalStateKey(key)) return;
 		if ("playerToken".equals(key)) sessionGains.reset();
@@ -1629,9 +1596,6 @@ public class SoulrendPlugin extends Plugin {
 	@Subscribe
 	void onWidgetLoaded(WidgetLoaded event) {
 		int g = event.getGroupId();
-		// Names, rows and the clan window's header are filled in by scripts just after the group appears:
-		// paint before the next frame (onBeforeRender), which is after all of them and never a frame late.
-		if (flairInterfaceRoot(g) != -1 || g == InterfaceID.CLANS_SIDEPANEL || g == InterfaceID.CLANS_GUEST_SIDEPANEL) flairDue = true;
 		// The scroll's text child isn't populated yet on the load event — read it next tick,
 		// with a couple of retries in case the text lands late.
 		if (g == InterfaceID.QUESTSCROLL) scheduleQuestScrollRead(3);
@@ -1689,23 +1653,6 @@ public class SoulrendPlugin extends Plugin {
 		var worlds = worldService.getWorlds();
 		var w = worlds == null ? null : worlds.findWorld(client.getWorld());
 		apiClient.setWorld(WorldInfo.types(client.getWorldType()), WorldInfo.activity(w == null ? null : w.getActivity()));
-	}
-
-	@Subscribe
-	void onScriptPostFired(ScriptPostFired event) {
-		int id = event.getScriptId();
-		if (id == ScriptID.CHAT_TEXT_INPUT_REBUILD) {
-			flairChatInput();
-			return;
-		}
-		if (id == ScriptID.FRIENDS_UPDATE || id == ScriptID.FRIENDS_CHAT_CHANNEL_REBUILD
-				|| id == ScriptID.CLAN_SIDEPANEL_DRAW) {
-			flairNameLists();
-			if (id == ScriptID.CLAN_SIDEPANEL_DRAW) {
-				flairClanTitleGroup(InterfaceID.CLANS_SIDEPANEL);
-				flairClanTitleGroup(InterfaceID.CLANS_GUEST_SIDEPANEL);
-			}
-		}
 	}
 
 	// Raids expose the real party roster in client varbits, which we read for party-size tile gates.
@@ -2867,7 +2814,6 @@ public class SoulrendPlugin extends Plugin {
 	void onChatMessage(ChatMessage event) {
 		var msg = event.getMessage();
 		if (msg == null || msg.isEmpty()) return;
-		maybeKeepFlairBroadcast(event);
 		var ct = event.getType();
 		var plain = stripChatTags(msg);
 
@@ -4856,16 +4802,10 @@ public class SoulrendPlugin extends Plugin {
 		return true;
 	}
 
-	/**
-	 * "Tile complete: <label> — by <name>!" ({@code line} is up to the label). A Supporter's name goes out plain, after their star: the
-	 * chatbox pass paints it in their colours for the chat surface and moves a Patron's (soulrendLine).
-	 */
+	/** Announce a confirmed objective using plain player names. */
 	void announceTileComplete(String line, String completedBy) {
 		var who = completedBy == null ? "" : clean(completedBy.trim());
-		var e = who.isEmpty() || !flairOn() ? null : chatFlair.entry(who);
-		// A tenure icon is added by the chatbox pass; a star here as well would show twice.
-		if (e != null) sendChatLine("Soulrend", line + " — by ", Tone.DONE, null, (e.t == null && Boolean.TRUE.equals(e.s) ? chatStar() : "") + who + "!");
-		else sendChatMessage(Tone.DONE, line + (who.isEmpty() ? "" : " — by " + who) + "!");
+		sendChatMessage(Tone.DONE, line + (who.isEmpty() ? "" : " — by " + who) + "!");
 	}
 
 	/** A chat line Soulrend wrote itself: "[Soulrend] …", after any timestamp (no player can write a non-sender line). */
@@ -5154,937 +5094,19 @@ public class SoulrendPlugin extends Plugin {
 	ChatPatterns.OverridesResponse chatPatternsApplied;
 	static final long CHAT_PATTERNS_EVERY_MS = 30 * 60_000L;
 
-	final ChatFlair chatFlair = new ChatFlair();
-	long chatFlairFetchedAt;
-	static final long CHAT_FLAIR_EVERY_MS = 10 * 60_000L;
-	/** Socket deltas and jittered catch-ups (ChatFlairSync); HTTP on OkHttp's pool, never the client thread. */
-	final ChatFlairSync chatFlairSync = new ChatFlairSync(chatFlair, new ChatFlairSync.Source() {
-		public ChatFlair.Since since(int v) {
-			return apiClient.fetchChatFlairSince(v);
-		}
-
-		public ChatFlair.Wire full(int v) {
-			return apiClient.fetchChatFlairList(v);
-		}
-	}, (r, ms) -> {
-		var ex = executor;
-		if (ex != null) ex.schedule(() -> apiClient.interactiveExecutor().execute(() -> safely("chat flair", r)), ms, TimeUnit.MILLISECONDS);
-	}, () -> ThreadLocalRandom.current().nextLong(ChatFlairSync.JITTER_MS), this::chatFlairChanged);
-	volatile boolean chatFlairSeeded;
-	ScheduledFuture<?> chatFlairSave;
-	// Broadcasts whose text starts with a player's name ("Nisbro HCM has completed a quest: …").
-	static final Set<ChatMessageType> FLAIR_BROADCASTS = EnumSet.of(
-			CLAN_CHAT,
-			CLAN_MESSAGE,
-			CLAN_GIM_CHAT,
-			CLAN_GIM_MESSAGE,
-			CLAN_GUEST_CHAT,
-			CLAN_GUEST_MESSAGE,
-			BROADCAST,
-			FRIENDSCHATNOTIFICATION,
-			FRIENDNOTIFICATION,
-			TRADEREQ,
-			TRADE_SENT,
-			TRADE,
-			// "Drenvox has logged in." — a friend coming on or going off.
-			LOGINLOGOUTNOTIFICATION);
-	/** Client thread: keys (ChatFlair.key) of recent broadcasts that start with a Supporter's name. */
-	final Set<String> flairBroadcasts = newSetFromMap(capped(64, false));
-	/** Client thread: split-PM line texts already looked at (painted, or nothing to paint). */
-	final Set<String> splitPmSeen = new HashSet<>();
-
-	/**
-	 * Config-poll thread, after every config attempt — answered or not: the list is public and in no
-	 * clan, so a login whose config is a 404 still gets it. The saved copy first, then the site's
-	 * version every 10 minutes (deltas between come over the socket).
-	 */
-	void maybeRefreshChatFlair() {
-		if (!flairOn() && !menusFlair() || !apiClient.isConfigured()) return;
-		var rc = responseCache;
-		if (!chatFlairSeeded && rc != null) {
-			chatFlairSeeded = true;
-			if (chatFlair.adopt(rc.loadShared(ResponseDiskCache.CHAT_FLAIR, ChatFlair.Wire.class))) repaintFlair();
-		}
-		var at = now();
-		if (at - chatFlairFetchedAt < CHAT_FLAIR_EVERY_MS) return;
-		chatFlairFetchedAt = at;
-		chatFlairSync.sync();
-	}
-
-	/** The list moved: repaint now, save a moment later (a burst is one write), off the client thread. */
-	void chatFlairChanged() {
-		repaintFlair();
-		var ex = executor;
-		var rc = responseCache;
-		if (ex == null || rc == null) return;
-		synchronized (chatFlairSync) {
-			if (chatFlairSave == null || chatFlairSave.isDone()) chatFlairSave = ex.schedule(() -> apiClient.interactiveExecutor().execute(
-					() -> rc.storeShared(ResponseDiskCache.CHAT_FLAIR, chatFlair.toWire())), 5, TimeUnit.SECONDS);
-		}
-	}
-
-	void repaintFlair() {
-		repaintFlair(false);
-	}
-
-	void repaintFlair(boolean chatOnly) {
-		// The chat input and the side lists were drawn before the list changed and are only redrawn
-		// on the game's next rebuild: paint them now. The panel's "Tracking" name too.
-		clientThread.invokeLater(() -> {
-			// Visible widgets may still contain our old tags/star. Ask the game for clean source rows
-			// first; painting the new style on top caused the transient double-star and bad widths.
-			if (chatOnly) unflairChat();
-			else unflairAll();
-			// Tenure icons register asynchronously: ask for every style's now, so lines don't go out bare.
-			// Every colour a moving gradient star can take (a Legend's glint frames register as they come),
-			// so lines don't go out without one.
-			for (var e : chatFlair.held.styles)
-				for (int q = 0; e.t != null && q <= (Boolean.TRUE.equals(e.s) && e.g != null && e.g.size() >= 2 ? 40 : 0); q++) {
-					tenureIcon(e, false, -1, q / 40.0);
-					tenureIcon(e, true, -1, q / 40.0);
-				}
-			// refreshChat rebuilds through client scripts. Paint on the following client turn, after those
-			// scripts have restored both the plain text and its original sender/message geometry.
-			clientThread.invokeLater(() -> {
-				flairChatInput();
-				flairChatbox();
-				if (chatOnly) return;
-				flairNameLists();
-				refreshClanTitleWidgets();
-				for (int r : FLAIR_ROOTS) flairInterface(r);
-			});
-		});
-		var panel = sidebarPanel;
-		if (panel != null) panel.flairChanged();
-	}
-
-	/** The panel's tracked name: its Supporter look, or null. */
-	boolean flairOn() {
-		return !BingoApiClient.productionMode() && config.chatNames() != SoulrendConfig.Names.Off;
-	}
-
-	boolean menusFlair() {
-		return !BingoApiClient.productionMode() && config.menuNames() != SoulrendConfig.Names.Off;
-	}
-
-	/**
-	 * The chat settings before they were merged (Soulrend chat, Supporter names): read once, mapped to the
-	 * new ones, then gone. The colour pickers moved to the site (Settings > In-game chat).
-	 */
-	void migrateChatSettings() {
-		var g = "soulrendbingo";
-		var chat = cfgGet("supporterChatFlair");
-		var menus = cfgGet("menuNameFlair");
-		var names = cfgGet("supporterNames");
-		if (names == null && (chat != null || menus != null)) names = "false".equals(chat) ? "Off" : "false".equals(menus) ? "Chat" : "Chat_menus";
-		if (names != null) {
-			configManager.setConfiguration(g, "chatNames", "Off".equals(names) ? SoulrendConfig.Names.Off : SoulrendConfig.Names.Animated);
-			configManager.setConfiguration(g, "menuNames", "Chat_menus".equals(names) ? SoulrendConfig.Names.Animated : SoulrendConfig.Names.Off);
-		}
-		for (var k : new String[]{"supporterNames", "relayShow", "relaySend", "relayPm", "supporterChatFlair", "menuNameFlair", "animatedNames", "menuFlairOverride", "chatPrefixColor", "chatTextColor"}) if (cfgGet(k) != null) configManager.unsetConfiguration(g, k);
-	}
-
-	/** Supporter names off in game menus and interfaces (friends list, channel member lists). */
-	boolean menusOff() {
-		return !menusFlair() || chatFlair.isEmpty();
-	}
-
-	boolean flairOff() {
-		return !flairOn() || chatFlair.isEmpty();
-	}
-
+	/** The sidebar uses plain account names; keep its existing data interface. */
 	ChatFlair.Entry flairOf(String rsn) {
-		return chatFlair.entry(rsn);
+		return null;
 	}
 
-	/**
-	 * Client thread (onChatMessage). Supporter flair is painted on the chatbox WIDGETS after the game
-	 * draws them (flairChatbox), never on the message: the game builds the line's right-click options
-	 * and actions ("Message", "Add friend" / "Remove friend", reply, report) from the MessageNode's
-	 * name, and a name carrying colour tags fails its friend check and acts on the wrong name. Here only
-	 * a broadcast that starts with a Supporter's name is noted, so the walk knows its widget.
-	 */
-	void maybeKeepFlairBroadcast(ChatMessage event) {
-		if (!FLAIR_BROADCASTS.contains(event.getType()) || chatFlair.isEmpty() || !flairOn()) return;
-		var key = chatFlair.leadKey(event.getMessage());
-		if (key != null) flairBroadcasts.add(key);
-	}
-
-	/** Client thread: per chatbox line widget (by index), the text it had when last looked at. */
-	String[] chatboxSeen = new String[0];
-	/** Plain source for a visible Patron sender; null for every static/non-sender widget. */
-	String[] chatboxMoving = new String[0];
-	/** A changed offscreen row waits here until it intersects the scroll area's viewport. */
-	boolean[] chatboxDeferred = new boolean[0];
-	/** Smooth game-widget motion without rebuilding strings on every render frame. */
-	static final long CHAT_NAME_FRAME_MS = 40;
-	long chatNameFrame = Long.MIN_VALUE;
-	long currentChatNameFrame() {
-		// Unfocused, the shared clock stands still, so the frame holds and moving names stop repainting;
-		// the per-frame paint pass keeps running (painting only on change made names flash plain). Neither
-		// chat nor menus animating: one frame forever, so nothing repaints for motion.
-		return config.chatNames() != SoulrendConfig.Names.Animated && config.menuNames() != SoulrendConfig.Names.Animated ? -1
-				: GradientLabel.animationTimeMillis() / CHAT_NAME_FRAME_MS;
-	}
-	/** "Still colours": the gradient frozen at its start. */
-	double chatNameShift(long frame) {
-		return config.chatNames() == SoulrendConfig.Names.Animated ? nameShift(frame, GradientLabel.GAME_CYCLE_MS) : 0;
-	}
-	double interfaceNameShift(long frame) {
-		return config.menuNames() == SoulrendConfig.Names.Animated ? nameShift(frame, GradientLabel.PANEL_CYCLE_MS) : 0;
-	}
-	static double nameShift(long frame, long cycleMs) {
-		return frame < 0 ? 0 : (frame * CHAT_NAME_FRAME_MS % cycleMs) / (double) cycleMs * 2;
-	}
-	/** Client thread: per widget, the x (or, for a sender, the width) we last set making room for a star. */
-	int[] chatboxRoom = new int[0];
-	/** Client thread: per chatbox slot, the plain sender line {@link #chatboxRoom} was set for. */
-	String[] chatboxRoomFor = new String[0];
-	/**
-	 * Client thread: per message widget we narrowed into an extra wrapped line, the height it was grown
-	 * to and its text then. The game lays the rows out again (a new message, a scroll) without asking us,
-	 * so the rows below would slide back under that extra line; each pass puts them right again.
-	 */
-	int[] chatboxGrown = new int[0];
-	String[] chatboxGrownText = new String[0];
-
-	/**
-	 * Client thread, right before each frame: each sender column ("Name:", "[Clan] <icons>Name:", "From
-	 * Name:", "To Name:") and each noted broadcast's leading name in Supporter colours. The game redraws
-	 * these widgets through more than one path (a new line, a scroll, a tab or filter switch), and
-	 * painting only after BUILD_CHATBOX lost the colour until the next one — the chat input had the same
-	 * problem, fixed the same way. A widget whose text is still the very string seen last frame is
-	 * skipped by reference: no allocation unless the game wrote something new. Widget text only — the
-	 * line's menu options come from the message data, not from this text.
-	 */
-	void flairChatbox() {
-		if (flairOff()) return;
-		var area = client.getWidget(InterfaceID.Chatbox.SCROLLAREA);
-		var lines = area == null || area.isHidden() ? null : area.getDynamicChildren();
-		if (lines == null) return;
-		if (chatboxSeen.length < lines.length) {
-			int was = chatboxRoom.length;
-			chatboxSeen = Arrays.copyOf(chatboxSeen, lines.length);
-			chatboxMoving = Arrays.copyOf(chatboxMoving, lines.length);
-			chatboxDeferred = Arrays.copyOf(chatboxDeferred, lines.length);
-			chatboxRoom = Arrays.copyOf(chatboxRoom, lines.length);
-			chatboxRoomFor = Arrays.copyOf(chatboxRoomFor, lines.length);
-			chatboxGrown = Arrays.copyOf(chatboxGrown, lines.length);
-			chatboxGrownText = Arrays.copyOf(chatboxGrownText, lines.length);
-			Arrays.fill(chatboxRoom, was, lines.length, Integer.MIN_VALUE);
-		}
-		keepGrownRows(lines);
-		var frame = currentChatNameFrame();
-		var move = frame != chatNameFrame;
-		chatNameFrame = frame;
-		var shift = chatNameShift(frame);
-		String star = null;
-		var opaque = false;
-		// Shared by every changed row in this pass; do not allocate three closures per animated name.
-		IntUnaryOperator x = j -> lines[j].getOriginalX(), y = j -> lines[j].getOriginalY();
-		IntFunction<String> shown = j -> lines[j] == null || lines[j].isHidden() ? null : lines[j].getText();
-		Rectangle viewport = null;
-		for (int i = 0; i < lines.length; i++) {
-			var w = lines[i];
-			var text = w == null ? null : w.getText();
-			var same = text != null && text == chatboxSeen[i];
-			var moving = same && chatboxMoving[i] != null;
-			if (w == null || w.isHidden() || empty(text) || same && !(move && (moving || chatboxDeferred[i]))) continue;
-			// The game replaced this slot while it was offscreen; its previous owner no longer applies.
-			if (!same) chatboxMoving[i] = null;
-			if (viewport == null) viewport = area.getBounds();
-			var runway = new Rectangle(viewport);
-			runway.grow(0, 80);
-			if (!runway.intersects(w.getBounds())) {
-				chatboxSeen[i] = text;
-				chatboxDeferred[i] = true;
-				continue;
-			}
-			chatboxDeferred[i] = false;
-			// Repaint from the tag-free source, never by stripping or stacking our previous tags.
-			if (moving) text = chatboxMoving[i];
-			if (star == null) {
-				star = chatStar();
-				opaque = opaqueChatbox();
-			}
-			// Which widget is which comes from the layout, never from what the text says: a typed
-			// "[Clan] Bob:" or "Bob has completed a quest: …" is someone's message widget.
-			var sender = text.indexOf(':') >= 0 && ChatFlair.senderColumn(i, lines.length, x, y, shown);
-			var painted = sender ? chatFlair.paintSender(text, star, opaque, shift) : null;
-			var lead = false;
-			if (!sender && !flairBroadcasts.isEmpty() && flairBroadcasts.contains(ChatFlair.key(text))
-					&& !ChatFlair.typedBySomeone(i, x, y, shown)) {
-				painted = chatFlair.paintLead(text, star, opaque, shift);
-				lead = true;
-			}
-			// Our own lines naming someone ("Tile complete: … — by Bob!"): a player can't write a non-sender
-			// "[Soulrend]" line, so its names are painted, and move, like a sender's.
-			var ours = painted == null && !sender && soulrendLine(text);
-			if (ours) painted = chatFlair.paintNames(text, opaque, shift);
-			if (painted != null) {
-				w.setText(painted);
-				if (moving || (sender ? chatFlair.movingSender(text) : ours ? chatFlair.movingNames(text) : lead && chatFlair.movingLead(text))) chatboxMoving[i] = text;
-				if (sender) makeRoom(lines, i, text, painted);
-				text = w.getText();
-			}
-			chatboxSeen[i] = text;
-		}
-	}
-
-	/**
-	 * A sender column the game sized for the plain name now also draws the Patron star: widen it, and move
-	 * the line's text beside it (same row, to its right) over by the star's width, so the star doesn't
-	 * push the name into the message. Each move is remembered, so a widget the game didn't lay out
-	 * again is never moved twice.
-	 */
-	void makeRoom(Widget[] lines, int at, String plain, String painted) {
-		var s = lines[at];
-		var room = starRoom(plain, painted, s.getFont());
-		int d = room[0], need = room[1];
-		if (d <= 0) return;
-		// A position alone can't say "already moved": a longer name's plain layout can land exactly on the
-		// spot an earlier, shorter starred name in this slot was moved to, leaving its message overlapping.
-		if (!ChatFlair.alreadyRoomed(s.getOriginalWidth(), chatboxRoom[at], plain, chatboxRoomFor[at])) {
-			s.setOriginalWidth(s.getOriginalWidth() + d);
-			chatboxRoom[at] = s.getOriginalWidth();
-			chatboxRoomFor[at] = plain;
-			s.revalidate();
-		}
-		for (int j = 0; j < lines.length; j++) {
-			var o = lines[j];
-			if (j == at || o == null || o.isHidden() || o.getOriginalY() != s.getOriginalY()
-					|| o.getOriginalX() <= s.getOriginalX() || ChatFlair.alreadyRoomed(o.getOriginalX(), chatboxRoom[j], plain, chatboxRoomFor[j])) continue;
-			int by = ChatFlair.shift(d, need, o.getOriginalX() - s.getOriginalX());
-			o.setOriginalX(o.getOriginalX() + by);
-			int w = Math.max(1, o.getOriginalWidth() - by);
-			// Narrower can wrap onto an extra line, but the game laid the rows out for its own wrap: grow
-			// this one and push the rows below down by the same, or the extra line covers the next message.
-			var f = o.getFont();
-			int before = f == null ? 1 : wrapLines(o.getText(), o.getOriginalWidth(), f), after = f == null ? 1 : wrapLines(o.getText(), w, f);
-			o.setOriginalWidth(w);
-			if (after > before) {
-				pushRowsDown(lines, o, (after - before) * Math.max(1, o.getOriginalHeight() / before));
-				chatboxGrown[j] = o.getOriginalHeight();
-				chatboxGrownText[j] = o.getText();
-			}
-			chatboxRoom[j] = o.getOriginalX();
-			chatboxRoomFor[j] = plain;
-			o.revalidate();
-		}
-	}
-
-	/**
-	 * A message we grew into an extra line keeps it, and the rows below stay under it, however often the
-	 * game lays the chat out again. Its text or position changing means the game rebuilt that slot plain:
-	 * it is forgotten. Otherwise its height comes back and anything that slid up under it moves down.
-	 */
-	void keepGrownRows(Widget[] lines) {
-		for (int j = 0; j < Math.min(lines.length, chatboxGrown.length); j++) {
-			if (chatboxGrown[j] <= 0) continue;
-			var o = lines[j];
-			if (o == null || o.isHidden() || o.getText() != chatboxGrownText[j] || o.getOriginalX() != chatboxRoom[j]) {
-				chatboxGrown[j] = 0;
-				chatboxGrownText[j] = null;
-				continue;
-			}
-			if (o.getOriginalHeight() < chatboxGrown[j]) {
-				pushRowsDown(lines, o, chatboxGrown[j] - o.getOriginalHeight());
-				continue;
-			}
-			int y = o.getOriginalY(), next = Integer.MAX_VALUE;
-			for (var l : lines) if (l != null && l != o && !l.isHidden() && l.getOriginalY() > y) next = Math.min(next, l.getOriginalY());
-			int under = y + o.getOriginalHeight() - next;
-			if (next != Integer.MAX_VALUE && under > 0) pushRowsDown(lines, o, under, false);
-		}
-	}
-
-	/** How many lines {@code text} wraps to at {@code width}: greedy on spaces, as the chatbox wraps. */
-	static int wrapLines(String text, int width, FontTypeFace f) {
-		int lines = 1, at = 0;
-		for (var word : Text.removeTags(text).split(" ")) {
-			int ww = f.getTextWidth(word), sp = at == 0 ? 0 : f.getTextWidth(" ");
-			if (at > 0 && at + sp + ww > width) {
-				lines++;
-				at = ww;
-			} else at += sp + ww;
-		}
-		return lines;
-	}
-
-	/** Grow {@code o} by {@code extra} px and move every chatbox row below it down to match, keeping the view where it was. */
-	void pushRowsDown(Widget[] lines, Widget o, int extra) {
-		pushRowsDown(lines, o, extra, true);
-	}
-
-	void pushRowsDown(Widget[] lines, Widget o, int extra, boolean grow) {
-		int y = o.getOriginalY();
-		if (grow) {
-			o.setOriginalHeight(o.getOriginalHeight() + extra);
-			o.revalidate();
-		}
-		for (var l : lines) {
-			if (l == null || l == o || l.getOriginalY() <= y) continue;
-			l.setOriginalY(l.getOriginalY() + extra);
-			l.revalidate();
-		}
-		var area = o.getParent();
-		if (area == null) return;
-		area.setScrollHeight(area.getScrollHeight() + extra);
-		area.setScrollY(area.getScrollY() + extra);
-		area.revalidateScroll();
-	}
-
-	/**
-	 * Client thread, each frame: the split private chat ("From Name: …" / "To Name: …" over the game
-	 * view) is redrawn by its own scripts; its few lines are checked against the texts already seen, so a
-	 * frame with nothing new costs a handful of set lookups. Widget text only, like flairChatbox.
-	 */
-	// Client thread: the split-PM widgets of this frame and their layout, reused (no allocation per frame).
-	final List<Widget> pmLine = new ArrayList<>();
-	int[] pmAx = new int[16], pmAy = new int[16], pmX = new int[16], pmW = new int[16], pmRecX = new int[16], pmRecW = new int[16];
-	boolean[] pmShown = new boolean[16];
-	/** Client thread: per split-PM widget, the {x, width} last set making room for a star. */
-	final Map<Widget, int[]> pmRoom = new WeakHashMap<>();
-	/** Client thread: a painted split-PM sender's text, and the room its star needs. */
-	final Map<String, int[]> pmPainted = new HashMap<>();
-	/** Per moving PM widget: its tag-free source and the animated text currently installed. */
-	final Map<Widget, String[]> pmMoving = new WeakHashMap<>();
-	long pmNameFrame = Long.MIN_VALUE;
-
-	/**
-	 * The split private chat lays each line out as separate widgets — the sender ("From <icons>Name:",
-	 * "To Name:") and the message beside it, placed for the plain name — so a Patron's star ran the name
-	 * into the message and hid the colon. Like the chatbox: the sender column is widened and the message
-	 * moved over, re-done whenever the game lays the line out again. Layout, not text, says which widget
-	 * is which: a sender column has its message to the right; a whole "From Name: …" line in one widget
-	 * must have nothing to its left (a typed "From Bob: hi" is someone's message widget).
-	 */
-	void flairSplitPm() {
-		if (flairOff()) return;
-		var box = client.getWidget(InterfaceID.PmChat.CONTAINER);
-		if (box == null || box.isHidden()) return;
-		var frame = currentChatNameFrame();
-		var animate = frame != pmNameFrame;
-		pmNameFrame = frame;
-		var shift = chatNameShift(frame);
-		pmLine.clear();
-		collectPm(box.getStaticChildren(), 0, 0);
-		collectPm(box.getDynamicChildren(), 0, 0);
-		int n = pmLine.size();
-		if (n == 0) return;
-		if (pmX.length < pmAx.length) {
-			// collectPm grew the place arrays; the rest are refilled below.
-			int c = pmAx.length;
-			pmX = new int[c]; pmW = new int[c]; pmRecX = new int[c]; pmRecW = new int[c];
-			pmShown = new boolean[c];
-		}
-		for (int i = 0; i < n; i++) {
-			var w = pmLine.get(i);
-			var t = w.getText();
-			pmShown[i] = !w.isHidden() && !empty(t);
-			pmX[i] = w.getOriginalX();
-			pmW[i] = w.getOriginalWidth();
-			// A record counts only for the line it was made for: the widgets are reused line to line, and a
-			// "From" line's message can land exactly where a "To" line's was moved to (it then stayed under the name).
-			var rec = pmRoom.get(w);
-			if (rec != null && rec[2] != Text.removeTags(String.valueOf(t)).hashCode()) rec = null;
-			pmRecX[i] = rec == null ? Integer.MIN_VALUE : rec[0];
-			pmRecW[i] = rec == null ? Integer.MIN_VALUE : rec[1];
-		}
-		var moved = false;
-		for (int i = 0; i < n; i++) {
-			if (!pmShown[i]) continue;
-			var w = pmLine.get(i);
-			var text = w.getText();
-			var movingState = pmMoving.get(w);
-			var ours = movingState != null && text.equals(movingState[1]);
-			if (movingState != null && !ours) {
-				pmMoving.remove(w);
-				movingState = null;
-			}
-			var repaint = ours && animate;
-			if (repaint) text = movingState[0];
-			var d = repaint ? null : pmPainted.get(text);
-			if (d == null && !splitPmSeen.contains(text)) {
-				if (splitPmSeen.size() > 256 || pmPainted.size() > 256) {
-					splitPmSeen.clear();
-					pmPainted.clear();
-				}
-				var column = ChatFlair.column(text);
-				var sender = column ? ChatFlair.beside(i, n, pmAx, pmAy, pmShown, false) : !ChatFlair.beside(i, n, pmAx, pmAy, pmShown, true);
-				var painted = sender ? chatFlair.paintPmLine(text, chatStar(), false, shift) : null;
-				if (painted != null) {
-					w.setText(painted);
-					d = column ? starRoom(text, painted, w.getFont()) : new int[2];
-					pmPainted.put(painted, d);
-					if (repaint || chatFlair.movingSender(text)) pmMoving.put(w, new String[]{text, painted});
-					else pmMoving.remove(w);
-				} else if (column && sender && text.contains("<img=")) {
-					// Nothing of ours to paint, but the name carries an icon (the Soulrend chat mark): the game
-					// may have placed the message for the plain name, so the fit is still checked.
-					d = starRoom(text, text, w.getFont());
-					pmPainted.put(text, d);
-				} else splitPmSeen.add(text);
-			}
-			if (d != null && (d[0] > 0 || d[1] > 0)) moved |= ChatFlair.makeRoom(i, d[0], d[1], n, pmAx, pmAy, pmX, pmW, pmShown, pmRecX, pmRecW);
-		}
-		if (!moved) return;
-		for (int i = 0; i < n; i++) {
-			var w = pmLine.get(i);
-			if (pmX[i] != w.getOriginalX() || pmW[i] != w.getOriginalWidth()) {
-				w.setOriginalX(pmX[i]);
-				w.setOriginalWidth(pmW[i]);
-				w.revalidate();
-				pmRoom.put(w, new int[]{pmRecX[i], pmRecW[i], Text.removeTags(String.valueOf(w.getText())).hashCode()});
-			}
-		}
-	}
-
-	/** Each widget under the split-PM container with its on-screen place (parent offsets added). */
-	void collectPm(Widget[] ws, int px, int py) {
-		if (ws == null) return;
-		for (var w : ws) {
-			if (w == null) continue;
-			int at = pmLine.size();
-			pmLine.add(w);
-			if (pmAx.length <= at) {
-				pmAx = Arrays.copyOf(pmAx, at * 2 + 2);
-				pmAy = Arrays.copyOf(pmAy, at * 2 + 2);
-			}
-			pmAx[at] = px + w.getRelativeX();
-			pmAy[at] = py + w.getRelativeY();
-			collectPm(w.getDynamicChildren(), pmAx[at], pmAy[at]);
-		}
-	}
-
-	/** {star width, whole painted name's width}: the room a split-PM sender's star needs (colour tags take none). */
-	int[] starRoom(String plain, String painted, FontTypeFace font) {
-		ToIntFunction<String> text = t -> 0;
-		var tip = chatFlairTooltip;
-		IntUnaryOperator icon = tip != null ? tip::iconWidth : k -> 13;
-		return new int[]{ChatFlair.measure(painted, text, icon) - ChatFlair.measure(plain, text, icon), ChatFlair.need(painted, font, icon)};
-	}
-
-	/** Client thread: the opaque chatbox (fixed mode, or resizable with transparency off) is light parchment. */
 	boolean opaqueChatbox() {
-		return lastChatboxOpaque = !client.isResized() || client.getVarbitValue(VarbitID.CHATBOX_TRANSPARENCY) == 0;
+		return !client.isResized() || client.getVarbitValue(VarbitID.CHATBOX_TRANSPARENCY) == 0;
 	}
 
-	/** The chat surface as last read on the client thread, for code running off it (push feed lines). */
-	volatile boolean lastChatboxOpaque;
-
-	/**
-	 * Client thread, after the game redraws the chat input line ("Name: *" — every keystroke): our own
-	 * name there in our Supporter colours. Display only — the typed text is never read or changed.
-	 */
-	String inputFlairName;
-	Pattern inputFlairPattern;
-
-	/**
-	 * Client thread, right before each frame is drawn: the game redraws the chat input ("Name: *")
-	 * through more than one path (a keystroke, arrow keys, closing the bank or a prompt, login), and
-	 * only one of them fires CHAT_TEXT_INPUT_REBUILD. Checking on ClientTick wasn't enough: that runs
-	 * at the start of the cycle, before those scripts, so the plain name was drawn for a frame and
-	 * flashed. BeforeRender runs after every script of the cycle. It only reads a short string unless
-	 * the name needs painting.
-	 */
 	@Subscribe
 	void onBeforeRender(BeforeRender event) {
-		// The game rebuilt a member list (a tab switch, a sort, a join): its rows are new and plain.
-		if (flairDue || !menusOff() && nameListsRebuilt()) flairNameLists();
-		if (flairDue) {
-			flairDue = false;
-			flairClanTitleGroup(InterfaceID.CLANS_SIDEPANEL);
-			flairClanTitleGroup(InterfaceID.CLANS_GUEST_SIDEPANEL);
-			for (int r : FLAIR_ROOTS) flairInterface(r);
-		}
-		flairChatInput();
-		flairChatbox();
-		flairSplitPm();
-		animateFlairNameLists();
-		animateFlairInterfaces();
-		animateClanTitles();
-		flairMenuTargets();
-		// A shot waiting for this frame: hide again. A chat line added the same tick (our own "counted" line)
-		// rebuilds the chatbox and shows every row, undoing the hide made when the shot was asked for.
+		// Preserve the legacy screenshot privacy path, not game-name painting.
 		if (shotsPending > 0) hideShotRows();
-	}
-
-	/** Client thread: a title-bar button, or a just-opened interface's names, to draw before the next frame. */
-	boolean flairDue;
-
-
-	/** Client thread: each FLAIR_LISTS list's first row when we last painted it. */
-	final Widget[] listSeen = new Widget[FLAIR_LISTS.length];
-
-	Widget firstRow(int i) {
-		var list = client.getWidget(FLAIR_LISTS[i]);
-		var kids = list == null ? null : list.getChildren();
-		return kids == null || kids.length == 0 ? null : kids[0];
-	}
-
-	/**
-	 * Each frame, four reads and compares: the game makes new row widgets whenever it rebuilds a list,
-	 * and not always through a script we hear by id (a tab switch draws it from the tab's own script).
-	 */
-	boolean nameListsRebuilt() {
-		for (int i = 0; i < listSeen.length; i++) if (firstRow(i) != listSeen[i]) return true;
-		return false;
-	}
-
-	static final List<String> CLAN_BOOST_STILL = List.of("ff9a5a", "e05ad0", "7a8cff");
-	static final List<String> CLAN_BOOST_MOVING = List.of("ffd27a", "ff7ab8", "7ae0ff");
-
-	/** A widget's text as the game wrote it and as we painted it; for a clan title also its name, suffix and boost. */
-	@AllArgsConstructor
-	static final class Painted {
-		String plain;
-		String painted;
-		boolean moving;
-		/** Drawn on parchment (dialogue), so the light look. */
-		boolean opaque;
-		final String name;
-		/** What follows the name (the live member count): re-read whenever the game rewrites the title. */
-		String suffix;
-		final int level;
-	}
-
-	final Map<Widget, Painted> clanTitleFlair = new WeakHashMap<>();
-	long clanTitleFrame = Long.MIN_VALUE;
-
-	/** Paint only the verified clan name in the channel header; its member count stays game-coloured. */
-	void flairClanTitleGroup(int group) {
-		var clan = pluginConfig == null ? null : pluginConfig.activeClan;
-		// A boosted clan's look outside chat follows "Supporter & clan looks in game" (Off: the game's own).
-		if (clan == null || clan.boostLevel < 1 || !menusFlair()) return;
-		var name = clan.gameName == null || clan.gameName.trim().isEmpty() ? clan.name : clan.gameName;
-		if (name == null || name.trim().isEmpty()) return;
-		var root = client.getWidget(group, 0);
-		if (root == null) return;
-		walk(root, w -> flairClanTitle(w, name.trim(), clan.boostLevel));
-	}
-
-	void flairClanTitle(Widget widget, String name, int level) {
-		var t = widget.getText();
-		var suffix = ChatFlair.clanTitleSuffix(t, name);
-		if (suffix != null) {
-			var painted = paintClanTitle(name, suffix, level, interfaceNameShift(currentChatNameFrame()));
-			widget.setText(painted);
-			clanTitleFlair.put(widget, new Painted(untagged(t), painted, false, false, name, suffix, level));
-		}
-	}
-
-	static String untagged(String t) {
-		return MARKUP_TAG.matcher(t == null ? "" : t).replaceAll("");
-	}
-
-	String paintClanTitle(String name, String suffix, int level, double shift) {
-		var clan = pluginConfig == null ? null : pluginConfig.activeClan;
-		// The clan tab is dark stone: the clan's own dark look as-is when it set one.
-		var own = clan != null && !empty(clan.boostNameDarkStops);
-		var source = own ? clan.boostNameDarkStops
-			: clan != null && !empty(clan.boostNameStops)
-			? clan.boostNameStops : level >= 2 ? CLAN_BOOST_MOVING : CLAN_BOOST_STILL;
-		List<String> stops = new ArrayList<>();
-		for (var color : source) {
-			var hex = ChatPalette.nameColor(color);
-			// Otherwise the title sits on dark stone in both chatbox modes: lighten, never darken toward
-			// the parchment path (that turned the default gradient muddy).
-			if (hex != null && stops.size() < 4) stops.add(own ? hex : ChatPalette.readableHex(hex, false));
-		}
-		if (stops.isEmpty()) stops = level >= 2 ? CLAN_BOOST_MOVING : CLAN_BOOST_STILL;
-		var painted = ChatPalette.paintName(clean(name), stops.get(0), stops, level >= 2 ? shift : 0);
-		return (painted == null ? name : painted) + suffix;
-	}
-
-	void animateClanTitles() {
-		if (clanTitleFlair.isEmpty()) return;
-		var frame = currentChatNameFrame();
-		if (frame == clanTitleFrame) return;
-		clanTitleFrame = frame;
-		var shift = interfaceNameShift(frame);
-		for (var it = clanTitleFlair.entrySet().iterator(); it.hasNext(); ) {
-			var row = it.next();
-			var widget = row.getKey();
-			var state = row.getValue();
-			if (widget == null) { it.remove(); continue; }
-			var text = widget.getText();
-			if (!state.painted.equals(text)) {
-				// The game rewrote the title (a member joined/left: the count changed). Take its new
-				// suffix rather than painting the stale one over the live number.
-				var suffix = ChatFlair.clanTitleSuffix(text, state.name);
-				if (suffix == null) { it.remove(); continue; }
-				state.plain = untagged(text);
-				state.suffix = suffix;
-			} else if (state.level < 2) continue;
-			state.painted = paintClanTitle(state.name, state.suffix, state.level, shift);
-			widget.setText(state.painted);
-		}
-	}
-
-	void refreshClanTitleWidgets() {
-		unflairClanTitleWidgets();
-		flairClanTitleGroup(InterfaceID.CLANS_SIDEPANEL);
-		flairClanTitleGroup(InterfaceID.CLANS_GUEST_SIDEPANEL);
-	}
-
-	void unflairClanTitleWidgets() {
-		unpaint(clanTitleFlair);
-		clanTitleFrame = Long.MIN_VALUE;
-	}
-
-	/** Put every remembered widget back exactly as the game supplied it, and forget them. */
-	static void unpaint(Map<Widget, Painted> m) {
-		for (var row : new ArrayList<>(m.entrySet())) {
-			var widget = row.getKey();
-			var state = row.getValue();
-			if (widget != null && state.painted.equals(widget.getText())) widget.setText(state.plain);
-		}
-		m.clear();
-	}
-
-	/**
-	 * The player-name interfaces Soulrend may decorate, by root; every root is a gameval component constant.
-	 * Dialogue: only the game-designated name/title component, never the body text. This covers
-	 * quest conversations and ordinary player dialogue without recolouring an RSN mentioned in prose.
-	 */
-	// A component id carries its interface group in the high 16 bits.
-	static final int[] FLAIR_ROOTS = {
-		InterfaceID.ChatLeft.NAME,
-		InterfaceID.ChatRight.NAME,
-		InterfaceID.ChatBoth.NAMES,
-		InterfaceID.MessageboxTitled.TITLE,
-		InterfaceID.Trademain.WHOLESCREEN,
-		InterfaceID.Tradeconfirm.ROOT_RECT0,
-		InterfaceID.BoardgamesChallenge.UNIVERSE,
-		InterfaceID.PvpArenaUnrankedduel.UNIVERSE,
-		InterfaceID.RaidsChallenge.UNIVERSE,
-		InterfaceID.RaidsLobbyPartylist.UNIVERSE,
-		InterfaceID.RaidsLobbyPartydetails.UNIVERSE,
-		InterfaceID.TobPartylist.UNIVERSE,
-		InterfaceID.TobPartydetails.UNIVERSE,
-		InterfaceID.TobScoreboard.UNIVERSE,
-		InterfaceID.TobInfoboard.UNIVERSE,
-		InterfaceID.ToaPartylist.UNIVERSE,
-		InterfaceID.ToaPartydetails.UNIVERSE,
-		InterfaceID.ToaScoreboard.UNIVERSE,
-		InterfaceID.TfaPartylist.UNIVERSE,
-		InterfaceID.TfaPartydetails.UNIVERSE
-	};
-
-	static int flairInterfaceRoot(int group) {
-		for (int r : FLAIR_ROOTS) if (r >>> 16 == group) return r;
-		return -1;
-	}
-
-	/** Dialogue and message boxes are drawn on parchment whatever the chatbox setting; the rest are dark stone. */
-	static boolean onParchment(int rootId) {
-		return rootId == InterfaceID.ChatLeft.NAME || rootId == InterfaceID.ChatRight.NAME
-			|| rootId == InterfaceID.ChatBoth.NAMES || rootId == InterfaceID.MessageboxTitled.TITLE;
-	}
-
-	/** Only widgets in the explicitly allowed interfaces above; weak keys disappear with the UI. */
-	final Map<Widget, Painted> interfaceNameFlair = new WeakHashMap<>();
-	long interfaceNameFrame = Long.MIN_VALUE;
-
-	void flairInterface(int rootId) {
-		if (menusOff()) return;
-		var root = client.getWidget(rootId);
-		if (root == null) return;
-		var frame = currentChatNameFrame();
-		interfaceNameFrame = frame;
-		var shift = interfaceNameShift(frame);
-		var opaque = onParchment(rootId);
-		walk(root, widget -> {
-			var text = widget.getText();
-			var had = interfaceNameFlair.get(widget);
-			var painted = had != null && had.painted.equals(text) ? null : chatFlair.paintNames(text, opaque, shift);
-			if (painted != null) {
-				widget.setText(painted);
-				interfaceNameFlair.put(widget, new Painted(text, painted, chatFlair.movingNames(text), opaque, null, null, 0));
-			}
-		});
-	}
-
-	/** Repaint remembered interface names only; never walk the whole client widget tree per frame. */
-	void animateFlairInterfaces() {
-		if (menusOff() || interfaceNameFlair.isEmpty()) return;
-		var frame = currentChatNameFrame();
-		var move = frame != interfaceNameFrame;
-		interfaceNameFrame = frame;
-		var shift = interfaceNameShift(frame);
-		for (var it = interfaceNameFlair.entrySet().iterator(); it.hasNext(); ) {
-			var row = it.next();
-			var widget = row.getKey();
-			var state = row.getValue();
-			if (widget == null) { it.remove(); continue; }
-			var current = widget.getText();
-			var plain = state.painted.equals(current) ? state.plain : current;
-			// Ours and not due a new animation frame: one compare. Rewritten by the game: repaint now.
-			if (plain != current && !(move && state.moving)) continue;
-			var painted = chatFlair.paintNames(plain, state.opaque, shift);
-			if (painted == null) { it.remove(); continue; }
-			state.plain = plain;
-			state.painted = painted;
-			state.moving = chatFlair.movingNames(plain);
-			widget.setText(painted);
-		}
-	}
-
-	/** Put every open whitelisted interface back exactly as the game supplied it. */
-	void unflairInterfaces() {
-		unpaint(interfaceNameFlair);
-		interfaceNameFrame = Long.MIN_VALUE;
-	}
-
-	/**
-	 * Client thread, each frame: players' right-click names back in their Supporter colours after other
-	 * plugins. onMenuEntryAdded paints them as entries arrive, but RuneLite's Player Indicators recolours
-	 * player targets on every client tick (dropping the first tag and putting its friend / clan colour in
-	 * front), which split a gradient into green-then-gradient. BeforeRender comes after that tick, so the
-	 * frame draws ours — only with "paint over other plugins" on; off, their colour stays. Never in PvP
-	 * areas. A menu is a handful of entries, and an entry already in our colours is a string compare.
-	 */
-	void flairMenuTargets() {
-		// Cheap checks first, and nothing that reads varbits before login: those aren't loaded yet and
-		// getVarbitValue threw every frame on the login screen.
-		if (!menusFlair() || chatFlair.isEmpty() || !client.isMenuOpen()
-				|| client.getGameState() != GameState.LOGGED_IN
-				|| inDangerousPvp() || client.getWorldType().contains(WorldType.DEADMAN)) return;
-		var frame = currentChatNameFrame();
-		var es = client.getMenuEntries();
-		// Once per animation frame (or a new menu), not every render frame.
-		if (frame == menuFlairFrame && es.length > 0 && es[es.length - 1] == menuFlairTop) return;
-		menuFlairFrame = frame;
-		menuFlairTop = es.length > 0 ? es[es.length - 1] : null;
-		var shift = interfaceNameShift(frame);
-		for (var e : es) {
-			var p = e.getPlayer();
-			var name = p == null ? null : p.getName();
-			var t = name == null ? null : chatFlair.paintMenuTarget(e.getTarget(), name, true, shift);
-			if (t != null) e.setTarget(t);
-		}
-	}
-
-	long menuFlairFrame = Long.MIN_VALUE;
-	MenuEntry menuFlairTop;
-
-	/** The chat input as the game wrote it, and as we painted it (unflairChat puts the first back). */
-	String inputPlain;
-	String inputPainted;
-	long inputNameFrame = Long.MIN_VALUE;
-
-	/**
-	 * Client thread: undo every name paint now. The chat input goes back to the game's text; the
-	 * chatbox and split private chat are rebuilt by the game (refreshChat), which writes them plain.
-	 */
-	void unflairChat() {
-		var input = client.getWidget(InterfaceID.Chatbox.INPUT);
-		inputPlain = null;
-		inputPainted = null;
-		inputNameFrame = Long.MIN_VALUE;
-		Arrays.fill(chatboxSeen, null);
-		Arrays.fill(chatboxMoving, null);
-		Arrays.fill(chatboxDeferred, false);
-		Arrays.fill(chatboxRoom, Integer.MIN_VALUE);
-		Arrays.fill(chatboxRoomFor, null);
-		chatNameFrame = Long.MIN_VALUE;
-		splitPmSeen.clear();
-		pmPainted.clear();
-		pmRoom.clear();
-		pmMoving.clear();
-		try {
-			// The same call RuneLite's own chat filter uses to redraw the chatbox and split private chat.
-			client.refreshChat();
-		} catch (RuntimeException ignored) {
-			// Not logged in / no chat yet: nothing painted to undo.
-		}
-	}
-
-	/** Client thread: remove all Soulrend-owned name markup, including currently open game interfaces. */
-	void unflairAll() {
-		unflairChat();
-		unflairInterfaces();
-		// The side lists are only rebuilt by the game when they change: left alone, colours switched off
-		// stayed on the friends chat list until it was reopened. Back to the plain name, if it is still theirs.
-		for (var row : nameListPlain.entrySet()) {
-			var w = row.getKey();
-			if (w != null && Text.removeTags(String.valueOf(w.getText())).equals(Text.removeTags(row.getValue()))) w.setText(row.getValue());
-		}
-		nameListPlain.clear();
-		nameListMoving.clear();
-		// And forget which rows were painted: switched back on (the plugin, or the setting), the lists
-		// read as rebuilt and are painted before the next frame, not on the game's next redraw of them.
-		Arrays.fill(listSeen, null);
-		unflairClanTitleWidgets();
-	}
-
-	void flairChatInput() {
-		// Never modify the game's chat input widget.
-	}
-
-	/** The side-panel lists whose names wear Supporter colours: friends chat, clan, guest clan, friends. */
-	static final int[] FLAIR_LISTS = {InterfaceID.ChatchannelCurrent.LIST, InterfaceID.ClansSidepanel.PLAYERLIST,
-			InterfaceID.ClansGuestSidepanel.PLAYERLIST, InterfaceID.Friends.LIST};
-	/** Per visible moving list row: its tag-free source and the animated text currently installed. */
-	final Map<Widget, String[]> nameListMoving = new WeakHashMap<>();
-	/** Every list row we painted, and the name the game wrote there. */
-	final Map<Widget, String> nameListPlain = new WeakHashMap<>();
-	long nameListFrame = Long.MIN_VALUE;
-
-	/**
-	 * Client thread, after the game redraws a member or friends list: Supporters' names in their
-	 * colours, like their chat lines. Display only, from the same public list as chat (nothing about
-	 * who is listed is sent), and only names the game itself shows as online: the channel lists hold
-	 * only online players, and a friend must be on a world, so a Private-mode friend shown offline
-	 * stays plain. A painted name no longer matches decorate()'s plain-name test, so a repaint is a no-op.
-	 */
-	void flairNameLists() {
-		if (menusOff()) return;
-		var frame = currentChatNameFrame();
-		nameListFrame = frame;
-		var shift = interfaceNameShift(frame);
-		// Who's online on the friends list, once: a lookup per row was rows x friends.
-		Set<String> online = new HashSet<>();
-		var fl = client.getFriendContainer();
-		if (fl != null) for (var f : fl.getMembers()) if (f.getWorld() > 0) online.add(Text.standardize(f.getName()));
-		for (int i = 0; i < FLAIR_LISTS.length; i++) {
-			int id = FLAIR_LISTS[i];
-			listSeen[i] = firstRow(i);
-			var list = client.getWidget(id);
-			var rows = list == null ? null : list.getDynamicChildren();
-			if (rows == null) continue;
-			var friends = id == InterfaceID.Friends.LIST;
-			for (var w : rows) {
-				var text = w.getText();
-				if (empty(text) || (friends && !online.contains(Text.standardize(text)))) continue;
-				var painted = chatFlair.decorateReadable(text, null, shift, false);
-				if (painted != null) {
-					w.setText(painted);
-					nameListPlain.put(w, text);
-					if (chatFlair.movingDecoratedName(text)) nameListMoving.put(w, new String[]{text, painted});
-				}
-			}
-		}
-	}
-
-	/** Repaint only the Patron rows already discovered by a list rebuild; no full list scan per frame. */
-	void animateFlairNameLists() {
-		if (menusOff() || nameListMoving.isEmpty()) return;
-		var frame = currentChatNameFrame();
-		if (frame == nameListFrame) return;
-		nameListFrame = frame;
-		var shift = interfaceNameShift(frame);
-		for (var it = nameListMoving.entrySet().iterator(); it.hasNext(); ) {
-			var row = it.next();
-			var w = row.getKey();
-			var state = row.getValue();
-			if (w == null || !state[1].equals(w.getText())) { it.remove(); continue; }
-			if (w.isHidden()) continue;
-			var painted = chatFlair.decorateReadable(state[0], null, shift, false);
-			if (painted == null) { it.remove(); continue; }
-			w.setText(state[1] = painted);
-		}
 	}
 
 	/** Config-poll thread only — never the client thread: it may hit disk and the network. */
@@ -6193,12 +5215,7 @@ public class SoulrendPlugin extends Plugin {
 			case "ask":
 				return;
 			case "hello":
-			// The Supporter list: a delta, or (on connecting: one may have been missed) a version check.
 			case "flair":
-				if ((flairOn() || menusFlair()) && apiClient.isConfigured()) {
-					if ("hello".equals(kind)) chatFlairSync.soon();
-					else chatFlairSync.pushed(gson.fromJson(m, ChatFlair.Wire.class));
-				}
 				return;
 		}
 		if (kind.startsWith("rows")) {
@@ -6305,7 +5322,7 @@ public class SoulrendPlugin extends Plugin {
 		// other side, would otherwise build on the old team's numbers.
 		if (!sameTeam(pluginConfig, fresh)) optimistic.reset();
 		pluginConfig = fresh;
-		clientThread.invokeLater(this::refreshClanTitleWidgets);
+
 		rebuildItemDropIndex();
 		liveCountsMoved();
 	}
@@ -6315,7 +5332,6 @@ public class SoulrendPlugin extends Plugin {
 		try {
 			refreshConfigLocked();
 			syncPush();
-			safely("chat flair", this::maybeRefreshChatFlair);
 		} finally {
 			lastConfigAttemptAt = now();
 			configFetchLock.unlock();
@@ -6350,7 +5366,7 @@ public class SoulrendPlugin extends Plugin {
 			// and `boards`, and are tracked like any other; with none, tracking reflects that.
 			if (fresh != null && fresh.event == null) {
 				pluginConfig = fresh;
-				clientThread.invokeLater(this::refreshClanTitleWidgets);
+
 				rebuildItemDropIndex();
 				if (apiClient.getCurrentRsn() != null) checkTileCompletions(fresh);
 				if (!empty(fresh.unlinkedActiveEvent)) {
@@ -7359,39 +6375,6 @@ public class SoulrendPlugin extends Plugin {
 
 	/** Dangerous PvP only — the Wilderness or a PvP world. Safe minigames (LMS, Soul Wars,
 	 *  Castle Wars, PvP Arena) and DMM never count as PKs. Client thread (varbit read). */
-	/**
-	 * Client thread, for every menu entry as it's added, after other plugins (priority -1): a
-	 * Supporter's name wears their colours on a player's right-click options ("Trade with Name"),
-	 * the same as in chat. Display only, from the public flair list; nothing about who's around is
-	 * sent. Never in PvP areas: there a colour must not single anyone out.
-	 */
-	@Subscribe(priority = -1)
-	void onMenuEntryAdded(MenuEntryAdded event) {
-		if (!menusFlair() || chatFlair.isEmpty()) return;
-		var entry = event.getMenuEntry();
-		var p = entry.getPlayer();
-		var name = p == null ? null : p.getName();
-		if (name == null || inDangerousPvp() || client.getWorldType().contains(WorldType.DEADMAN)) return;
-		var target = entry.getTarget();
-		var m = menuNamePattern(name).matcher(target == null ? "" : target);
-		if (!m.find()) return;
-		var painted = chatFlair.decorateReadable(name, null, 0, false);
-		if (painted != null) entry.setTarget(target.substring(0, m.start()) + painted + target.substring(m.end()));
-	}
-
-	String menuFlairName;
-	Pattern menuFlairPattern;
-
-	/** "<col=ffffff>Name" in a menu target (spaces may be the game's nbsp); cached for the last name. */
-	Pattern menuNamePattern(String name) {
-		if (!name.equals(menuFlairName)) {
-			var body = Pattern.quote(name.replace('\u00a0', ' ')).replace(" ", "\\E[ \u00a0]\\Q");
-			menuFlairPattern = Pattern.compile("(?:<col=([0-9a-fA-F]{6})>)?" + body);
-			menuFlairName = name;
-		}
-		return menuFlairPattern;
-	}
-
 	boolean inDangerousPvp() {
 		// Varbits aren't loaded before login; reading one there throws.
 		return client.getGameState() == GameState.LOGGED_IN && client.getVarbitValue(VarbitID.INSIDE_WILDERNESS) == 1
@@ -8772,49 +7755,6 @@ public class SoulrendPlugin extends Plugin {
 
 	/** How Soulrend lines are coloured; replaced by the site's look with each login brief. */
 	volatile ChatPalette chatPalette = ChatPalette.SOULREND;
-	/** The Patron star's chat icon, registered once; -1 until then. */
-	int chatStarIcon = -1;
-
-	/** Registered tenure icons by shape, colour and glint frame. */
-	final Map<String, Integer> tenureIcons = new HashMap<>();
-
-	String tenureIcon(ChatFlair.Entry e, boolean opaque, int glint) {
-		return tenureIcon(e, opaque, glint, 0);
-	}
-
-	/**
-	 * The tenure icon in the name's own look. With a gradient it is coloured like one more letter in
-	 * front of the name: {@code p} is that letter's place along the gradient (and its motion), so the
-	 * star moves in step with the name. Cached by colour (rounded a little), shared by every name.
-	 */
-	String tenureIcon(ChatFlair.Entry e, boolean opaque, int glint, double p) {
-		var c = ChatPalette.nameColor(ChatFlair.readableColor(e, opaque));
-		if (c == null || e.t < 1 || e.t > TENURE_STEPS) return "";
-		var rgb = ChatPalette.rgbOf(ChatFlair.readableGradient(e, opaque));
-		int ink = rgb.size() < 2 ? Integer.parseInt(c, 16) : ChatPalette.sample(rgb, p) & 0xf8f8f8;
-		var key = e.t + ":" + ink + ":" + glint;
-		var id = tenureIcons.get(key);
-		if (id == null && tenureIcons.size() >= 512) return tenureReady.getOrDefault(e.t + ":" + glint + ":" + opaque, "");
-		if (id == null) tenureIcons.put(key, id = chatIconManager.registerChatIcon(tenureSprite(e.t, ink, glint)));
-		int index = chatIconManager.chatIconIndex(id);
-		var tag = dropIcon(index);
-		// A colour still loading shows the last one this shape had ready, never a blank: a gap made the
-		// moving star blink while its frames loaded.
-		var shape = e.t + ":" + glint + ":" + opaque;
-		if (index >= 0) tenureReady.put(shape, tag);
-		return tenureReady.getOrDefault(shape, "");
-	}
-
-	/**
-	 * Chat icon {@code index}'s tag, or "" until it loads. The game sits an icon's bottom on the text line;
-	 * drawn TENURE_DROP px lower, the badge is level with the name.
-	 */
-	String dropIcon(int index) {
-		var icons = index >= 0 ? client.getModIcons() : null;
-		if (icons != null && index < icons.length && icons[index] != null && icons[index].getOffsetY() != TENURE_DROP) icons[index].setOffsetY(TENURE_DROP);
-		return index < 0 ? "" : "<img=" + index + ">";
-	}
-
 	/** Tenure steps (Apprentice … Legend); their chat sprites sit side by side in tenure.png, 13px each. */
 	static final int TENURE_STEPS = 6, TENURE_PX = 13;
 	/** Pixel art as tone keys (red / 16, made by Soulrend/tenure-sheet.py); chat icons keep only solid pixels. */
@@ -8880,28 +7820,6 @@ public class SoulrendPlugin extends Plugin {
 		return img;
 	}
 
-	/** Per shape, glint and surface: the last tenure icon tag that had finished loading. */
-	final Map<String, String> tenureReady = new HashMap<>();
-
-	String chatStar() {
-		if (chatStarIcon < 0) {
-			var img = new BufferedImage(11, 11, BufferedImage.TYPE_INT_ARGB);
-			var g = img.createGraphics();
-			try {
-				new GlyphIcon(GlyphIcon.Shape.STAR, 11, new Color(0xff, 0xd2, 0x7a)).paintIcon(null, g, 0, 0);
-			} finally {
-				g.dispose();
-			}
-			chatStarIcon = chatIconManager.registerChatIcon(img);
-		}
-		int index = chatIconManager.chatIconIndex(chatStarIcon);
-		return index >= 0 ? "<img=" + index + ">" : "";
-	}
-
-	/**
-	 * Re-read the chat colours alone (no lines): the player changed them on the site (a {"t":"look"}
-	 * push), or pressed Refresh. Without this they only took effect at the next login.
-	 */
 	/** The site's chat look: line colours and the [Soulrend] tag's colour. */
 	void adoptLook(BingoApiClient.Look l) {
 		chatPalette = ChatPalette.from(l.palette, l.colors);
@@ -8913,12 +7831,6 @@ public class SoulrendPlugin extends Plugin {
 	void refreshLook() {
 		var b = apiClient.fetchBrief();
 		if (b != null && b.look != null) adoptLook(b.look);
-	}
-
-	/** Manual panel Refresh: bypass the ten-minute cadence so changed public name styles appear now. */
-	void refreshChatFlairNow() {
-		chatFlairFetchedAt = now();
-		chatFlairSync.sync();
 	}
 
 	/** The login brief (site lib/chatBrief): where this character stands, in a line or two. */
@@ -8953,23 +7865,7 @@ public class SoulrendPlugin extends Plugin {
 			return;
 		}
 		feedShownAt.addLast(now);
-		// The sender's Supporter colour on their name, and a Patron's star; the rest in the line's tone.
-		var whoColor = m.has("whoColor") ? ChatPalette.nameColor(m.get("whoColor").getAsString()) : null;
-		var star = m.has("star") && m.get("star").getAsBoolean();
-		// Champion/Patron: the name letter by letter across their gradient; else the solid colour.
-		String grad = null;
-		if (!who.isEmpty() && m.has("whoGrad") && m.get("whoGrad").isJsonArray()) {
-			List<String> stops = new ArrayList<>();
-			for (var e : m.getAsJsonArray("whoGrad")) if (e.isJsonPrimitive()) stops.add(e.getAsString());
-			grad = ChatPalette.gradientName(clean(who), stops);
-		}
-		// The dataset's look for this surface (own dark/light look, else adapted) wins over the push's
-		// raw colours, so a feed line's name matches the same name in chat.
-		var own = who.isEmpty() || !flairOn() ? null : chatFlair.paintNameFor(clean(who), lastChatboxOpaque);
-		var name = own != null ? own : grad != null ? grad
-				: whoColor != null ? "<col=" + whoColor + ">" + clean(who) + "</col>" : clean(who);
-		var fe = own == null ? null : chatFlair.entry(clean(who));
-		var lead = who.isEmpty() ? null : (fe != null && fe.t != null ? tenureIcon(fe, lastChatboxOpaque, -1) : star ? chatStar() : "") + name;
+		var lead = who.isEmpty() ? null : clean(who);
 		var tone = Tone.of(m.has("tone") ? m.get("tone").getAsString() : null);
 		sendChatLine(tag.isEmpty() ? "Soulrend" : "Soulrend \u00B7 " + tag, text, tone, lead);
 	}

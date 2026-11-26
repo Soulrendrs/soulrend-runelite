@@ -57,3 +57,9 @@ Removed personal-best import from RuneLite's profile configuration and upload
 of personal-best records. Kept the pure time parsers and existing parser tests
 for future event-scoped timed-clear work. Historical local PB keys are ignored;
 no stored records are deleted. The character-switch highlight reset remains.
+
+Removed the live game-name painting subsystem, its frame/script/menu hooks,
+settings, supporter-list networking and chat icon registration. Ordinary
+Soulrend notifications now use plain player names. Existing screenshot
+privacy helpers and sidebar artwork remain; pure ChatFlair text helpers and
+badge art are retained for shared parsing and existing sidebar compatibility.

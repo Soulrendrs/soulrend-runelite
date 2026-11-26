@@ -1070,16 +1070,6 @@ public class BingoApiClient {
 		postJson(configUrl("/api/plugin/notify-prefs"), obj("prefs", prefs), "Notify prefs", true);
 	}
 
-	/** GET chat-flair/v?since= — the Supporter list's version and the deltas to it (ChatFlairSync). Public; null on failure. */
-	ChatFlair.Since fetchChatFlairSince(int v) {
-		return getOrNull(plainRequest(rootUrl("/api/plugin/chat-flair/v?since=" + v)).get(), ChatFlair.Since.class);
-	}
-
-	/** GET chat-flair/v/&lt;v&gt; — the whole list at a version (CDN-cached, gzipped). Public; null on failure. */
-	ChatFlair.Wire fetchChatFlairList(int v) {
-		return getOrNull(plainRequest(rootUrl("/api/plugin/chat-flair/v/" + v)).get(), ChatFlair.Wire.class);
-	}
-
 	/** A non-2xx answer, from any call: every refusal this client throws is one, so callers can go by {@link #code}. */
 	static class HttpStatusException extends IOException {
 		final int code;
