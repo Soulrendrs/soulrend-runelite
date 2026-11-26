@@ -1,0 +1,190 @@
+{
+  "capture_id": "b7b58989-7d2b-4b66-8b10-6437f0e352a3",
+  "rule": {
+    "kind": "item_pool",
+    "strategy": "sets",
+    "scope": "team",
+    "target": 2,
+    "items": [
+      {
+        "item_id": 100,
+        "quantity": 2
+      },
+      {
+        "item_id": 200,
+        "quantity": 1
+      }
+    ]
+  },
+  "aliases": {
+    "100": 100,
+    "101": 100,
+    "200": 200,
+    "999": 999
+  },
+  "cases": [
+    {
+      "label": "raid reward multiple items",
+      "source": "event",
+      "stacks": [
+        [
+          200,
+          2
+        ],
+        [
+          101,
+          3
+        ],
+        [
+          100,
+          1
+        ],
+        [
+          999,
+          2
+        ]
+      ],
+      "payload": {
+        "capture_id": "b7b58989-7d2b-4b66-8b10-6437f0e352a3",
+        "source": "event",
+        "stacks": [
+          [
+            100,
+            1
+          ],
+          [
+            101,
+            3
+          ],
+          [
+            200,
+            2
+          ]
+        ]
+      },
+      "canonical": {
+        "100": 4,
+        "200": 2
+      }
+    },
+    {
+      "label": "same item duplicate stacks",
+      "source": "npc",
+      "stacks": [
+        [
+          101,
+          1
+        ],
+        [
+          101,
+          2
+        ],
+        [
+          100,
+          1
+        ]
+      ],
+      "payload": {
+        "capture_id": "b7b58989-7d2b-4b66-8b10-6437f0e352a3",
+        "source": "npc",
+        "stacks": [
+          [
+            100,
+            1
+          ],
+          [
+            101,
+            1
+          ],
+          [
+            101,
+            2
+          ]
+        ]
+      },
+      "canonical": {
+        "100": 4
+      }
+    },
+    {
+      "label": "unrelated loot omitted",
+      "source": "npc",
+      "stacks": [
+        [
+          999,
+          7
+        ]
+      ],
+      "payload": null
+    },
+    {
+      "label": "empty loot omitted",
+      "source": "event",
+      "stacks": [],
+      "payload": null
+    },
+    {
+      "label": "pvp omitted",
+      "source": "pvp",
+      "stacks": [
+        [
+          100,
+          3
+        ]
+      ],
+      "payload": null
+    },
+    {
+      "label": "pickpocket omitted",
+      "source": "pickpocket",
+      "stacks": [
+        [
+          100,
+          3
+        ]
+      ],
+      "payload": null
+    },
+    {
+      "label": "unknown source omitted",
+      "source": "custom",
+      "stacks": [
+        [
+          100,
+          3
+        ]
+      ],
+      "payload": null
+    },
+    {
+      "label": "invalid stack rejects whole batch",
+      "source": "npc",
+      "stacks": [
+        [
+          100,
+          3
+        ],
+        [
+          200,
+          0
+        ]
+      ],
+      "invalid": true
+    },
+    {
+      "label": "overflow rejects whole batch",
+      "source": "npc",
+      "stacks": [
+        [
+          100,
+          2147483647
+        ],
+        [
+          101,
+          1
+        ]
+      ],
+      "invalid": true
+    }
+  ]
+}
