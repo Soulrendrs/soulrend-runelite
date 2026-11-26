@@ -28,6 +28,7 @@ final class AutomaticEvidence {
     private static final int MAX_ACTIVE_BOARDS = 5;
     private static final int MAX_PENDING_FOR_SESSION = 40;
 
+    private static final Set<String> LOOT_SOURCES = Set.of("npc", "event", "pvp", "pickpocket");
     private static final Set<String> GATHERING_SKILLS = Set.of("fishing", "mining", "woodcutting", "cooking", "farming", "hunter");
 
     static final class Rule {
@@ -48,7 +49,8 @@ final class AutomaticEvidence {
         }
 
         boolean matchesDrop(Map<Integer, Integer> items, String actualSource) {
-            return "drop".equals(kind) && item_id != null
+            return "drop".equals(kind) && item_id != null && item_id > 0
+                && actualSource != null && LOOT_SOURCES.contains(actualSource)
                 && items.getOrDefault(item_id, 0) > 0
                 && (source == null || source.isEmpty()
                     ? "npc".equals(actualSource) || "event".equals(actualSource)
@@ -56,13 +58,14 @@ final class AutomaticEvidence {
         }
 
         boolean matchesGain(String skill, Map<Integer, Integer> gains) {
-            return "gain".equals(kind) && item_id != null && skill.equals(source)
+            return "gain".equals(kind) && item_id != null && item_id > 0
+                && skill != null && GATHERING_SKILLS.contains(skill) && skill.equals(source)
                 && gains.getOrDefault(item_id, 0) > 0;
         }
 
         boolean matchesTask(String task, boolean repeat) {
-            return "ca".equals(kind) && task_id != null && task_name != null
-                && task_name.strip().equalsIgnoreCase(task.strip()) && (!repeat || allow_repeat);
+            return "ca".equals(kind) && task_id != null && task_id > 0 && task_name != null
+                && task != null && !task.isBlank() && task_name.strip().equalsIgnoreCase(task.strip()) && (!repeat || allow_repeat);
         }
     }
 

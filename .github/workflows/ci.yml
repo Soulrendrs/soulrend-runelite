@@ -44,6 +44,8 @@ jobs:
           grep -q "targetCompatibility = '11'" build.gradle
       - name: Compile and run test suite
         run: ./gradlew --no-daemon --stacktrace clean test build
+      - name: Verify packaged Java bytecode and resources
+        run: python3 scripts/check_jar_compliance.py build/libs/*.jar
       - name: Upload Gradle test failure reports
         if: failure()
         uses: actions/upload-artifact@v7

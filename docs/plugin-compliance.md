@@ -25,3 +25,51 @@ Production does not load legacy cached config, poll old config, capture legacy f
 
 ## Remaining review
 Inspect every production route and backend retention/access, screenshot redaction, PvP/other-player information, dynamic objective rules, game-widget modifications, and all remaining inherited paths. Verify official bytecode checks and live manual client behavior; this source scanner is deliberately incomplete. Do not claim compliance certification or submit until these and asset licensing are resolved.
+
+## Phases E–G: 2026-11-26 follow-up
+
+Baseline main: `252e1fbcfc6582c92b7b4ebb2c81b92f14aadb51`. Its post-merge CI passed (run 45794364961).
+Current RuneLite rejected-feature list was updated 2026-11-23. See the references above and
+https://github.com/runelite/plugin-hub/blob/master/README.md.
+
+### E: inherited paths and dynamic rules
+Production now skips legacy player spawn, hitsplat, death, interaction and player-loot
+handlers, nearby/clan/friends lookup suggestions, in-game profile menu additions, and
+starting-shot routing. Instance membership names are no longer collected by the tick path
+on the canonical site. This is further quarantine, not physical removal of the imported
+code. Generic own loot observations remain passive, including explicitly selected PvP
+loot (no victim name in the v1 proof payload). The ordinary combined drop rule still
+matches NPC/reward-window drops only. Fixed loot/skill source sets and positive item/task IDs
+are checked in the client. A server rule is a selector over locally observed events, not
+executable code; no attack, movement, prayer or menu automation is intended.
+RuneLite's prohibition on unrestricted ID-based plugins warrants explicit reviewer
+confirmation of the catalog-selected bingo objective model. No claim of preapproval.
+
+### F: packaging and assets
+The standard Hub build replaces this project's Gradle scripts. Put the original BSD notice
+in the resources tree itself and keep the development JAR equality check. The new CI
+bytecode/resource check examines every packaged class, including dormant code, for a
+conservative list of forbidden references; it is not RuneLite's official checker.
+No additional production runtime dependencies are declared in the repository Gradle file;
+Lombok is compile-time, JUnit and jshell are tests. The actual Hub build remains unverified.
+
+**Release blocker:** Mixkit's sound effects license permits incorporation in end products
+but prohibits redistribution with source files, in tools/templates, or on their own:
+https://mixkit.co/license/modal/sfxFree/. The three supplied Mixkit WAVs need separate
+documented redistribution permission covering the public source repo and plugin JAR,
+or replacement with appropriately licensed/original sounds. The fourth recording
+(winning-sound-effect-button.mp3) lacks source and rights documentation. A file name change,
+normalization, or project-owner assertion is insufficient evidence of the rights.
+Do not publish to Plugin Hub until all four are resolved. Existing assets not changed here.
+
+### G: backend and real client verification
+Reviewed website `bingo/runelite_auth.py`, `bingo/runelite_evidence.py` and objective
+matrix on main. Device bearer tokens are hashed in storage with expiry and revocation;
+the evidence endpoint authenticates the session, limits requests and validates allowed
+sources. This is not a full backend privacy/authorization audit.
+Still required: trace screenshot storage/serving, retention/deletion and backups; verify
+all guest/member/team/staff access boundaries; verify account unlink/revoke and queued
+evidence behavior in a real client; test fixed/resizable/stretched screenshot redaction,
+no-chat leakage, offline retries, own/team-only sidebar and Wilderness/PvP loot.
+Verify actual Hub packager output (including BSD notice), native consent prompt and
+official reviewer feedback. Do not equate passing repository CI with Hub approval.
