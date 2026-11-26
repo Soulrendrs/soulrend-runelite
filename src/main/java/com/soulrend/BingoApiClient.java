@@ -484,28 +484,30 @@ public class BingoApiClient {
     }
 
     EvidenceRules evidenceRules(int eventId, String token, String character) {
-        var url = evidenceUrl(eventId, character);
+        var url = evidenceUrl(eventId, character, true);
         return getOrNull(plainRequest(url).header("Authorization", "Bearer " + token).get(), EvidenceRules.class);
     }
 
-    private String evidenceUrl(int eventId, String character) {
-        return HttpUrl.parse(authUrl("/api/runelite/v1/events/" + eventId + "/evidence")).newBuilder()
-            .addQueryParameter("character", character).build().toString();
+    private String evidenceUrl(int eventId, String character, boolean batchCapable) {
+        var url = HttpUrl.parse(authUrl("/api/runelite/v1/events/" + eventId + "/evidence")).newBuilder()
+            .addQueryParameter("character", character);
+        if (batchCapable) url.addQueryParameter("item_batch", "2");
+        return url.build().toString();
     }
 
     static final class EvidenceUpload {
         final int httpStatus;
         final String proofStatus;
-        final Integer value, target;
+        final Long value, target;
         final ConfirmedTile completion;
         final ProgressTile progress;
         final long participation;
 
-        EvidenceUpload(int httpStatus, String proofStatus, Integer value, Integer target, ConfirmedTile completion, ProgressTile progress, long participation) {
+        EvidenceUpload(int httpStatus, String proofStatus, Number value, Number target, ConfirmedTile completion, ProgressTile progress, long participation) {
             this.httpStatus = httpStatus;
             this.proofStatus = proofStatus;
-            this.value = value;
-            this.target = target;
+            this.value = value == null ? null : value.longValue();
+            this.target = target == null ? null : target.longValue();
             this.completion = completion;
             this.progress = progress;
             this.participation = participation;
@@ -514,31 +516,43 @@ public class BingoApiClient {
 
     private static final class EvidenceReceipt {
         String status;
-        Integer value, target;
+        Long value, target;
         ConfirmedTile completion;
         ProgressTile progress;
         long participation;
     }
 
-    EvidenceUpload uploadEvidence(PendingSubmissionStore.PendingSubmission proof, String token, byte[] image) throws IOException {
+    static MultipartBody evidenceBody(PendingSubmissionStore.PendingSubmission proof, byte[] image) {
         var body = new MultipartBody.Builder().setType(MultipartBody.FORM)
             .addFormDataPart("tile", String.valueOf(proof.tileId))
             .addFormDataPart("capture_id", proof.runeliteCaptureId)
-            .addFormDataPart("captured_at", java.time.Instant.ofEpochMilli(proof.timestamp).toString())
-            .addFormDataPart("kind", proof.evidenceKind)
-            .addFormDataPart("objective_id", String.valueOf(proof.evidenceId));
-        if ("ca".equals(proof.evidenceKind)) {
-            body.addFormDataPart("repeat", proof.evidenceRepeat ? "1" : "0");
-        } else {
+            .addFormDataPart("captured_at", java.time.Instant.ofEpochMilli(proof.timestamp).toString());
+        if (proof.itemBatch != null) {
             body.addFormDataPart("source", proof.evidenceSource)
-                .addFormDataPart("quantity", String.valueOf(proof.amount));
+                .addFormDataPart("item_batch", proof.itemBatch.toString());
+        } else {
+            body.addFormDataPart("kind", proof.evidenceKind)
+                .addFormDataPart("objective_id", String.valueOf(proof.evidenceId));
+            if ("ca".equals(proof.evidenceKind)) {
+                body.addFormDataPart("repeat", proof.evidenceRepeat ? "1" : "0");
+            } else {
+                body.addFormDataPart("source", proof.evidenceSource)
+                    .addFormDataPart("quantity", String.valueOf(proof.amount));
+            }
         }
         body.addFormDataPart("image", "evidence.jpg", RequestBody.create(MediaType.parse("image/jpeg"), image));
-        return execute(httpClient, plainRequest(evidenceUrl(proof.eventId, proof.capturedRsn))
-            .header("Authorization", "Bearer " + token).post(body.build()),
+        return body.build();
+    }
+
+    EvidenceUpload uploadEvidence(PendingSubmissionStore.PendingSubmission proof, String token, byte[] image) throws IOException {
+        boolean batch = "item_pool".equals(proof.evidenceKind) || "loot_value".equals(proof.evidenceKind);
+        if (batch != (proof.itemBatch != null))
+            return new EvidenceUpload(400, null, null, null, null, null, 0);
+        return execute(httpClient, plainRequest(evidenceUrl(proof.eventId, proof.capturedRsn, batch))
+            .header("Authorization", "Bearer " + token).post(evidenceBody(proof, image)),
             (reply, data) -> {
                 String proofStatus = null;
-                Integer value = null, target = null;
+                Long value = null, target = null;
                 ConfirmedTile completion = null;
                 ProgressTile progress = null;
                 long participation = 0;

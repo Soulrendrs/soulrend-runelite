@@ -291,8 +291,36 @@ final class AutomaticEvidence {
         });
         var captures = new ArrayList<PendingSubmission>();
         var captureId = UUID.randomUUID().toString();
+        var rawStacks = new ArrayList<int[]>();
+        boolean advanced = ("npc".equals(source) || "event".equals(source))
+            && snapshot.matches.stream().anyMatch(match -> match.rule.isItemBatch());
+        if (advanced && items.size() <= ItemBatchContract.MAX_STACKS) {
+            for (var item : items) {
+                if (item.getId() > 0 && item.getQuantity() > 0)
+                    rawStacks.add(new int[]{item.getId(), item.getQuantity()});
+            }
+        }
+        IntUnaryOperator resolve = id -> {
+            var definition = plugin.itemManager.getItemComposition(id);
+            if (definition == null) return 0;
+            return definition.getNote() != -1 ? definition.getLinkedNoteId() : id;
+        };
         for (var match : snapshot.matches) {
-            if (match.rule.matchesDrop(quantities, source)) {
+            if (match.rule.isItemBatch() && advanced && !rawStacks.isEmpty()) {
+                var payload = AdvancedLootRule.prepare(UUID.fromString(captureId), match.rule, source, rawStacks, resolve);
+                if (payload != null) {
+                    long units = 0;
+                    for (var row : payload.getAsJsonArray("stacks"))
+                        units += row.getAsJsonArray().get(1).getAsInt();
+                    var proof = prepare(snapshot, match, captureId, 0,
+                        (int) Math.min(Integer.MAX_VALUE, units), source, false);
+                    if (proof != null) {
+                        proof.itemBatch = payload;
+                        proof.evidenceName = "Loot batch";
+                        captures.add(proof);
+                    }
+                }
+            } else if (match.rule.matchesDrop(quantities, source)) {
                 var proof = prepare(snapshot, match, captureId, match.rule.item_id,
                     quantities.get(match.rule.item_id), source, false);
                 if (proof != null) captures.add(proof);
@@ -414,7 +442,7 @@ final class AutomaticEvidence {
                                       int evidenceId, int quantity, String source, boolean repeat) {
         long now = System.currentTimeMillis();
         boolean cumulative = "drop".equals(match.rule.kind) || "gain".equals(match.rule.kind)
-            || "npc_kill".equals(match.rule.kind);
+            || "npc_kill".equals(match.rule.kind) || match.rule.isItemBatch();
         if (cumulative) {
             // Repeated drops/kills are distinct legitimate observations:
             // cooldown-based suppression would silently lose cumulative gains.
