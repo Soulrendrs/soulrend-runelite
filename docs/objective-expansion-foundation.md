@@ -63,3 +63,5 @@ settings, supporter-list networking and chat icon registration. Ordinary
 Soulrend notifications now use plain player names. Existing screenshot
 privacy helpers and sidebar artwork remain; pure ChatFlair text helpers and
 badge art are retained for shared parsing and existing sidebar compatibility.
+
+PvP cleanup: player loot and opened Wilderness loot keys are rejected before the shared loot pipeline; automatic evidence also rejects explicit `pvp` rules. Opponent hit/death attribution, named kill submissions, and PvP roster deserialization are removed. NPC/raid loot and timed/deathless parser helpers remain. Team-only deathless validation stays fail-closed pending a reviewed server-side contract; no opponent roster is accepted. The quarantined legacy recap payload retains a zero-valued PvP field for compatibility.

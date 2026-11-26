@@ -59,7 +59,7 @@ public class AutomaticEvidenceTest {
         assertFalse(rule.matchesDrop(Map.of(995, 1), "unreviewed"));
         assertFalse(rule.matchesDrop(Map.of(995, 1), null));
         rule.source = "pvp";
-        assertTrue(rule.matchesDrop(Map.of(995, 1), "pvp"));
+        assertFalse(rule.matchesDrop(Map.of(995, 1), "pvp"));
         rule.item_id = -1;
         assertFalse(rule.matchesDrop(Map.of(-1, 1), "pvp"));
         rule.kind = "gain";

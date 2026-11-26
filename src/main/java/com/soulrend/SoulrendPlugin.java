@@ -273,19 +273,6 @@ public class SoulrendPlugin extends Plugin {
 	final ChatCredits chatCredits = new ChatCredits();
 	static final long CLOG_LOOT_DEDUP_MS = 5 * 60_000;
 
-	// PvP-kill attribution — when a hitsplat we dealt lands on a player, remember it. If that
-	// player then dies within the window, we count it as our kill (avoids screenshotting random
-	// nearby deaths). Keyed by lowercased player name. Pruned on each kill check.
-	final Map<String, Long> lastDamagedPlayerAt = new HashMap<>();
-	static final long PVP_KILL_ATTRIBUTION_MS = 6_000;
-
-	// PvP min-loot tiles credit off the LOOT (priced at PlayerLootReceived), not the death — so a
-	// kill on a matching victim is parked here at death and consumed when its loot arrives and prices
-	// at/above the tile's floor. Keyed by lowercased victim RSN. Loot-key / no-loot kills never fire
-	// PlayerLootReceived, so their entry just expires and the min-loot tile isn't credited (intended).
-	final Map<String, Long> pendingMinLootKillAt = new HashMap<>();
-	static final long PVP_MINLOOT_LOOT_WINDOW_MS = 20_000;
-
 	// Rare-drop notification dedup — NpcLootReceived + LootReceived fire for the same NPC kill, so
 	// suppress a repeat post of the same item within a short window. Keyed by itemId.
 	final Map<Integer, Long> lastRareNotifyAt = new HashMap<>();
@@ -681,7 +668,6 @@ public class SoulrendPlugin extends Plugin {
 	int counterEventId;
 	int eventDeaths;
 	long eventLootGp;
-	int eventPvpKills;
 	/** Hardest single hitsplat we've landed this event — "Heavy Hitter". */
 	int eventBiggestHit;
 	/** Minutes logged in during the event. Turns every other counter into a rate. */
@@ -752,7 +738,6 @@ public class SoulrendPlugin extends Plugin {
 	static final String CFG_COUNTER_EVENT = "recapCounterEventId";
 	static final String CFG_COUNTER_DEATHS = "recapCounterDeaths";
 	static final String CFG_COUNTER_LOOTGP = "recapCounterLootGp";
-	static final String CFG_COUNTER_PVP = "recapCounterPvpKills";
 	static final String CFG_COUNTER_BIGHIT = "recapCounterBiggestHit";
 	static final String CFG_COUNTER_MINUTES = "recapCounterMinutes";
 	static final String CFG_COUNTER_CATASKS = "recapCounterCaTasks";
@@ -1548,7 +1533,7 @@ public class SoulrendPlugin extends Plugin {
 
 	static final Set<String> INTERNAL_STATE_KEYS = Set.of(
 			CFG_DEFAULTS_VERSION, CFG_FIRST_RUN_NUDGES, CFG_ANNOUNCED_ACCOUNTS,
-			CFG_COUNTER_EVENT, CFG_COUNTER_DEATHS, CFG_COUNTER_LOOTGP, CFG_COUNTER_PVP,
+			CFG_COUNTER_EVENT, CFG_COUNTER_DEATHS, CFG_COUNTER_LOOTGP, "recapCounterPvpKills",
 			CFG_COUNTER_BIGHIT, CFG_COUNTER_MINUTES, CFG_COUNTER_CATASKS, "settingsMovedNoted");
 	// Per-RSN state keys are stored as "<prefix>:<rsn>".
 	static final List<String> INTERNAL_STATE_PREFIXES = List.of(
@@ -2492,23 +2477,15 @@ public class SoulrendPlugin extends Plugin {
 	void onLootReceived(LootReceived event) {
 		// Minigame loot isn't real — an LMS kill "drops" the victim's throwaway loadout — so never
 		// post it to the drops channel or feed it to any bingo tile (drop/value/rare-drop).
-		if (lmsInGame) return;
+		if (lmsInGame || isExcludedPlayerLoot(event.getType(), event.getName())) return;
 		// The ToA chest: by now the raid level has taken any failed timer's cut.
 		if (!heldToaRuns.isEmpty() && event.getName() != null && RaidGates.isToa(event.getName())) judgeHeldToaRuns(raidLevelNow());
-		// Covers raid chests, clue caskets, barrows, implings, AND opened loot keys.
-		// We classify the source so per-tile filters can reject drops from the wrong
-		// place (e.g. a "CoX Dragon claws" tile shouldn't credit a PK loot key).
-		var kind = "event"; // raid chests / barrows / wt / clues
+		// Classify supported loot without exposing player names or loot-key contents.
+		var kind = "event";
 		switch (event.getType()) {
 			case NPC: kind = "npc"; break;
-			case PLAYER: kind = "pvp"; break;
 			case PICKPOCKET: kind = "pickpocket";
 		}
-		// A Wilderness loot key ("Loot Chest") holds PK loot, but RuneLite reports opening it as an
-		// EVENT (like a raid chest), not a PLAYER kill. Without this override it dodges the "PvP loot
-		// rejected by default" drop-tile guard, so PK'd items (dragon boots, berserker ring, …) wrongly
-		// credit PvM drop tiles. Treat key contents as pvp: PvM tiles reject them, pvp/value tiles keep them.
-		if (isLootKeyEvent(event.getName())) kind = "pvp";
 		// Clue caskets arrive under RuneLite's casket/trail name, which varies by version
 		// ("Reward Casket (Master)" / "Master Treasure Trail" / "Clue Scroll (Master)"); fold them all
 		// to the "Clue Scroll (Tier)" the source picker offers so a clue-restricted drop tile matches.
@@ -2533,8 +2510,7 @@ public class SoulrendPlugin extends Plugin {
 		//
 		// Routed through the loot-driven kill path on purpose: it already stands down for any
 		// source that also prints a "count is:" chat line, so a CoX chest can't credit the same
-		// raid twice. Restricted to EVENT loot — NPC kills come through onNpcLootReceived, and
-		// loot keys were re-typed to "pvp" above.
+		// raid twice. Restricted to EVENT loot — NPC kills come through onNpcLootReceived.
 		if ("event".equals(kind)) processNpcKill(source);
 		// Generic NPC loot duplicates the canonical server/fallback signal.
 		if (!"npc".equals(kind) && !isInventoryDiffLoot(source, event.getType()))
@@ -2582,26 +2558,16 @@ public class SoulrendPlugin extends Plugin {
 		return name;
 	}
 
-	@Subscribe
-	void onPlayerLootReceived(PlayerLootReceived event) {
-		if (BingoApiClient.productionMode()) return; // inherited functionality is not part of Soulrend bingo
-		if (lmsInGame) return; // LMS PvP loot is minigame loot — not a real drop; skip tiles + the drops channel.
-		var name = event.getPlayer().getName();
-		processLoot(name, event.getItems(), "pvp");
-		processValueTiles(name, event.getItems(), "pvp");
-		recordEventLoot(name, event.getItems(), "pvp");
-		// Credit any PvP kill tile with a min-loot floor that was parked at the death and whose loot
-		// (priced here) reaches the floor. No-op unless such a kill is pending for this victim.
-		creditPvpMinLootKillTiles(name, event.getItems());
-		maybeNotifyRareDrop(name, event.getItems(), "pvp");
+	/** Player kills and opened PK loot keys are never eligible loot observations. */
+	static boolean isExcludedPlayerLoot(LootRecordType type, String source) {
+		return type == LootRecordType.PLAYER || isLootKeyEvent(source);
 	}
 
 	/**
 	 * Loot-value tiles ("loot worth ≥ X gp"): price the WHOLE haul (GE value of every item) and, when
 	 * a single haul from a matching source meets the threshold, submit it with a baked screenshot —
 	 * the value-tile equivalent of the drop pipeline. The server decides completion (single-haul: a
-	 * submission ≥ threshold). Source filter mirrors the site: "PvP" = a player kill, "Loot Chest" =
-	 * an opened loot key, otherwise an NPC/chest name; empty = any.
+	 * submission ≥ threshold). Source filter matches an NPC/chest name; empty = any eligible source.
 	 */
 	void processValueTiles(String source, Collection<ItemStack> items, String sourceKind) {
 		if (trackingGateReason() != null || items == null || items.isEmpty()) return;
@@ -2668,12 +2634,12 @@ public class SoulrendPlugin extends Plugin {
 		if (ourHit != null && ourHit.getAmount() > 0 && ourHit.getHitsplatType() != HitsplatID.HEAL
 				&& actor == self) deathAttribution.tookDamage(now());
 		// Biggest hit of the event — a recap superlative, so it counts every hit we land on anything,
-		// player or NPC, and is independent of the PvP gates below. One int compare per hitsplat.
+		// NPC, without retaining an opponent name.
 		if (ourHit != null && ourHit.isMine() && ourHit.getAmount() > 0) {
 			recordEventHit(ourHit.getAmount());
 			// Remember WHAT we're fighting, which a death is later attributed against. One field
 			// write per landed hit.
-			if (actor != null && actor != self) {
+			if (actor instanceof NPC && actor != self) {
 				var tname = actor.getName();
 				if (tname != null && !tname.isEmpty()) {
 					lastCombatTarget = tname;
@@ -2682,23 +2648,6 @@ public class SoulrendPlugin extends Plugin {
 			}
 		}
 
-		// Track damage WE deal to other players so a subsequent death can be attributed to us —
-		// this drives BOTH the PvP kill notification AND PvP-kill tile credit. Cheap: a couple of
-		// reference checks on the client thread. (Loot-key kills produce no reliable chat/loot
-		// signal — the kill message is a random taunt pool and PlayerLootReceived never fires since
-		// the loot goes into a key, not onto the ground — so damage→death is the signal we use.)
-		Me me = me();
-		if ((me == null || !me.pvp) && !hasPvpTiles() && !pvpCounterActive()) return;
-		if (ourHit == null || !ourHit.isMine()) return;
-		if (!(actor instanceof Player) || actor == self) return;
-		var name = actor.getName();
-		if (name == null || name.isEmpty()) return;
-		synchronized (lastDamagedPlayerAt) {
-			var now = now();
-			// Pruned here too: a session of hits with no kill would otherwise only ever grow it.
-			lastDamagedPlayerAt.values().removeIf(t -> now - t > PVP_KILL_ATTRIBUTION_MS);
-			lastDamagedPlayerAt.put(name.toLowerCase(), now);
-		}
 	}
 
 	/**
@@ -2951,8 +2900,6 @@ public class SoulrendPlugin extends Plugin {
 			amounts.put(GOTR_ENERGY_TOTAL, elemental + catalytic);
 			if (!trackingOff()) emit(rules.kill(amounts, null, null));
 		}
-		// (PvP-kill tiles are credited off the victim's death in onActorDeath — damage-attributed,
-		// so it works for loot-key kills where no reliable "you defeated X" chat line exists.)
 		var clogLine = find("clog.unlock", plain);
 		if (clogLine != null) {
 			var item = clogLine.group("item").trim();
@@ -3937,16 +3884,6 @@ public class SoulrendPlugin extends Plugin {
 		return level > 0 ? level : lastToaRaidLevel;
 	}
 
-	/** Normalised RSNs of this team's roster, from the event roster the server ships for these tiles. */
-	Set<String> myTeamRoster() {
-		var mine = new HashSet<String>();
-		var cfg = pluginConfig;
-		if (cfg != null && cfg.pvpRoster != null && cfg.team != null) for (var e : cfg.pvpRoster) {
-			if (e != null && e.name != null && e.teamId == cfg.team.id) mine.add(Rsn.normalize(e.name));
-		}
-		return mine;
-	}
-
 	static CoopFingerprint pendingCoop(PendingSubmission p) {
 		return p.coopGroup == null && p.coopPartySize <= 1 ? null : new CoopFingerprint(p.coopGroup, p.coopPartySize);
 	}
@@ -4028,7 +3965,7 @@ public class SoulrendPlugin extends Plugin {
 		// Attempts are claimed too — several nearby identity lines would otherwise repeat the verdict.
 		var hit = rules.match("deathless", r -> timedHit(lowerMessage, r.key()), deaths,
 				deaths + (deaths == 1 ? " death" : " deaths"), party,
-				RaidGates.wholePartyFromTeam(new ArrayList<>(instancePlayersSeen), myTeamRoster(), party),
+				"team-only party verification requires a reviewed server-side contract",
 				t -> claim(lastTimedSubmittedAt, t, now, TIMED_DEDUP_WINDOW_MS), no);
 		no.forEach(m -> sendChatMessage(WARN, m));
 		for (var r : hit) {
@@ -5755,8 +5692,7 @@ public class SoulrendPlugin extends Plugin {
 	}
 
 	/* -------------------------------------------------------------- */
-	/* Recap "fun stat" counters — deaths, total loot value, PvP     */
-	/* kills. Cosmetic superlatives only; never touch scoring.        */
+	/* Recap counters — cosmetic superlatives only; never scoring.   */
 	/* -------------------------------------------------------------- */
 
 	/**
@@ -5771,7 +5707,6 @@ public class SoulrendPlugin extends Plugin {
 			counterEventId = (int) cfgLong(CFG_COUNTER_EVENT);
 			eventDeaths = (int) cfgLong(CFG_COUNTER_DEATHS);
 			eventLootGp = cfgLong(CFG_COUNTER_LOOTGP);
-			eventPvpKills = (int) cfgLong(CFG_COUNTER_PVP);
 			eventBiggestHit = (int) cfgLong(CFG_COUNTER_BIGHIT);
 			eventMinutes = (int) cfgLong(CFG_COUNTER_MINUTES);
 			eventCaTasks = (int) cfgLong(CFG_COUNTER_CATASKS);
@@ -5782,7 +5717,7 @@ public class SoulrendPlugin extends Plugin {
 		if (active <= 0) return false;
 		if (active != counterEventId) {
 			counterEventId = active;
-			eventDeaths = eventPvpKills = eventBiggestHit = eventCaTasks = eventMinutes = eventTickAccumulator = 0;
+			eventDeaths = eventBiggestHit = eventCaTasks = eventMinutes = eventTickAccumulator = 0;
 			eventLootGp = 0;
 			persistCounters();
 		}
@@ -5861,11 +5796,6 @@ public class SoulrendPlugin extends Plugin {
 		if (bankedMinute) scheduleCounterPush();
 	}
 
-	/** One attributed dangerous-PvP kill (see onActorDeath) → the per-event PKer counter. */
-	void recordEventPvpKill() {
-		bumpEventCounter(() -> eventPvpKills++);
-	}
-
 	/**
 	 * Price a whole loot haul and add its GE value to the per-event loot total. Called from the same
 	 * loot events as {@link #processValueTiles} (which price only when a value tile exists) so EVERY
@@ -5907,13 +5837,12 @@ public class SoulrendPlugin extends Plugin {
 
 	/** Push the current absolute per-event counters. Absolute + server max-merge → a failure just retries. */
 	void flushCounterPush() {
-		int deaths, pvpKills, biggestHit, minutes, caTasks;
+		int deaths, biggestHit, minutes, caTasks;
 		long lootGp;
 		synchronized (counterLock) {
 			persistCounters();
 			deaths = eventDeaths;
 			lootGp = eventLootGp;
-			pvpKills = eventPvpKills;
 			biggestHit = eventBiggestHit;
 			minutes = eventMinutes;
 			caTasks = eventCaTasks;
@@ -5921,7 +5850,7 @@ public class SoulrendPlugin extends Plugin {
 		var cfg = pluginConfig;
 		if (cfg == null || cfg.event == null || !SoulrendOverlay.isEventActive(cfg.event)) return; // event ended between schedule and flush — drop; nothing feeds scoring off this.
 		try {
-			apiClient.submitEventCounters(deaths, lootGp, pvpKills, biggestHit, minutes, caTasks);
+			apiClient.submitEventCounters(deaths, lootGp, 0, biggestHit, minutes, caTasks);
 		} catch (IOException e) {
 			log.warn("Counter push failed, retrying: {}", e.getMessage());
 			scheduleCounterPush();
@@ -6196,7 +6125,6 @@ public class SoulrendPlugin extends Plugin {
 		cfgSet(CFG_COUNTER_EVENT, "" + counterEventId);
 		cfgSet(CFG_COUNTER_DEATHS, "" + eventDeaths);
 		cfgSet(CFG_COUNTER_LOOTGP, "" + eventLootGp);
-		cfgSet(CFG_COUNTER_PVP, "" + eventPvpKills);
 		cfgSet(CFG_COUNTER_BIGHIT, "" + eventBiggestHit);
 		cfgSet(CFG_COUNTER_MINUTES, "" + eventMinutes);
 		cfgSet(CFG_COUNTER_CATASKS, "" + eventCaTasks);
@@ -6323,124 +6251,12 @@ public class SoulrendPlugin extends Plugin {
 			return;
 		}
 
-		// A player we damaged dying → our PvP kill. ActorDeath fires on the tick the death
-		// animation starts (target at 0 HP) — the moment we want the screenshot, and a reliable
-		// signal even for loot-key kills (which produce no ground loot and only a random taunt
-		// message). Damage attribution (a hitsplat we dealt within the window) says the kill is
-		// ours; the Player gives the victim name for the roster / RSN-bounty match. Consumed once
-		// so a single death credits once. Caveat: if two attackers both damaged the victim, both
-		// credit — the baked screenshot is the audit trail.
-		if (actor instanceof Player) {
-			var vname = name;
-			if (named) {
-				var now = now();
-				boolean ours;
-				synchronized (lastDamagedPlayerAt) {
-					lastDamagedPlayerAt.values().removeIf(t -> (now - t) > PVP_KILL_ATTRIBUTION_MS);
-					var last = lastDamagedPlayerAt.remove(vname.toLowerCase());
-					ours = last != null && (now - last) <= PVP_KILL_ATTRIBUTION_MS;
-				}
-				if (ours) {
-					// Recap counter first: ANY dangerous-PvP kill feeds the PKer superlative,
-					// pvp tiles on the board or not. Tile credit + notify keep their own gates.
-					if (inDangerousPvp()) recordEventPvpKill();
-					creditPvpKillTiles(vname);
-					var me = me();
-					if (me != null && me.pvp) notifyPvpKill(vname);
-				}
-			}
-		}
-	}
-
-	/** True when the current event config carries any PvP-kill tiles. */
-	boolean hasPvpTiles() {
-		return rules.has("pvp") || rules.has("pvpLoot");
-	}
-
-	/**
-	 * True when the recap PvP-kill counter alone wants damage→death attribution: an active event
-	 * with auto-tracking on. Kept to cheap reference checks — this runs per hitsplat; the full
-	 * tracking gate applies later inside ensureCounterEvent().
-	 */
-	boolean pvpCounterActive() {
-		var cfg = pluginConfig;
-		return cfg != null && cfg.event != null && SoulrendOverlay.isEventActive(cfg.event);
 	}
 
 	/** Is any board this character is on live? (Every one of them is tracked.) */
 	boolean live() {
 		var cfg = pluginConfig;
 		return cfg != null && cfg.live();
-	}
-
-	/** Dangerous PvP only — the Wilderness or a PvP world. Safe minigames (LMS, Soul Wars,
-	 *  Castle Wars, PvP Arena) and DMM never count as PKs. Client thread (varbit read). */
-	boolean inDangerousPvp() {
-		// Varbits aren't loaded before login; reading one there throws.
-		return client.getGameState() == GameState.LOGGED_IN && client.getVarbitValue(VarbitID.INSIDE_WILDERNESS) == 1
-				|| client.getWorldType().contains(WorldType.PVP);
-	}
-
-	/**
-	 * Posts a PvP kill to the kills channel. Called from onActorDeath once the kill is already
-	 * attributed to us (damage within the window), so this just applies the channel toggle and
-	 * posts. Runs on the client thread; screenshot + network send are deferred.
-	 */
-	void notifyPvpKill(String name) {
-		var message = buildKillMessage(getLocalPlayerName(), name);
-		captureFrameAsync(png -> apiClient.postNotification("pvpKills", message, null, png, "soulrend-pvp-kill.png"));
-	}
-
-	/**
-	 * Credits PvP-kill bingo tiles for a kill attributed to us — called from onActorDeath when a
-	 * player we damaged (within the attribution window) dies. Using the death (not a chat line)
-	 * makes it work for loot-key kills, which produce only a random taunt message and no ground
-	 * loot. Only dangerous PvP counts — the Wilderness or a PvP world — so safe minigames (LMS,
-	 * Soul Wars, Castle Wars, PvP Arena) and DMM can't farm the tile. Selector semantics:
-	 * "team:other" matches any event participant on a different team (via the pvpRoster index —
-	 * so the victim must be enrolled on a team with a matching RSN); "rsn:&lt;name&gt;" matches
-	 * that exact player, enrolled or not. Amount 1 per kill through the shared proof pipeline (the
-	 * death fires on the kill tick — the frame still shows the fight).
-	 */
-	void creditPvpKillTiles(String victimName) {
-		if (trackingOff() || !hasPvpTiles()) return;
-		if (!inDangerousPvp()) {
-			logTrackingSuppressed("PvP kill outside dangerous PvP (Wilderness / PvP world) — not counted");
-			return;
-		}
-		var victim = Rsn.normalize(victimName);
-		emit(rules.event("pvp", RuleEngine.named(victim), 0, null, null, "what", victimName));
-		// A min-loot floor is checked against the kill's LOOT, which only arrives in a later
-		// PlayerLootReceived — park the kill and let that event credit it.
-		if (rules.has("pvpLoot")) {
-			var now = now();
-			synchronized (pendingMinLootKillAt) {
-				pendingMinLootKillAt.values().removeIf(t -> (now - t) > PVP_MINLOOT_LOOT_WINDOW_MS);
-				pendingMinLootKillAt.put(victim, now);
-			}
-		}
-	}
-
-	/**
-	 * Credits PvP min-loot tiles from a kill's loot — called from onPlayerLootReceived. If we parked a
-	 * kill on this victim at death (pendingMinLootKillAt), the loot is priced once and every tile whose
-	 * floor it reaches is credited; the parked entry is consumed so one kill credits at most once per tile.
-	 */
-	void creditPvpMinLootKillTiles(String victimName, Collection<ItemStack> items) {
-		if (!rules.has("pvpLoot") || empty(items) || victimName == null) return;
-		var victim = Rsn.normalize(victimName);
-		var now = now();
-		synchronized (pendingMinLootKillAt) {
-			var parkedAt = pendingMinLootKillAt.remove(victim); // consume — one credit per parked kill
-			if (parkedAt == null || (now - parkedAt) > PVP_MINLOOT_LOOT_WINDOW_MS) return;
-		}
-		if (trackingGateReason() != null) return;
-		emit(rules.event("pvpLoot", RuleEngine.named(victim), haulValue(items), null, null, "what", victimName));
-	}
-
-	String buildKillMessage(String killer, String victim) {
-		var who = empty(killer) ? "Someone" : killer;
-		return "**" + who + "** just killed **" + victim + "**!";
 	}
 
 	/**
@@ -6671,7 +6487,7 @@ public class SoulrendPlugin extends Plugin {
 	 * True when this loot event is an opened loot key ("Loot Chest"), not a
 	 * regular drop.
 	 */
-	boolean isLootKeyEvent(String source) {
+	static boolean isLootKeyEvent(String source) {
 		if (source == null) return false;
 		var s = source.toLowerCase();
 		return s.equals("loot chest") || s.contains("loot key");
@@ -7486,7 +7302,7 @@ public class SoulrendPlugin extends Plugin {
 		if (String.valueOf(CURRENT_DEFAULTS_VERSION).equals(cfgGet(CFG_DEFAULTS_VERSION))) return;
 		var o = new JsonObject();
 		for (var k : new String[]{"notifyRareDrops", "rareDropMinValue", "rareDropMinRarity", "lootKeyMinValue", "notifyPets",
-			"notifyDeaths", "deathMessage", "notifyPvpKills", "notifyClogSlots", "notifyLevelUps", "notifyDiaries", "caMinTaskTier",
+			"notifyDeaths", "deathMessage", "notifyClogSlots", "notifyLevelUps", "notifyDiaries", "caMinTaskTier",
 			"questAnnounce", CFG_DEFAULTS_VERSION}) {
 			var val = cfgGet(k);
 			if (val != null) o.addProperty(k, val);

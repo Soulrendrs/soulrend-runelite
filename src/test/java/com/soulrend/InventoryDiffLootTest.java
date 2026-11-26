@@ -46,6 +46,18 @@ public class InventoryDiffLootTest
 	}
 
 	@Test
+	public void playerLootAndLootKeysNeverBecomeBingoDrops()
+	{
+		assertTrue(SoulrendPlugin.isExcludedPlayerLoot(LootRecordType.PLAYER, "Other player"));
+		assertTrue(SoulrendPlugin.isExcludedPlayerLoot(LootRecordType.EVENT, "Loot Chest"));
+		assertTrue(SoulrendPlugin.isExcludedPlayerLoot(LootRecordType.EVENT, "Wilderness loot key"));
+		assertFalse(SoulrendPlugin.isExcludedPlayerLoot(LootRecordType.NPC, "Zulrah"));
+		assertFalse(SoulrendPlugin.isExcludedPlayerLoot(LootRecordType.EVENT, "Tombs of Amascut"));
+		assertFalse(SoulrendPlugin.isExcludedPlayerLoot(LootRecordType.EVENT, "Larran's big chest"));
+		assertFalse(SoulrendPlugin.isExcludedPlayerLoot(LootRecordType.PICKPOCKET, "Master Farmer"));
+	}
+
+	@Test
 	public void anUnequippedItemIsDropped()
 	{
 		List<ItemStack> kept = SoulrendPlugin.withoutWorn(
