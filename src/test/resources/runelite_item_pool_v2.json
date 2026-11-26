@@ -1,0 +1,532 @@
+[
+  {
+    "label": "repeated team sets",
+    "rule": {
+      "kind": "item_pool",
+      "strategy": "sets",
+      "scope": "team",
+      "target": 2,
+      "items": [
+        {
+          "item_id": 100,
+          "quantity": 2
+        },
+        {
+          "item_id": 200,
+          "quantity": 1
+        }
+      ]
+    },
+    "valid": true,
+    "counts": {
+      "100": 3,
+      "200": 1,
+      "999": 5
+    },
+    "source": "npc",
+    "matched": {
+      "100": 3,
+      "200": 1
+    }
+  },
+  {
+    "label": "solo alternative quantity",
+    "rule": {
+      "kind": "item_pool",
+      "strategy": "quantity",
+      "scope": "solo",
+      "target": 5,
+      "items": [
+        {
+          "item_id": 100,
+          "quantity": 1
+        },
+        {
+          "item_id": 200,
+          "quantity": 1
+        }
+      ]
+    },
+    "valid": true,
+    "counts": {
+      "100": 2,
+      "200": 4
+    },
+    "source": "event",
+    "matched": {
+      "100": 2,
+      "200": 4
+    }
+  },
+  {
+    "label": "distinct pool",
+    "rule": {
+      "kind": "item_pool",
+      "strategy": "distinct",
+      "scope": "team",
+      "target": 2,
+      "items": [
+        {
+          "item_id": 100,
+          "quantity": 1
+        },
+        {
+          "item_id": 200,
+          "quantity": 1
+        }
+      ]
+    },
+    "valid": true,
+    "counts": {
+      "100": 50
+    },
+    "source": "npc",
+    "matched": {
+      "100": 50
+    }
+  },
+  {
+    "label": "reject player loot",
+    "rule": {
+      "kind": "item_pool",
+      "strategy": "sets",
+      "scope": "team",
+      "target": 2,
+      "items": [
+        {
+          "item_id": 100,
+          "quantity": 2
+        },
+        {
+          "item_id": 200,
+          "quantity": 1
+        }
+      ]
+    },
+    "valid": true,
+    "counts": {
+      "100": 2
+    },
+    "source": "pvp",
+    "matched": {}
+  },
+  {
+    "label": "reject pickpocket",
+    "rule": {
+      "kind": "item_pool",
+      "strategy": "sets",
+      "scope": "team",
+      "target": 2,
+      "items": [
+        {
+          "item_id": 100,
+          "quantity": 2
+        },
+        {
+          "item_id": 200,
+          "quantity": 1
+        }
+      ]
+    },
+    "valid": true,
+    "counts": {
+      "100": 2
+    },
+    "source": "pickpocket",
+    "matched": {}
+  },
+  {
+    "label": "empty matching pool",
+    "rule": {
+      "kind": "item_pool",
+      "strategy": "sets",
+      "scope": "team",
+      "target": 2,
+      "items": [
+        {
+          "item_id": 100,
+          "quantity": 2
+        },
+        {
+          "item_id": 200,
+          "quantity": 1
+        }
+      ]
+    },
+    "valid": true,
+    "counts": {
+      "999": 2
+    },
+    "source": "npc",
+    "matched": {}
+  },
+  {
+    "label": "wrong kind",
+    "rule": {
+      "kind": "drop",
+      "strategy": "sets",
+      "scope": "team",
+      "target": 2,
+      "items": [
+        {
+          "item_id": 100,
+          "quantity": 2
+        },
+        {
+          "item_id": 200,
+          "quantity": 1
+        }
+      ]
+    },
+    "valid": false
+  },
+  {
+    "label": "unknown strategy",
+    "rule": {
+      "kind": "item_pool",
+      "strategy": "value",
+      "scope": "team",
+      "target": 2,
+      "items": [
+        {
+          "item_id": 100,
+          "quantity": 2
+        },
+        {
+          "item_id": 200,
+          "quantity": 1
+        }
+      ]
+    },
+    "valid": false
+  },
+  {
+    "label": "unknown scope",
+    "rule": {
+      "kind": "item_pool",
+      "strategy": "sets",
+      "scope": "anyone",
+      "target": 2,
+      "items": [
+        {
+          "item_id": 100,
+          "quantity": 2
+        },
+        {
+          "item_id": 200,
+          "quantity": 1
+        }
+      ]
+    },
+    "valid": false
+  },
+  {
+    "label": "zero target",
+    "rule": {
+      "kind": "item_pool",
+      "strategy": "sets",
+      "scope": "team",
+      "target": 0,
+      "items": [
+        {
+          "item_id": 100,
+          "quantity": 2
+        },
+        {
+          "item_id": 200,
+          "quantity": 1
+        }
+      ]
+    },
+    "valid": false
+  },
+  {
+    "label": "overflow target",
+    "rule": {
+      "kind": "item_pool",
+      "strategy": "sets",
+      "scope": "team",
+      "target": 2147483648,
+      "items": [
+        {
+          "item_id": 100,
+          "quantity": 2
+        },
+        {
+          "item_id": 200,
+          "quantity": 1
+        }
+      ]
+    },
+    "valid": false
+  },
+  {
+    "label": "bool target",
+    "rule": {
+      "kind": "item_pool",
+      "strategy": "sets",
+      "scope": "team",
+      "target": true,
+      "items": [
+        {
+          "item_id": 100,
+          "quantity": 2
+        },
+        {
+          "item_id": 200,
+          "quantity": 1
+        }
+      ]
+    },
+    "valid": false
+  },
+  {
+    "label": "fractional target",
+    "rule": {
+      "kind": "item_pool",
+      "strategy": "sets",
+      "scope": "team",
+      "target": 1.5,
+      "items": [
+        {
+          "item_id": 100,
+          "quantity": 2
+        },
+        {
+          "item_id": 200,
+          "quantity": 1
+        }
+      ]
+    },
+    "valid": false
+  },
+  {
+    "label": "string target",
+    "rule": {
+      "kind": "item_pool",
+      "strategy": "sets",
+      "scope": "team",
+      "target": "2",
+      "items": [
+        {
+          "item_id": 100,
+          "quantity": 2
+        },
+        {
+          "item_id": 200,
+          "quantity": 1
+        }
+      ]
+    },
+    "valid": false
+  },
+  {
+    "label": "empty items",
+    "rule": {
+      "kind": "item_pool",
+      "strategy": "sets",
+      "scope": "team",
+      "target": 2,
+      "items": []
+    },
+    "valid": false
+  },
+  {
+    "label": "duplicate ID",
+    "rule": {
+      "kind": "item_pool",
+      "strategy": "sets",
+      "scope": "team",
+      "target": 2,
+      "items": [
+        {
+          "item_id": 100,
+          "quantity": 1
+        },
+        {
+          "item_id": 100,
+          "quantity": 1
+        }
+      ]
+    },
+    "valid": false
+  },
+  {
+    "label": "noted ID",
+    "rule": {
+      "kind": "item_pool",
+      "strategy": "sets",
+      "scope": "team",
+      "target": 2,
+      "items": [
+        {
+          "item_id": 101,
+          "quantity": 1
+        }
+      ]
+    },
+    "valid": false
+  },
+  {
+    "label": "unknown catalog ID",
+    "rule": {
+      "kind": "item_pool",
+      "strategy": "sets",
+      "scope": "team",
+      "target": 2,
+      "items": [
+        {
+          "item_id": 999,
+          "quantity": 1
+        }
+      ]
+    },
+    "valid": false
+  },
+  {
+    "label": "invalid item count",
+    "rule": {
+      "kind": "item_pool",
+      "strategy": "sets",
+      "scope": "team",
+      "target": 2,
+      "items": [
+        {
+          "item_id": 100,
+          "quantity": 0
+        }
+      ]
+    },
+    "valid": false
+  },
+  {
+    "label": "alternative weights",
+    "rule": {
+      "kind": "item_pool",
+      "strategy": "quantity",
+      "scope": "team",
+      "target": 2,
+      "items": [
+        {
+          "item_id": 100,
+          "quantity": 2
+        },
+        {
+          "item_id": 200,
+          "quantity": 1
+        }
+      ]
+    },
+    "valid": false
+  },
+  {
+    "label": "distinct impossible",
+    "rule": {
+      "kind": "item_pool",
+      "strategy": "distinct",
+      "scope": "team",
+      "target": 3,
+      "items": [
+        {
+          "item_id": 100,
+          "quantity": 1
+        },
+        {
+          "item_id": 200,
+          "quantity": 1
+        }
+      ]
+    },
+    "valid": false
+  },
+  {
+    "label": "extra fields",
+    "rule": {
+      "kind": "item_pool",
+      "strategy": "sets",
+      "scope": "team",
+      "target": 2,
+      "items": [
+        {
+          "item_id": 100,
+          "quantity": 2
+        },
+        {
+          "item_id": 200,
+          "quantity": 1
+        }
+      ],
+      "source": "pvp"
+    },
+    "valid": false
+  },
+  {
+    "label": "extra line fields",
+    "rule": {
+      "kind": "item_pool",
+      "strategy": "sets",
+      "scope": "team",
+      "target": 2,
+      "items": [
+        {
+          "item_id": 100,
+          "quantity": 1,
+          "price": 50
+        }
+      ]
+    },
+    "valid": false
+  },
+  {
+    "label": "missing scope",
+    "rule": {
+      "kind": "item_pool",
+      "strategy": "sets",
+      "target": 2,
+      "items": [
+        {
+          "item_id": 100,
+          "quantity": 2
+        },
+        {
+          "item_id": 200,
+          "quantity": 1
+        }
+      ]
+    },
+    "valid": false
+  },
+  {
+    "label": "null scope",
+    "rule": {
+      "kind": "item_pool",
+      "strategy": "sets",
+      "scope": null,
+      "target": 2,
+      "items": [
+        {
+          "item_id": 100,
+          "quantity": 2
+        },
+        {
+          "item_id": 200,
+          "quantity": 1
+        }
+      ]
+    },
+    "valid": false
+  },
+  {
+    "label": "wrong items type",
+    "rule": {
+      "kind": "item_pool",
+      "strategy": "sets",
+      "scope": "team",
+      "target": 2,
+      "items": {
+        "100": 1
+      }
+    },
+    "valid": false
+  }
+]
