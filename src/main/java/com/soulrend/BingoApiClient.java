@@ -684,6 +684,7 @@ public class BingoApiClient {
 	 * names isn't on the site this plugin already talks to, which it never dials anywhere else.
 	 */
 	PushTicket fetchPushTicket(boolean feed) {
+		if (productionMode()) return null; // No reviewed production WebSocket protocol.
 		// Site board updates, feed rows and flair deltas use the same socket.
 		var path = "/api/plugin/push/ticket?flair=1&rows=1" + (feed ? "&feed=1" : "");
 		var t = isConfigured() ? getOrNull(authedRequest(clanUrl(path)).get(), PushTicket.class) : null;
@@ -700,6 +701,8 @@ public class BingoApiClient {
 	final OkHttpClient pushClient;
 
 	WebSocket openPush(PushTicket ticket, WebSocketListener listener) {
+		// OkHttp WebSocket handshakes can bypass ordinary HTTP route interceptors.
+		if (productionMode()) throw new IllegalStateException("Legacy push is disabled on Soulrend");
 		var url = ticket == null || ticket.url == null ? null : HttpUrl.parse(ticket.url.replaceFirst("^ws", "http"));
 		if (!allowedOrigin(url, HttpUrl.parse(site()))) throw new IllegalArgumentException("Unexpected push origin");
 		return pushClient.newWebSocket(plainRequest(ticket.url).header("Authorization", "Bearer " + ticket.ticket).build(), listener);

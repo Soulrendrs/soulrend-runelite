@@ -5117,6 +5117,10 @@ public class SoulrendPlugin extends Plugin {
 
 	void syncPush() {
 		var p = pushSocket;
+		if (BingoApiClient.productionMode()) {
+			if (p != null) p.scope(null);
+			return; // Dedicated v1 polling remains authoritative.
+		}
 		var cfg = pluginConfig;
 		int eventId = cfg == null ? 0 : cfg.event != null ? cfg.event.id : cfg.homeBoard != null ? cfg.homeBoard.eventId : 0;
 		var feed = config.chatFeed();
