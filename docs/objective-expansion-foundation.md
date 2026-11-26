@@ -52,3 +52,8 @@ parsing remain for supported evidence and future reviewed activities.
 Removed the retired clan-roster synchronization entry points, hidden configuration,
 roster-readability polling, dormant header button and sidebar action. General
 team management, active-account identity and own clan membership are unaffected.
+
+Removed personal-best import from RuneLite's profile configuration and upload
+of personal-best records. Kept the pure time parsers and existing parser tests
+for future event-scoped timed-clear work. Historical local PB keys are ignored;
+no stored records are deleted. The character-switch highlight reset remains.

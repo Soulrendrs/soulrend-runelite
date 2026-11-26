@@ -29,7 +29,7 @@ public interface SoulrendConfig extends Config {
 
 	@ConfigSection(
 		name = "Profile sync",
-		description = "Send best times to your Soulrend profile.",
+		description = "Optional sharing of your own event highlights.",
 		position = 9,
 		closedByDefault = true
 	)
@@ -288,30 +288,6 @@ public interface SoulrendConfig extends Config {
 	}
 
 	// ---- Profile sync ----
-
-	@ConfigItem(
-		keyName = "syncPersonalBests",
-		name = "Sync personal bests",
-		description = "Send your best boss and raid times as you set them.",
-		warning = "This feature submits your IP address to a 3rd-party server not controlled or verified by RuneLite developers",
-		position = 3,
-		section = "profileSection"
-	)
-	default boolean syncPersonalBests() {
-		return false;
-	}
-
-	@ConfigItem(
-		keyName = "importRuneLitePbs",
-		name = "Import existing bests once",
-		description = "Once per account, copy the bests RuneLite already recorded locally.",
-		warning = "This feature submits your IP address to a 3rd-party server not controlled or verified by RuneLite developers",
-		position = 5,
-		section = "profileSection"
-	)
-	default boolean importRuneLitePbs() {
-		return false;
-	}
 
 	@ConfigItem(
 		keyName = "shareMoments",
