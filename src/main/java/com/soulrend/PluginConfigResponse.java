@@ -226,7 +226,6 @@ public class PluginConfigResponse {
 	// varbit, so there's nothing to map — and only for the ones the client can actually answer
 	// (see ActivityStats).
 	List<String> trackedActivityKeys;
-	List<RosterEntry> pvpRoster;           // event roster (RSN -> teamId) for 'team:other' matching; empty unless a pvp tile exists
 	List<CompletedTile> completedTiles;   // team-level tile completions (all tile types)
 	List<TrackedCombo> trackedCombos;     // combo tiles: their parts ride the lists above (partOf)
 
@@ -284,7 +283,7 @@ public class PluginConfigResponse {
 
 	/** What this person's posts do, resolved by the site (lib/notifyPrefs): their /settings choices AND the clan's channels. */
 	static class Me {
-		boolean drops, pets, deaths, pvp, clog, levels, levelsClan, diaries;
+		boolean drops, pets, deaths, clog, levels, levelsClan, diaries;
 		/** Screenshot gates: the site judges the post itself. */
 		long dropMin, keyMin;
 		/** CombatAchievementTier names that post; quest difficulties that post ("*" = all). */
@@ -392,12 +391,6 @@ public class PluginConfigResponse {
 		int tileId;
 		String label;
 		boolean completed;
-	}
-
-	// One event participant, for 'team:other' matching. Only players with a team are included.
-	static class RosterEntry {
-		String name;    // RSN as enrolled on the site
-		int teamId;
 	}
 
 	static class TileCount {

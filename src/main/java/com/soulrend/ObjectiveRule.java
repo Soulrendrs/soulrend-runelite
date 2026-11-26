@@ -8,7 +8,7 @@ import java.util.Set;
  * Extend only with reviewed, fixed observation types; server rules are data, not code.
  */
 class ObjectiveRule {
-    private static final Set<String> LOOT_SOURCES = Set.of("npc", "event", "pvp", "pickpocket");
+    private static final Set<String> LOOT_SOURCES = Set.of("npc", "event", "pickpocket");
     static final Set<String> GATHERING_SKILLS = Set.of("fishing", "mining", "woodcutting", "cooking", "farming", "hunter");
 
     int tile;
