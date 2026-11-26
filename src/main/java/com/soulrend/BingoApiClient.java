@@ -385,7 +385,7 @@ public class BingoApiClient {
     }
     static final class ConfirmedTile {
         int id;
-        String name, contributor, icon_path, skill;
+        String name, contributor, icon_path, skill, unit;
         int item_id;
         Long value, target;
         boolean self;
@@ -405,7 +405,7 @@ public class BingoApiClient {
         String team;
     }
     static final class BoardTile {
-        String name, status, value, target, scope, objective_type, metric, description, icon_path;
+        String name, status, value, target, scope, objective_type, metric, description, icon_path, unit;
         int item_id;
         boolean allow_repeat;
         Long value_amount, target_amount;
@@ -413,8 +413,12 @@ public class BingoApiClient {
         String label() {
             if ("hidden".equals(status)) return "Hidden tile";
             if ("locked".equals(status)) return "Locked tile";
-            return name + " · " + status + (target == null ? "" : " · " + value + "/" + target + " " + scope);
+            return name + " · " + status + (target == null ? "" : " · " + value + "/" + target + unitSuffix(unit) + " " + scope);
         }
+    }
+    static String unitSuffix(String unit) {
+        return unit != null && java.util.Set.of("sets", "unique items", "items", "GP", "kills", "XP", "KC").contains(unit)
+            ? " " + unit : "";
     }
     static boolean isBingoIconPath(String path) {
         return path != null && (path.matches("/static/(?:runelite-items|wom-metrics)/[a-z0-9_]+\\.png")
