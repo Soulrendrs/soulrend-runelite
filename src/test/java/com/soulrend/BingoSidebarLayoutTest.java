@@ -68,6 +68,35 @@ public class BingoSidebarLayoutTest {
         });
     }
 
+    @Test
+    public void rendersManualAndMixedQuantityPayloads() throws Exception {
+        SwingUtilities.invokeAndWait(() -> {
+            for (String type : new String[]{"manual", "runelite"}) {
+                var tile = new com.google.gson.Gson().fromJson(
+                    "{\"status\":\"open\",\"credited\":false,\"objective_type\":\"" + type
+                        + "\",\"scope\":\"team\",\"value\":\"2\",\"target\":\"5\",\"value_amount\":2,\"target_amount\":5}",
+                    BingoApiClient.BoardTile.class);
+                var card = SoulrendSidebarPanel.bingoCard(Color.GREEN);
+                assertEquals("In progress", SoulrendSidebarPanel.bingoStatus(tile));
+                SoulrendSidebarPanel.addBingoProgress(card, tile,
+                    SoulrendSidebarPanel.bingoStatus(tile), "Team", Color.GREEN);
+                assertEquals(3, card.getComponentCount());
+                assertTrue(((JLabel) card.getComponent(1)).getText().contains("2 / 5"));
+                var meter = (javax.swing.JProgressBar) card.getComponent(2);
+                assertEquals(40, meter.getValue());
+                card.setSize(200, card.getPreferredSize().height);
+                layout(card);
+                assertTrue(meter.getHeight() > 0);
+                assertTrue(meter.getY() + meter.getHeight() <= card.getHeight());
+                tile.credited = true;
+                tile.status = "pending";
+                assertEquals("Pending approval", SoulrendSidebarPanel.bingoStatus(tile));
+                tile.status = "approved";
+                assertEquals("Completed", SoulrendSidebarPanel.bingoStatus(tile));
+            }
+        });
+    }
+
     private static void layout(Container container) {
         container.doLayout();
         for (var child : container.getComponents()) {
