@@ -760,21 +760,7 @@ public class SoulrendPlugin extends Plugin {
 	static final String CFG_COUNTER_MINUTES = "recapCounterMinutes";
 	static final String CFG_COUNTER_CATASKS = "recapCounterCaTasks";
 
-	// Delivered personal bests are stored per character.
-	static final String CFG_PB_STATE = "pbSyncState";
-	static final String CFG_PB_IMPORTED = "pbImportedFromRuneLite";
-	/** RuneLite's own chat-commands store, read once to seed a profile (see importRuneLitePersonalBests). */
-	static final String RUNELITE_PB_GROUP = "personalbest";
-	/** Exact team sizes RuneLite files raids under ("chambers of xeric 3 players"). */
-	static final int MAX_PB_TEAM_SIZE = 24;
-	/** Large teams are recorded as a RANGE, not a count — the buckets the raid chat itself prints. */
-	static final String[] PB_TEAM_BUCKETS = {
-		"5+ players", "10+ players", "11-15 players", "16-23 players", "24+ players",
-		"25+ players", "50+ players", "100+ players",
-	};
-	final SyncBackoff pbBackoff = new SyncBackoff();
-	final PersonalBests personalBests = new PersonalBests();
-	/** The account the personal-best state belongs to, so a character switch reloads rather than merges. */
+	// The account owning the local event highlight buffer.
 	String profileSyncRsn;
 	// The server allowlist lowercased, rebuilt with the drop index.
 	volatile Set<String> alwaysNotifyLower = emptySet();
@@ -1116,8 +1102,6 @@ public class SoulrendPlugin extends Plugin {
 			safely("retryPendingSubmissions", this::retryPendingSubmissions);
 
 			safely("pruneDedupMap", this::pruneDedupMap);
-			safely("importRuneLitePbs", this::retryPersonalBestImport);
-			safely("flushPersonalBests", this::flushPersonalBests);
 			safely("pushAccountProgress", this::pushAccountProgress);
 			safely("pushGameClan", this::pushGameClan);
 			safely("pushGuestChannel", this::pushGuestChannel);
@@ -1592,7 +1576,7 @@ public class SoulrendPlugin extends Plugin {
 			CFG_COUNTER_BIGHIT, CFG_COUNTER_MINUTES, CFG_COUNTER_CATASKS, "settingsMovedNoted");
 	// Per-RSN state keys are stored as "<prefix>:<rsn>".
 	static final List<String> INTERNAL_STATE_PREFIXES = List.of(
-			"vestigeRolls:", CFG_PB_STATE + ":", CFG_PB_IMPORTED + ":");
+			"vestigeRolls:", "pbSyncState:", "pbImportedFromRuneLite:");
 
 	static boolean isInternalStateKey(String key) {
 		return key != null && (INTERNAL_STATE_KEYS.contains(key) || INTERNAL_STATE_PREFIXES.stream().anyMatch(key::startsWith));
@@ -2957,10 +2941,6 @@ public class SoulrendPlugin extends Plugin {
 		// Collection-log unlocks — the reliable signal for awarded prestige items (Infernal cape,
 		// Dizana's quiver, …) that don't fire a loot event. Strip any styling first — both forms,
 		// or an @ach_comp@ ends up part of a task name (see CHAT_TAG) — `plain` above.
-		// Personal bests, captured whether or not an event is running — a best time is a profile
-		// fact, not an event one. Costs one indexOf on lines that don't mention a personal best,
-		// which is all of them bar a handful a session.
-		if (config.syncPersonalBests()) personalBests.onChatLine(plain, now());
 		// Track boss/raid kill counts so a rare-drop post can show the KC the drop landed on.
 		// The Jagex kill-count line is also the reliable kill signal for bosses whose loot comes
 		// from corpse interaction rather than a normal on-death drop (Maggot King, Araxxor, …),
@@ -2970,9 +2950,6 @@ public class SoulrendPlugin extends Plugin {
 			try {
 				var kcName = kcMatcher.group("name").trim();
 				var kcKey = kcName.toLowerCase();
-				// Name the activity for personal-best correlation. Free — this line is already
-				// parsed for kill crediting, so PB capture adds no regex to the chat hot path.
-				if (config.syncPersonalBests()) personalBests.onActivitySeen(kcName, now());
 				var firstSeen = !killCounts.containsKey(kcKey);
 				int kc = Integer.parseInt(kcMatcher.group("count").replace(",", ""));
 				killCounts.put(kcKey, kc);
@@ -4721,7 +4698,6 @@ public class SoulrendPlugin extends Plugin {
 	 */
 	void onSiteRecovered() {
 		log.info("Site back");
-		pbBackoff.reset();
 		proofBackoff.reset();
 		kcPush.kick();
 		skillXpPush.kick();
@@ -4734,7 +4710,6 @@ public class SoulrendPlugin extends Plugin {
 		if (outbox != null) outbox.kick();
 		submit(() -> {
 			safely("retryPendingSubmissions", this::retryPendingSubmissions);
-			safely("flushPersonalBests", this::flushPersonalBests);
 		});
 	}
 
@@ -9087,99 +9062,15 @@ public class SoulrendPlugin extends Plugin {
 
 
 	/**
-	 * Point the profile-sync state at the account that just logged in.
-	 *
-	 * <p>State is per-RSN, so switching characters swaps the saved bests. A no-op
-	 * when the same account logs back in, which is the common case.
+	 * Reset the local event highlight buffer when the active character changes.
 	 */
 	void loadProfileSyncState(String rsn) {
 		var key = rsn == null ? "" : rsn.trim().toLowerCase(ROOT);
 		if (key.isEmpty() || key.equals(profileSyncRsn)) return;
 		profileSyncRsn = key;
-		personalBests.reset();
 		// A different character doesn't inherit this one's unsent highlights — the site files them
 		// against whoever the request authenticates as, which would now be the wrong person.
 		moments.reset();
-		personalBests.restoreState(cfgGet(accountKey(CFG_PB_STATE, key)));
-		importRuneLitePersonalBests(key);
-	}
-
-	/**
-	 * Copy the personal bests RuneLite's own chat-commands plugin has already recorded, once.
-	 *
-	 * <p>Local config only -- the same store the player's own client wrote, on the same machine, for
-	 * the account they're logged into. Nothing is read about anyone else. Without it a profile
-	 * starts empty and fills in over months; with it, a player who has been playing for years sees
-	 * their real times the first time they open their clan profile.
-	 *
-	 * <p>Runs once per account per activity list (a flag in our own config), and does nothing when
-	 * chat-commands has never run -- then the live capture builds the set from the next kill onward.
-	 * The flag stores a signature of the names we asked for, so when the site adds an activity --
-	 * the awakened DT2 bosses, say -- everyone re-probes once for the new names. Re-running is safe:
-	 * a seeded time only ever replaces a slower one.
-	 */
-	void importRuneLitePersonalBests(String rsnKey) {
-		if (!config.importRuneLitePbs() || !config.syncPersonalBests()) return;
-		var profile = configManager.getRSProfileKey();
-		if (empty(profile)) return; // No RS profile yet -- try again next login rather than marking it done.
-		// The names to ask for. Without them there is nothing to probe, so we leave the flag unset
-		// and try again once the site's config has landed.
-		var cfg = pluginConfig;
-		var activities = cfg != null ? cfg.pbActivities : null;
-		if (empty(activities)) return;
-		// String.hashCode is specified, so the same list gives the same signature on every client
-		// and every release. An older flag ("1", or an earlier list) simply doesn't match.
-		var signature = Integer.toString(activities.hashCode());
-		var done = cfgGet(accountKey(CFG_PB_IMPORTED, rsnKey));
-		if (signature.equals(done)) return;
-
-		// ASK, don't list. RuneLite stores these under the RS-profile scope, and its only key-listing
-		// API reads the main profile — so the obvious loop over getConfigurationKeys() silently found
-		// nothing at all, whatever prefix it was given. getRSProfileConfiguration reads the right
-		// store, one key at a time, which is why the names have to come from somewhere.
-		Map<String, Integer> imported = new HashMap<>();
-		for (var base : activities) {
-			if (empty(base)) continue;
-			probeRuneLitePb(base, imported);
-			// Every scale RuneLite files a raid under. Its own pattern is
-			// "(?<teamsize>\\d+(?:\\+|-\\d+)? players?|Solo)", so a solo run is the WORD solo — not
-			// "1 players" — and a big team is a bucket rather than an exact count. Probing only
-			// "N players" therefore missed every solo raid time anyone had.
-			probeRuneLitePb(base + " solo", imported);
-			for (int size = 1; size <= MAX_PB_TEAM_SIZE; size++) probeRuneLitePb(base + " " + size + " players", imported);
-			for (var bucket : PB_TEAM_BUCKETS) probeRuneLitePb(base + " " + bucket, imported);
-		}
-
-		int adopted = personalBests.seed(imported, now());
-		cfgSet(accountKey(CFG_PB_IMPORTED, rsnKey), signature);
-		log.info("Imported {} PB(s) ({} probed)", adopted, imported.size());
-		if (adopted > 0) sendChatMessage("Imported " + adopted + " personal best" + (adopted == 1 ? "" : "s")
-				+ " from RuneLite.");
-	}
-
-	/**
-	 * Try the personal-best import again on the periodic tick.
-	 *
-	 * <p>It needs three things that don't arrive together: an account (login), an RS profile key
-	 * (login), and the site's activity list (the first config fetch). Running it only at login meant
-	 * the config usually hadn't landed yet and the import quietly did nothing. The once-per-account
-	 * flag makes every call after a successful one free.
-	 */
-	void retryPersonalBestImport() {
-		var rsn = profileSyncRsn;
-		if (!empty(rsn)) importRuneLitePersonalBests(rsn);
-	}
-
-	/** Read one stored best, if RuneLite has it for this account. Times are seconds; ours centis. */
-	void probeRuneLitePb(String activity, Map<String, Integer> into) {
-		var raw = configManager.getRSProfileConfiguration(RUNELITE_PB_GROUP, activity);
-		if (raw == null || raw.trim().isEmpty()) return;
-		try {
-			int centis = (int) Math.round(Double.parseDouble(raw.trim()) * 100.0);
-			if (centis > 0) into.put(activity, centis);
-		} catch (NumberFormatException e) {
-			// Not a time -- skip the key rather than the import.
-		}
 	}
 
 	/**
@@ -9205,33 +9096,6 @@ public class SoulrendPlugin extends Plugin {
 		return null;
 	}
 
-	/** Push settled personal bests from the background scheduler. */
-	void flushPersonalBests() {
-		if (!config.syncPersonalBests() || !apiClient.isConfigured() || profileSyncRsn == null
-				|| !siteKnown()) return;
-		var now = now();
-		if (!personalBests.isDue(now) || !pbBackoff.ready(now)) return;
-		var batch = personalBests.nextBatch();
-		// Bests ride the same limiter; a rate-limited batch stays dirty and goes up when it clears.
-		if (pushBatch("Personal bests", pbBackoff, now, () -> {
-			apiClient.submitPersonalBests(batch);
-			return batch;
-		}, ms -> pbBackoff.onFailure(now()), m -> personalBests.onSent(batch), m -> {
-		}) == null) return;
-		personalBests.onSent(batch);
-		cfgSet(accountKey(CFG_PB_STATE, profileSyncRsn),
-				personalBests.serializeState());
-	}
-
-	/**
-	 * The clan channel loaded (or changed) — the moment the in-game roster becomes readable.
-	 *
-	 * <p>Rosters used to drift until an admin remembered to press "Sync clan roster": someone joins,
-	 * the site doesn't know, and their drops land as a guest. The data is right here at login, so
-	 * take it. Admin-only (the site refuses anyone else's push anyway), at most once every half hour
-	 * per session, and silent — an automatic sync that announced itself in chat every login would be
-	 * worse than the drift.
-	 */
 	/** The guest channel last reported for the chat feed's guest bridge, and when. */
 	volatile String lastGuestChannel;
 	volatile long lastGuestChannelAt;

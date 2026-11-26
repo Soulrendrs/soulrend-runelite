@@ -1828,23 +1828,6 @@ public class BingoApiClient {
 	}
 
 	/**
-	 * POST /api/plugin/pb — the account's best times, in centiseconds.
-	 *
-	 * <p>Centiseconds because the game separates runs by hundredths; whole seconds would tie times
-	 * the game itself doesn't. The server keeps the FASTEST of stored and pushed, so a retry, a
-	 * stale client or an out-of-order request can never raise somebody's record.
-	 */
-	void submitPersonalBests(Map<String, Integer> bests) throws IOException {
-		if (bests == null || bests.isEmpty()) return;
-		Map<String, Integer> valid = new LinkedHashMap<>();
-		bests.forEach((k, v) -> {
-			if (k != null && !k.isEmpty() && v != null && v > 0) valid.put(k, v);
-		});
-		if (valid.isEmpty()) return;
-		postJson("/api/plugin/pb", obj("bests", pairs(valid, "activity", "centis")), "Personal best push failed", true);
-	}
-
-	/**
 	 * POST /api/plugin/moments — the clan's highlight feed: pets, uniques, big hauls and deaths.
 	 *
 	 * <p>Reports what the client SAW; the site decides what it meant. It knows which competition
