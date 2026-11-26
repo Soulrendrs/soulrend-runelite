@@ -292,7 +292,8 @@ final class BingoCompletionMonitor {
     private void showProgress(EventSummary event, ProgressTile tile) {
         if (!permits(tile.self) || !tile.self && "solo".equals(tile.scope)) return;
         var progress = String.format(Locale.ROOT, "%,d / %,d %s", tile.value, tile.target,
-            "kills".equals(tile.unit) ? "kills" : "items");
+            java.util.Set.of("kills", "items", "sets", "unique items", "GP").contains(tile.unit == null ? "" : tile.unit)
+                ? tile.unit : "items");
         var contributor = tile.contributor == null ? "Progress recorded" : "Latest: " + tile.contributor;
         if (tile.quantity > 0) contributor += "  +" + tile.quantity;
         if ("solo".equals(tile.scope)) contributor += "  ·  Best solo";

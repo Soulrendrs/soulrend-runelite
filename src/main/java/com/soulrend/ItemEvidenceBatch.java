@@ -5,6 +5,7 @@ import com.google.gson.JsonObject;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.IntUnaryOperator;
 
@@ -19,6 +20,11 @@ final class ItemEvidenceBatch {
      */
     static JsonObject prepare(UUID captureId, ItemPoolContract pool, String source,
                               Iterable<int[]> rawStacks, IntUnaryOperator resolveAlias) {
+        return prepare(captureId, pool.requirements.keySet(), source, rawStacks, resolveAlias);
+    }
+
+    static JsonObject prepare(UUID captureId, Set<Integer> allowed, String source,
+                              Iterable<int[]> rawStacks, IntUnaryOperator resolveAlias) {
         if (!"npc".equals(source) && !"event".equals(source)) return null;
         if (captureId == null || captureId.version() != 4 || captureId.variant() != 2)
             throw new IllegalArgumentException("Expected UUIDv4");
@@ -31,11 +37,10 @@ final class ItemEvidenceBatch {
             snapshot.add(stack.clone());
         }
         var canonical = ItemBatchContract.canonicalLoot(snapshot, resolveAlias);
-        var selected = pool.select(canonical, source);
-        if (selected.isEmpty()) return null;
+        if (canonical.keySet().stream().noneMatch(allowed::contains)) return null;
         List<int[]> relevant = new ArrayList<>();
         for (int[] stack : snapshot) {
-            if (selected.containsKey(resolveAlias.applyAsInt(stack[0]))) relevant.add(stack);
+            if (allowed.contains(resolveAlias.applyAsInt(stack[0]))) relevant.add(stack);
         }
         relevant.sort(Comparator.<int[]>comparingInt(s -> s[0]).thenComparingInt(s -> s[1]));
         var lines = new JsonArray();

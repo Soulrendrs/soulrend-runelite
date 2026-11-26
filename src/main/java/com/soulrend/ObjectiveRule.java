@@ -1,5 +1,6 @@
 package com.soulrend;
 
+import com.google.gson.JsonElement;
 import java.util.Map;
 import java.util.Set;
 
@@ -17,6 +18,11 @@ class ObjectiveRule {
     int[] npc_ids;
     String source, task_name, npc_name, objective_name, icon_path;
     boolean allow_repeat;
+    JsonElement strategy, scope, target, items, item_ids;
+
+    boolean isItemBatch() {
+        return "item_pool".equals(kind) || "loot_value".equals(kind);
+    }
 
     boolean matchesNpc(int observedNpcId) {
         if (!"npc_kill".equals(kind) || npc_id == null || observedNpcId <= 0) return false;
