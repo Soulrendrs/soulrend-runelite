@@ -173,12 +173,7 @@ public class SoulrendPlugin extends Plugin {
 	// The startup retries and the 30s loop, cancelled explicitly on shutdown.
 	final List<ScheduledFuture<?>> loopTasks = new ArrayList<>();
 
-	// The in-game Clan Coffer is an absolute coin stack. The tracker converts widget reads into a
-	// baseline or signed transition; the server owns cross-client dedupe and the audited ledger.
-	final ClanCofferTracker clanCofferTracker = new ClanCofferTracker();
 	final ModeLines modeLines = new ModeLines();
-	boolean clanCofferOpen;
-	int clanCofferOpenTicks;
 
 	// Debounce config refresh — prevents spam when multiple config keys change at once
 	ScheduledFuture<?> pendingRefresh;
@@ -1432,7 +1427,7 @@ public class SoulrendPlugin extends Plugin {
 		// Its timers (countdowns, auto-refresh) must not outlive the plugin; the panel is a singleton.
 		if (sidebarPanel != null) invokeLater(sidebarPanel::onDeactivate);
 		bannerSound.shutdown();
-		resetCoffer(false);
+
 		capturing = false;
 		if (sidebarPanel != null) sidebarPanel.cancelSignIn();
 		cancelScheduledTasks();
@@ -1699,11 +1694,6 @@ public class SoulrendPlugin extends Plugin {
 		if ("playerToken".equals(key)) refreshNowAndRepaint();
 		else scheduleRefresh();
 
-		if ("syncClanCoffer".equals(key)) {
-			// Enabling starts with a fresh baseline; changes made while opted out must not be
-			// replayed as one large movement when the setting comes back on.
-			resetCoffer(clanCofferOpen);
-		}
 		// Setup pasted mid-session (the typical first install: enable the plugin while
 		// logged in, then sign in or paste the Account Token): stamp the RSN/account hash and
 		// greet now, since no LOGGED_IN transition will fire to do it. Reset the admin
@@ -1726,7 +1716,6 @@ public class SoulrendPlugin extends Plugin {
 		// The scroll's text child isn't populated yet on the load event — read it next tick,
 		// with a couple of retries in case the text lands late.
 		if (g == InterfaceID.QUESTSCROLL) scheduleQuestScrollRead(3);
-		if (g == InterfaceID.CLANS_STORAGE_MAIN) resetCoffer(true);
 		movesOpened(g);
 	}
 
@@ -1735,7 +1724,6 @@ public class SoulrendPlugin extends Plugin {
 		// Gain tiles: trade/bank items can land the tick their interface closes — keep those
 		// inventory changes suppressed (see onItemContainerChanged).
 		int g = event.getGroupId();
-		if (g == InterfaceID.CLANS_STORAGE_MAIN) resetCoffer(false);
 		if (movedFrom != null && (g == InterfaceID.SHARED_BANK || g == InterfaceID.TRADEMAIN || g == InterfaceID.TRADECONFIRM)) movedTick = client.getTickCount() + 2;
 		for (int id : MOVE_INTERFACES) if (g == id) lastSuppressCloseTick = client.getTickCount();
 	}
@@ -1745,13 +1733,6 @@ public class SoulrendPlugin extends Plugin {
 		InterfaceID.BANKMAIN, InterfaceID.BANK_DEPOSITBOX, InterfaceID.GE_OFFERS, InterfaceID.GE_COLLECT,
 		InterfaceID.TRADEMAIN, InterfaceID.TRADECONFIRM, InterfaceID.SEED_VAULT,
 	};
-
-	/** The coffer was opened or closed (or the setting flipped): start again from a fresh baseline. */
-	void resetCoffer(boolean open) {
-		clanCofferOpen = open;
-		clanCofferOpenTicks = 0;
-		clanCofferTracker.reset();
-	}
 
 	/**
 	 * World hop — re-read whether we're on a seasonal world. Login already stamps it, but hopping
@@ -1841,30 +1822,6 @@ public class SoulrendPlugin extends Plugin {
 
 	}
 
-	/**
-	 * Send this player's own clan-chat coffer line to the site (client thread: reads the clan channel's
-	 * name). Other members' lines are never sent: they'd be crowdsourcing other players' names.
-	 */
-	boolean cofferSyncOn() {
-		return config.syncClanCoffer() && loggedIn() && apiClient.isConfigured();
-	}
-
-	void maybeReportCofferLine(String msg) {
-		if (!cofferSyncOn() || !msg.toLowerCase(ROOT).contains("coffer")) return;
-		var line = stripChatTags(msg);
-		int has = line.indexOf(" has ");
-		if (has <= 0 || !Rsn.same(line.substring(0, has), getLocalPlayerName())) return;
-		var channel = client.getClanChannel();
-		if (pluginConfig == null || channel == null || channel.getName() == null) return;
-		var clanName = channel.getName();
-		submit(() -> {
-			try {
-				apiClient.submitCofferLine(line, clanName);
-			} catch (IOException e) {
-			}
-		});
-	}
-
 	void flushModeLines() {
 		var batch = modeLines.drain(now());
 		if (batch == null || pluginConfig == null || !apiClient.isConfigured() || !config.shareSeasonal() || !execLive()) return;
@@ -1874,34 +1831,6 @@ public class SoulrendPlugin extends Plugin {
 			} catch (IOException e) {
 			}
 		});
-	}
-
-	/** Read the visible coffer after its item widgets have had a few ticks to populate. */
-	void pollClanCoffer() {
-		if (!clanCofferOpen || !cofferSyncOn() || pluginConfig == null || ++clanCofferOpenTicks < 3) return;
-		var balance = readClanCofferBalance();
-		if (balance == null) return;
-		var observation = clanCofferTracker.observe(balance, now());
-		if (observation == null) return;
-		var eventKey = UUID.randomUUID().toString();
-		submit(() -> {
-			try {
-				apiClient.submitClanCoffer(eventKey, observation);
-			} catch (IOException e) {
-				// A later open sends an absolute snapshot, so a lost transition reconciles without
-				// manufacturing an actor. Never block the client thread retrying a money endpoint.
-				log.warn("Coffer sync failed: {}", e.getMessage());
-			}
-		});
-	}
-
-	/** Coin quantity in the Clan Coffer item container; zero is a valid empty coffer. */
-	Integer readClanCofferBalance() {
-		var root = client.getWidget(InterfaceID.ClansStorageMain.ITEMS);
-		if (root == null || root.isHidden()) return null;
-		long[] total = {0};
-		walk(root, w -> total[0] += w.getItemId() == ItemID.COINS ? Math.max(0, w.getItemQuantity()) : 0);
-		return total[0] > Integer.MAX_VALUE ? null : (int) total[0];
 	}
 
 	/** Depth-first over every child set, each widget once. */
@@ -1937,7 +1866,6 @@ public class SoulrendPlugin extends Plugin {
 		flushModeLines();
 		// Keep the roster button current while the clan window is open.
 		if (clanSyncButton != null) clanSyncButton.refresh();
-		pollClanCoffer();
 		updateClanRosterReadable();
 		// Play time for the recap. Counted from ticks rather than wall-clock so it measures time
 		// actually in-game — a client left open on the login screen doesn't earn anyone an award.
@@ -2206,7 +2134,7 @@ public class SoulrendPlugin extends Plugin {
 			// Membership is per-ACCOUNT: the next login may be an alt that's only a guest here, so drop
 			// the answer rather than let the sidebar rank clans on the previous account's standing.
 			knownMember = null;
-			resetCoffer(false);
+
 
 			adminProbeAttempted = false;
 			identityStampRetries = 0;
@@ -3033,23 +2961,13 @@ public class SoulrendPlugin extends Plugin {
 		var ct = event.getType();
 		var plain = stripChatTags(msg);
 
-		// Every coffer use is announced to the whole clan ("X has deposited 519 coins into the coffer."),
-		// the actor included. Each client reports only its own player's line; the site books the
-		// movement with it once a coffer reading shows the money.
-		if (ct == CLAN_MESSAGE) maybeReportCofferLine(msg);
 		// On a game-mode world the site turns the game's announcements into relic/area/task posts.
 		if (ct == GAMEMESSAGE && config.shareSeasonal() && WorldInfo.separateSave(client.getWorldType())) modeLines.offer(msg, now());
 		if (ct == GAMEMESSAGE || ct == SPAM || ct == TRADE) watchLine(plain);
 		// A death with no ActorDeath behind it (doomed in the Colosseum) still prints the game's own line.
 		if (ct == GAMEMESSAGE && plain.equals("Oh dear, you are dead!") && now() - ownDeathAt > 15_000) ownDeath();
 
-		// The widget tracker still uses a line naming this player to attribute its own readings.
-		// Player-authored channels are excluded so typing a sentence cannot name oneself as actor.
 		if (!PLAYER_AUTHORED_CHAT.contains(ct)) {
-			var sender = event.getName();
-			var cofferLine = sender == null || sender.trim().isEmpty() ? msg : sender + " " + msg;
-			clanCofferTracker.onChatLine(stripChatTags(cofferLine), getLocalPlayerName(), now());
-
 			// Server drop-attribution lines — the ONLY signal for drops that bypass both loot
 			// events (Maggot King's spill-out uniques). Parsed from ANY non-player-authored
 			// channel (see PLAYER_AUTHORED_CHAT): the personal line's exact type is unverified,
