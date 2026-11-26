@@ -6,6 +6,7 @@ import sys
 
 root = Path(__file__).resolve().parents[1]
 patterns = {
+    "retired live game-name painting": r"\b(?:flairChatbox|flairSplitPm|flairNameLists|flairMenuTargets|flairChatInput|fetchChatFlairList|fetchChatFlairSince|refreshChatFlairNow)\b",
     "retired personal-best synchronization": r"\b(?:submitPersonalBests|importRuneLitePersonalBests|retryPersonalBestImport|flushPersonalBests|syncPersonalBests|importRuneLitePbs|probeRuneLitePb)\b",
     "retired clan roster sync": r"\b(?:syncClanRoster|syncClanRosterFromPanel|autoSyncClanRoster|updateClanRosterReadable|isClanScrapeAvailable|clanSyncButton)\b",
     "retired clan coffer integration": r"\b(?:ClanCofferTracker|submitClanCoffer|submitCofferLine|syncClanCoffer)\b",

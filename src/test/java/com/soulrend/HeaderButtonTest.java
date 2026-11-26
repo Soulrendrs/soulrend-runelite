@@ -143,34 +143,5 @@ public class HeaderButtonTest {
 		assertEquals(null, button.parts);
 	}
 
-	@Test
-	public void aRebuiltNameListIsNoticedByItsFirstRow() {
-		var p = new SoulrendPlugin();
-		p.client = client;
-		assertFalse("no list open", p.nameListsRebuilt());
-		var list = new Fake();
-		open.put(InterfaceID.Friends.LIST, list.w);
-		assertFalse("an empty list has nothing to paint", p.nameListsRebuilt());
-		list.w.createChild(-1, WidgetType.TEXT);
-		assertTrue(p.nameListsRebuilt());
-		for (int i = 0; i < SoulrendPlugin.FLAIR_LISTS.length; i++) p.listSeen[i] = p.firstRow(i); // as flairNameLists does
-		assertFalse("painted: nothing to do until the game makes new rows", p.nameListsRebuilt());
-		list.kids.clear();
-		list.w.createChild(-1, WidgetType.TEXT);
-		assertTrue(p.nameListsRebuilt());
-	}
 
-	@Test
-	public void interfaceLoadsAskForAPaintBeforeTheNextFrame() {
-		var p = new SoulrendPlugin();
-		p.client = client;
-		var loaded = new net.runelite.api.events.WidgetLoaded();
-		loaded.setGroupId(InterfaceID.CLANS_SIDEPANEL);
-		try {
-			p.onWidgetLoaded(loaded);
-		} catch (RuntimeException afterTheFlags) {
-			// The rest of the handler wants an injected plugin.
-		}
-		assertTrue(p.flairDue);
-	}
 }

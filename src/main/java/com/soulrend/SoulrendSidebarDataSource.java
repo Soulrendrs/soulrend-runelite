@@ -226,7 +226,6 @@ public class SoulrendSidebarDataSource {
 			if (force) {
 				p.reprobeAdminNow();
 				p.refreshLook();
-				p.refreshChatFlairNow();
 			}
 		});
 	}
