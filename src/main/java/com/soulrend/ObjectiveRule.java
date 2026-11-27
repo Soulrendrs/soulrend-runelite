@@ -27,7 +27,7 @@ class ObjectiveRule {
         return "activity".equals(kind) && signal != null && activity != null
             && ActivityObjectiveSignals.IDS.containsKey(activity) && activity.equals(signal.activity)
             && signal.count > 0 && quantity != null && quantity > 0
-            && activity_epoch != null && activity_epoch.matches("[A-Za-z0-9_-]{1,80}");
+            && ActivityEvidenceContract.validEpoch(activity_epoch);
     }
     Boolean own_deathless;
 

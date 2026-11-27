@@ -553,7 +553,8 @@ public class BingoApiClient {
         } else if (proof.activityEvidence != null) {
             if (!ActivityEvidenceContract.validPending(proof))
                 throw new IllegalArgumentException("Invalid activity evidence");
-            body.addFormDataPart("activity_evidence", proof.activityEvidence.toString());
+            body.addFormDataPart("activity_evidence", proof.activityEvidence.toString())
+                .addFormDataPart("activity_epoch", proof.activityEpoch);
         } else if (proof.itemBatch != null) {
             body.addFormDataPart("source", proof.evidenceSource)
                 .addFormDataPart("item_batch", proof.itemBatch.toString());

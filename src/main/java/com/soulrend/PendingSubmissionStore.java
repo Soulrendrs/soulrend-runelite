@@ -40,6 +40,7 @@ public class PendingSubmissionStore {
 		String evidenceKind;
 		JsonObject itemBatch; // original relevant raw stacks; stable across retries
 		JsonObject activityEvidence; // fixed occurrence envelope; no raw game message
+		String activityEpoch; // original server-issued eligibility context, unchanged on retry
 		String combatFact; // fixed JSON, including explicit null facts; stable across retries
 		String evidenceName; // display only; never used to establish credit
 		String objectiveName;

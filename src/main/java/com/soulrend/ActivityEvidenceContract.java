@@ -11,7 +11,7 @@ final class ActivityEvidenceContract {
     /** Validate restored durable metadata before it could be used for transport. */
     static boolean validPending(PendingSubmissionStore.PendingSubmission proof) {
         if (proof == null || !"activity".equals(proof.evidenceKind) || proof.itemBatch != null
-            || proof.activityEvidence == null || proof.amount != 1 || proof.evidenceRepeat
+            || proof.activityEvidence == null || !validEpoch(proof.activityEpoch) || proof.amount != 1 || proof.evidenceRepeat
             || proof.runeliteCaptureId == null || proof.eventId <= 0 || proof.tileId <= 0) return false;
         try {
             var data = proof.activityEvidence;
@@ -29,6 +29,10 @@ final class ActivityEvidenceContract {
         } catch (RuntimeException ex) {
             return false;
         }
+    }
+
+    static boolean validEpoch(String value) {
+        return value != null && value.matches("[0-9a-f]{64}");
     }
 
     private static int number(JsonObject data, String key) {

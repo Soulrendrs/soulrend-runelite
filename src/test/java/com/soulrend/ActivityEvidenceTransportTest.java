@@ -17,6 +17,7 @@ public class ActivityEvidenceTransportTest {
         p.evidenceId = 7;
         p.amount = 1;
         p.evidenceSource = "counter:42";
+        p.activityEpoch = "a".repeat(64);
         p.activityEvidence = ActivityEvidenceContract.prepare(UUID.fromString(p.runeliteCaptureId),
             new ActivityObjectiveSignals.Signal("hunter_rumour", 42));
         return p;
@@ -35,6 +36,9 @@ public class ActivityEvidenceTransportTest {
         var wire = buffer.readUtf8();
         assertTrue(wire.contains("name=\"activity_evidence\""));
         assertTrue(wire.contains(restored.activityEvidence.toString()));
+        assertEquals(original.activityEpoch, restored.activityEpoch);
+        assertTrue(wire.contains("name=\"activity_epoch\""));
+        assertTrue(wire.contains(original.activityEpoch));
         assertTrue(wire.contains("name=\"capture_id\""));
         assertTrue(wire.contains("name=\"captured_at\""));
         assertTrue(wire.contains("name=\"tile\""));
@@ -60,6 +64,13 @@ public class ActivityEvidenceTransportTest {
         assertFalse(ActivityEvidenceContract.validPending(proof));
         proof = pending();
         proof.itemBatch = new com.google.gson.JsonObject();
+        assertFalse(ActivityEvidenceContract.validPending(proof));
+        proof = pending();
+        proof.activityEpoch = null;
+        assertFalse(ActivityEvidenceContract.validPending(proof));
+        proof.activityEpoch = "A".repeat(64);
+        assertFalse(ActivityEvidenceContract.validPending(proof));
+        proof.activityEpoch = "a".repeat(63);
         assertFalse(ActivityEvidenceContract.validPending(proof));
     }
 }

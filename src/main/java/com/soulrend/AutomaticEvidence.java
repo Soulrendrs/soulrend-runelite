@@ -315,6 +315,7 @@ final class AutomaticEvidence {
                 ActivityObjectiveSignals.IDS.get(signal.activity), 1, "counter:" + signal.count, false);
             if (proof != null) {
                 proof.activityEvidence = ActivityEvidenceContract.prepare(id, signal);
+                proof.activityEpoch = match.rule.activity_epoch;
                 proof.evidenceName = match.rule.objective_name;
                 if (proof.activityEvidence != null) captures.add(proof);
             }
