@@ -488,7 +488,7 @@ public class BingoApiClient {
     }
 
     EvidenceRules evidenceRules(int eventId, String token, String character) {
-        var url = evidenceUrl(eventId, character, true);
+        var url = evidenceUrl(eventId, character, true, ActivityEvidenceContract.UPLOAD_READY);
         return getOrNull(plainRequest(url).header("Authorization", "Bearer " + token).get(), EvidenceRules.class);
     }
 

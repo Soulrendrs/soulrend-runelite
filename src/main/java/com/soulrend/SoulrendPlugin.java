@@ -1912,10 +1912,12 @@ public class SoulrendPlugin extends Plugin {
 		if (on || off) markSeasonalWorld();
 		if (on) pushSoon();
 		if (gs == GameState.LOADING) {
+			automaticEvidence.clearActivityObservations();
 			gameValueCounters.onLoading();
 		} else if (off || hop || gs == GameState.CONNECTION_LOST) {
 			gameValueCounters.onSessionEnd();
 			automaticEvidence.clearSkillObservations();
+			automaticEvidence.clearActivityObservations();
 			npcKillEvidenceSignals.clear();
 			sessionGains.reset();
 			movedFrom = null;
@@ -2765,6 +2767,7 @@ public class SoulrendPlugin extends Plugin {
 		if (msg == null || msg.isEmpty()) return;
 		var ct = event.getType();
 		var plain = stripChatTags(msg);
+		if (ct == GAMEMESSAGE) automaticEvidence.activityMessage(plain);
 
 		// On a game-mode world the site turns the game's announcements into relic/area/task posts.
 		if (ct == GAMEMESSAGE && config.shareSeasonal() && WorldInfo.separateSave(client.getWorldType())) modeLines.offer(msg, now());
