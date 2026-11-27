@@ -9,7 +9,8 @@ final class ActivityObjectiveSignals {
     static final Map<String, Integer> IDS = Map.of(
         "sepulchre_floor_1", 1, "sepulchre_floor_2", 2, "sepulchre_floor_3", 3,
         "sepulchre_floor_4", 4, "sepulchre_floor_5", 5,
-        "grand_hallowed_coffin", 6, "hunter_rumour", 7);
+        "grand_hallowed_coffin", 6, "hunter_rumour", 7,
+        "guardians_rift_closed", 8, "colossal_wyrm_advanced_lap", 9, "bird_egg_offering", 10);
 
     private static final String COUNT = "([1-9][0-9]{0,9}|[1-9][0-9]{0,2}(?:,[0-9]{3}){1,3})";
     private static final Pattern FLOOR = Pattern.compile(
@@ -18,6 +19,15 @@ final class ActivityObjectiveSignals {
         "You have opened the Grand Hallowed Coffin " + COUNT + " times?!");
     private static final Pattern RUMOUR = Pattern.compile(
         "You have completed " + COUNT + " rumours? for the Hunter Guild\\.");
+
+    // Fixed game counter forms from RuneLite ChatCommandsPlugin; the Wyrm
+    // spelling is pinned to the client message reported in RuneLite #20449.
+    private static final Pattern RIFT = Pattern.compile(
+        "Amount of Rifts you have closed: " + COUNT + "\\.", Pattern.CASE_INSENSITIVE);
+    private static final Pattern WYRM_ADVANCED = Pattern.compile(
+        "Your Colossal Wyrm Agility Course \\(Advanced\\) lap count is: " + COUNT);
+    private static final Pattern EGG = Pattern.compile(
+        "You have made (?:(one)|" + COUNT + ") offerings?\\.");
 
     static final class Signal {
         final String activity;
@@ -38,6 +48,12 @@ final class ActivityObjectiveSignals {
         if (coffin.matches()) return signal("grand_hallowed_coffin", coffin.group(1));
         var rumour = RUMOUR.matcher(message);
         if (rumour.matches()) return signal("hunter_rumour", rumour.group(1));
+        var rift = RIFT.matcher(message);
+        if (rift.matches()) return signal("guardians_rift_closed", rift.group(1));
+        var wyrm = WYRM_ADVANCED.matcher(message);
+        if (wyrm.matches()) return signal("colossal_wyrm_advanced_lap", wyrm.group(1));
+        var egg = EGG.matcher(message);
+        if (egg.matches()) return signal("bird_egg_offering", egg.group(1) != null ? "1" : egg.group(2));
         return null;
     }
 
