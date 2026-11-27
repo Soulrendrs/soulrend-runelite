@@ -17,7 +17,7 @@ final class BingoBannerQueue {
         final boolean self;
         final Long value, target;
         final long quantity;
-        final String contributor, scope;
+        final String contributor, scope, unit;
         final Runnable onShown;
         final int itemId;
         final String iconPath, skill;
@@ -37,6 +37,14 @@ final class BingoBannerQueue {
         Card(String key, String objective, String team, String detail, boolean completed,
              Runnable onShown, int itemId, String iconPath, String skill, boolean evidence,
              boolean self, Long value, Long target, long quantity, String contributor, String scope) {
+            this(key, objective, team, detail, completed, onShown, itemId, iconPath, skill,
+                evidence, self, value, target, quantity, contributor, scope, null);
+        }
+
+        Card(String key, String objective, String team, String detail, boolean completed,
+             Runnable onShown, int itemId, String iconPath, String skill, boolean evidence,
+             boolean self, Long value, Long target, long quantity, String contributor, String scope, String unit) {
+            this.unit = unit;
             this.evidence = evidence;
             this.self = self;
             this.value = value;

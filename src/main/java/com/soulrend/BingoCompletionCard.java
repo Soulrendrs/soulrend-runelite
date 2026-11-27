@@ -35,7 +35,7 @@ final class BingoCompletionCard {
 
     static String progressLabel(BingoBannerQueue.Card card) {
         if (!card.hasProgress()) return "";
-        return String.format(Locale.ROOT, "%,d / %,d", card.value, card.target);
+        return String.format(Locale.ROOT, "%,d / %,d%s", card.value, card.target, BingoApiClient.unitSuffix(card.unit));
     }
 
     static void paint(Graphics2D graphics, BingoBannerQueue.Card card, long elapsed) {
@@ -96,10 +96,15 @@ final class BingoCompletionCard {
             if (card.hasProgress()) {
                 String count = progressLabel(card);
                 int countWidth = g.getFontMetrics().stringWidth(count);
-                String status = card.completed ? "Objective completed"
-                    : "solo".equals(card.scope) ? "Solo progress" : "Team progress";
-                line(g, status, 15, 69, WIDTH - 36 - countWidth, card.completed ? MINT : LAVENDER);
-                line(g, count, WIDTH - 16 - countWidth, 69, countWidth + 1, PARCHMENT);
+                String status = card.completed ? "Completed"
+                    : "solo".equals(card.scope) ? "Solo best" : "Team";
+                int available = WIDTH - 31;
+                if (countWidth + g.getFontMetrics().stringWidth(status) + 10 <= available) {
+                    line(g, status, 15, 69, available - countWidth - 10, card.completed ? MINT : LAVENDER);
+                    line(g, count, WIDTH - 16 - countWidth, 69, countWidth + 1, PARCHMENT);
+                } else {
+                    line(g, count, 15, 69, available, PARCHMENT);
+                }
                 g.setColor(TRACK);
                 g.fillRoundRect(15, 86, WIDTH - 31, 6, 6, 6);
                 double fraction = card.fraction();
