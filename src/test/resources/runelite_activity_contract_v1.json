@@ -7,7 +7,10 @@
     "sepulchre_floor_4": 4,
     "sepulchre_floor_5": 5,
     "grand_hallowed_coffin": 6,
-    "hunter_rumour": 7
+    "hunter_rumour": 7,
+    "guardians_rift_closed": 8,
+    "colossal_wyrm_advanced_lap": 9,
+    "bird_egg_offering": 10
   },
   "signals": [
     {
@@ -51,11 +54,59 @@
       "activity": null
     },
     {
-      "message": "You have made 7 offerings.",
+      "message": "You found some loot:",
       "activity": null
     },
     {
-      "message": "You found some loot:",
+      "message": "Amount of Rifts you have closed: 1,234.",
+      "activity": "guardians_rift_closed",
+      "count": 1234
+    },
+    {
+      "message": "Your Colossal Wyrm Agility Course (Advanced) lap count is: 63",
+      "activity": "colossal_wyrm_advanced_lap",
+      "count": 63
+    },
+    {
+      "message": "You have made 7 offerings.",
+      "activity": "bird_egg_offering",
+      "count": 7
+    },
+    {
+      "message": "You have made one offering.",
+      "activity": "bird_egg_offering",
+      "count": 1
+    },
+    {
+      "message": "Amount of Rifts you have closed: 0.",
+      "activity": null
+    },
+    {
+      "message": "Amount of Rifts you have closed: 4. Your points: 900",
+      "activity": null
+    },
+    {
+      "message": "Your Colossal Wyrm Agility Course (Basic) lap count is: 63",
+      "activity": null
+    },
+    {
+      "message": "Your Colossal Wyrm Agility Course (Advanced) lap count is: 2,3",
+      "activity": null
+    },
+    {
+      "message": "You have made 2147483648 offerings.",
+      "activity": null
+    },
+    {
+      "message": "Other player: You have made 7 offerings.",
+      "activity": null
+    },
+    {
+      "message": "You have received 3 elemental points.",
+      "activity": null
+    },
+    {
+      "message": "You have finished a sword.",
       "activity": null
     }
   ]
