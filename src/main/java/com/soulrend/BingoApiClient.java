@@ -385,7 +385,7 @@ public class BingoApiClient {
     }
     static final class ConfirmedTile {
         int id;
-        String name, contributor, icon_path, skill, unit;
+        String name, contributor, icon_path, skill, unit, scope;
         int item_id;
         Long value, target;
         boolean self;
