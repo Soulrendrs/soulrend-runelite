@@ -50,9 +50,10 @@ final class AutomaticEvidence {
         final int pending;
         final List<BingoApiClient.EventSummary> events;
         final Set<Integer> reachable;
+        final long activityGeneration;
 
         BoardRules(String session, String character, long expires, List<Match> matches, int pending,
-                   List<BingoApiClient.EventSummary> events, Set<Integer> reachable) {
+                   List<BingoApiClient.EventSummary> events, Set<Integer> reachable, long activityGeneration) {
             this.session = session;
             this.character = character;
             this.expires = expires;
@@ -60,6 +61,7 @@ final class AutomaticEvidence {
             this.pending = pending;
             this.events = events;
             this.reachable = reachable;
+            this.activityGeneration = activityGeneration;
         }
     }
 
@@ -102,7 +104,7 @@ final class AutomaticEvidence {
     void clear() {
         synchronized (activityEpochs) {
             rules = null;
-            activityEpochs.reset();
+            activityEpochs.invalidate();
             queuedThisSync.set(0);
         }
     }
@@ -152,6 +154,7 @@ final class AutomaticEvidence {
         String session = DiskFiles.fingerprint(token);
         if (plugin.bingoCompletions.enabled()) plugin.bingoCompletions.useScope(session, character);
         else plugin.bingoCompletions.clear();
+        long refreshActivityGeneration = activityEpochs.generation();
         var snapshot = rules;
         boolean fast = preferUpload && snapshot != null && sameSession(snapshot.session, snapshot.character)
             && System.currentTimeMillis() < snapshot.expires;
@@ -280,10 +283,15 @@ final class AutomaticEvidence {
                         ActivityEvidenceContract.validEpoch(match.rule.activity_epoch))
                         allowed.add(new ActivityRuleEpochs.Entry(match.event, match.rule.tile, match.rule.activity_epoch));
                 }
-                activityEpochs.retain(session, character, allowed);
+                // A fast upload sync must not turn old rules into a new
+                // authorization after loading/hop. An in-flight full refresh
+                // also retains its original generation, even if it finishes later.
+                long activityGeneration = fast ? snapshot.activityGeneration : refreshActivityGeneration;
+                if (activityEpochs.isCurrent(activityGeneration))
+                    activityEpochs.retain(session, character, allowed);
                 rules = new BoardRules(session, character,
                     fast ? snapshot.expires : now + RULE_TTL_MS,
-                    List.copyOf(matches), held, List.copyOf(events), Set.copyOf(reachable));
+                    List.copyOf(matches), held, List.copyOf(events), Set.copyOf(reachable), activityGeneration);
                 queuedThisSync.set(0);
             }
         }
@@ -306,7 +314,7 @@ final class AutomaticEvidence {
     private final ActivityRuleEpochs activityEpochs = new ActivityRuleEpochs();
 
     void clearActivityObservations() {
-        activityEpochs.reset();
+        activityEpochs.invalidate();
     }
 
     /** Own game-generated messages only. Hard-off until real gameplay signoff. */
@@ -319,7 +327,7 @@ final class AutomaticEvidence {
 
     private void captureActivityMessage(String plain) {
         var snapshot = ready();
-        if (snapshot == null) {
+        if (snapshot == null || !activityEpochs.isCurrent(snapshot.activityGeneration)) {
             activityEpochs.reset();
             return;
         }
@@ -604,9 +612,11 @@ final class AutomaticEvidence {
                 boolean saved = false;
                 for (var proof : captures) {
                     if (!sameSession(snapshot.session, snapshot.character)) break;
+                    if ("activity".equals(proof.evidenceKind) && !activityEpochs.isCurrent(snapshot.activityGeneration)) continue;
                     var card = EvidenceCaptureCard.forProof(proof);
                     card.icon = plugin.apiClient.cachedObjectiveIcon(card.iconPath);
                     byte[] screenshot = SoulrendPlugin.jpeg(EvidenceCaptureCard.annotate(image, card));
+                    if ("activity".equals(proof.evidenceKind) && !activityEpochs.isCurrent(snapshot.activityGeneration)) continue;
                     if (plugin.pendingSubmissionStore.save(proof, screenshot) != null) {
                         saved = true;
                         plugin.clientThread.invokeLater(() -> {
