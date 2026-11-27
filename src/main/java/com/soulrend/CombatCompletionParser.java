@@ -19,7 +19,6 @@ final class CombatCompletionParser {
         "(?:([0-9]{1,2}):)?([0-9]{1,3}):([0-9]{2})(?:\\.([0-9]{1,2}))?");
     private static final Pattern TIME = Pattern.compile(
         "^(Fight duration|Challenge duration|Corrupted challenge duration|"
-        + ""
         + "Congratulations(?: -|,) your raid is complete! Duration|"
         + "Tombs of Amascut(?:: (?:Expert|Normal) Mode)? total completion time|"
         + "Theatre of Blood(?:: Hard Mode)? total completion time): "
@@ -130,6 +129,11 @@ final class CombatCompletionParser {
         }
         return key != null && time != null && compatible(key, label)
             ? new Completion(key, time, counter) : null;
+    }
+
+    static boolean candidate(String line) {
+        return line != null && line.length() <= 512
+            && (countLine(line) != null || TIME.matcher(line).matches());
     }
 
     private CombatCompletionParser() {}

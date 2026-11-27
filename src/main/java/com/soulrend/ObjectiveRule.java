@@ -20,6 +20,22 @@ class ObjectiveRule {
     boolean allow_repeat;
     JsonElement strategy, scope, target, items, item_ids;
     boolean note_aliases; // server-owned capability, absent on older deployments
+    Integer combat_protocol, max_duration_cs, min_raid_level;
+    String activity, difficulty;
+    Boolean own_deathless;
+
+    boolean combatRule() {
+        return "combat_clear".equals(kind) && Integer.valueOf(1).equals(combat_protocol)
+            && Boolean.FALSE.equals(own_deathless) && min_raid_level == null
+            && CombatEvidenceContract.supported(activity, difficulty)
+            && (max_duration_cs == null || max_duration_cs > 0 && max_duration_cs <= 8640000);
+    }
+
+    boolean matchesCombat(CombatCompletionParser.Completion completion) {
+        return combatRule() && completion != null && activity.equals(completion.activity)
+            && difficulty.equals(completion.difficulty)
+            && (max_duration_cs == null || completion.durationCs <= max_duration_cs);
+    }
 
     boolean isItemBatch() {
         return "item_pool".equals(kind) || "loot_value".equals(kind);

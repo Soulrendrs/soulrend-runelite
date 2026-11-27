@@ -39,6 +39,7 @@ public class PendingSubmissionStore {
 		String runeliteSession;
 		String evidenceKind;
 		JsonObject itemBatch; // original relevant raw stacks; stable across retries
+		String combatFact; // fixed JSON, including explicit null facts; stable across retries
 		String evidenceName; // display only; never used to establish credit
 		String objectiveName;
 		String evidenceIconPath;

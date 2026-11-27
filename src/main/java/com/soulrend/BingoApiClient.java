@@ -488,14 +488,15 @@ public class BingoApiClient {
     }
 
     EvidenceRules evidenceRules(int eventId, String token, String character) {
-        var url = evidenceUrl(eventId, character, true);
+        var url = evidenceUrl(eventId, character, true, true);
         return getOrNull(plainRequest(url).header("Authorization", "Bearer " + token).get(), EvidenceRules.class);
     }
 
-    private String evidenceUrl(int eventId, String character, boolean batchCapable) {
+    private String evidenceUrl(int eventId, String character, boolean batchCapable, boolean combatCapable) {
         var url = HttpUrl.parse(authUrl("/api/runelite/v1/events/" + eventId + "/evidence")).newBuilder()
             .addQueryParameter("character", character);
         if (batchCapable) url.addQueryParameter("item_batch", "2");
+        if (combatCapable) url.addQueryParameter("combat_clear", "1");
         return url.build().toString();
     }
 
@@ -531,7 +532,9 @@ public class BingoApiClient {
             .addFormDataPart("tile", String.valueOf(proof.tileId))
             .addFormDataPart("capture_id", proof.runeliteCaptureId)
             .addFormDataPart("captured_at", java.time.Instant.ofEpochMilli(proof.timestamp).toString());
-        if (proof.itemBatch != null) {
+        if (proof.combatFact != null) {
+            body.addFormDataPart("combat_fact", proof.combatFact);
+        } else if (proof.itemBatch != null) {
             body.addFormDataPart("source", proof.evidenceSource)
                 .addFormDataPart("item_batch", proof.itemBatch.toString());
         } else {
@@ -550,9 +553,11 @@ public class BingoApiClient {
 
     EvidenceUpload uploadEvidence(PendingSubmissionStore.PendingSubmission proof, String token, byte[] image) throws IOException {
         boolean batch = "item_pool".equals(proof.evidenceKind) || "loot_value".equals(proof.evidenceKind);
-        if (batch != (proof.itemBatch != null))
+        boolean combat = "combat_clear".equals(proof.evidenceKind);
+        if (batch != (proof.itemBatch != null) || combat != (proof.combatFact != null)
+            || batch && combat || combat && proof.combatFact.length() > 2048)
             return new EvidenceUpload(400, null, null, null, null, null, 0);
-        return execute(httpClient, plainRequest(evidenceUrl(proof.eventId, proof.capturedRsn, batch))
+        return execute(httpClient, plainRequest(evidenceUrl(proof.eventId, proof.capturedRsn, batch, combat))
             .header("Authorization", "Bearer " + token).post(evidenceBody(proof, image)),
             (reply, data) -> {
                 String proofStatus = null;
