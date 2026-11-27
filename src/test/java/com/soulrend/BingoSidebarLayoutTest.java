@@ -9,6 +9,7 @@ import javax.swing.SwingUtilities;
 import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 public class BingoSidebarLayoutTest {
@@ -141,6 +142,35 @@ public class BingoSidebarLayoutTest {
             var older = SoulrendSidebarPanel.bingoCard(Color.GREEN);
             SoulrendSidebarPanel.addBingoProgress(older, tile, "In progress", "Solo", Color.GREEN);
             assertEquals(3, older.getComponentCount());
+        });
+    }
+
+    @Test
+    public void collaborativeProgressRemainsIncompleteAtFullQuantity() throws Exception {
+        SwingUtilities.invokeAndWait(() -> {
+            var tile = new com.google.gson.Gson().fromJson(
+                "{\"scope\":\"team\",\"status\":\"open\",\"value\":\"10\",\"target\":\"10\","
+                + "\"value_amount\":10,\"target_amount\":10,\"personal_amount\":10,"
+                + "\"collaboration\":{\"minimum_players\":2,\"qualifying_players\":1,\"minimum_each\":3}}",
+                BingoApiClient.BoardTile.class);
+            var card = SoulrendSidebarPanel.bingoCard(Color.GREEN);
+            SoulrendSidebarPanel.addBingoProgress(card, tile, SoulrendSidebarPanel.bingoStatus(tile), "Team", Color.GREEN);
+            assertEquals("In progress", SoulrendSidebarPanel.bingoStatus(tile));
+            assertEquals(5, card.getComponentCount());
+            assertEquals(100, ((javax.swing.JProgressBar) card.getComponent(2)).getValue());
+            assertTrue(((JLabel) card.getComponent(3)).getText().contains("1 / 2 teammates"));
+            card.setSize(200, card.getPreferredSize().height);
+            layout(card);
+            var row = card.getComponent(3);
+            assertTrue(row.getHeight() > 0);
+            assertTrue(row.getY() + row.getHeight() <= card.getHeight());
+            tile.status = "hidden";
+            assertNull(SoulrendSidebarPanel.collaborationProgressText(tile));
+            tile.status = "open";
+            tile.collaboration.minimum_players = 0;
+            assertNull(SoulrendSidebarPanel.collaborationProgressText(tile));
+            tile.collaboration = null;
+            assertNull(SoulrendSidebarPanel.collaborationProgressText(tile));
         });
     }
 
