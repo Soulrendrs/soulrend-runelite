@@ -12,9 +12,9 @@ import java.util.regex.Pattern;
  */
 final class CombatCompletionParser {
     private static final Pattern COUNT = Pattern.compile(
-        "^Your (.+?) (?:kill|completion) count is: [0-9,]+\\.?$");
+        "^Your (.+?) (?:kill|completion) count is: ([0-9,]+)\\.?$");
     private static final Pattern RAID_COUNT = Pattern.compile(
-        "^Your completed (.+?) count is: [0-9,]+\\.?$");
+        "^Your completed (.+?) count is: ([0-9,]+)\\.?$");
     private static final Pattern CLOCK = Pattern.compile(
         "(?:([0-9]{1,2}):)?([0-9]{1,3}):([0-9]{2})(?:\\.([0-9]{1,2}))?");
     private static final Pattern TIME = Pattern.compile(
@@ -42,11 +42,13 @@ final class CombatCompletionParser {
         final String activity;
         final String difficulty;
         final int durationCs;
-        Completion(String key, int durationCs) {
+        final int counter;
+        Completion(String key, int durationCs, int counter) {
             String[] parts = key.split(":");
             this.activity = parts[0];
             this.difficulty = parts[1];
             this.durationCs = durationCs;
+            this.counter = counter;
         }
     }
 
@@ -63,14 +65,13 @@ final class CombatCompletionParser {
         return total > 0 && total <= 8640000 ? total : null;
     }
 
-    private static String activity(String line) {
+    private static Matcher countLine(String line) {
         Matcher count = COUNT.matcher(line);
         if (!count.matches()) {
             count = RAID_COUNT.matcher(line);
             if (!count.matches()) return null;
         }
-        String name = TimedClearParser.norm(count.group(1));
-        return ACTIVITIES.get(name);
+        return count;
     }
 
     private static boolean compatible(String key, String label) {
@@ -103,12 +104,18 @@ final class CombatCompletionParser {
         String key = null;
         String label = null;
         Integer time = null;
+        int counter = 0;
         for (String line : lines) {
             if (line == null || line.length() > 512) return null;
-            if (COUNT.matcher(line).matches() || RAID_COUNT.matcher(line).matches()) {
+            Matcher count = countLine(line);
+            if (count != null) {
                 if (key != null) return null;
-                key = activity(line);
-                if (key == null) return null;
+                key = ACTIVITIES.get(TimedClearParser.norm(count.group(1)));
+                String digits = count.group(2);
+                if (key == null || !digits.matches("(?:[1-9][0-9]*|[1-9][0-9]{0,2}(?:,[0-9]{3})+)")) return null;
+                try { counter = Integer.parseInt(digits.replace(",", "")); }
+                catch (NumberFormatException ex) { return null; }
+                if (counter <= 0) return null;
             }
             Matcher m = TIME.matcher(line);
             if (m.matches()) {
@@ -122,7 +129,7 @@ final class CombatCompletionParser {
             }
         }
         return key != null && time != null && compatible(key, label)
-            ? new Completion(key, time) : null;
+            ? new Completion(key, time, counter) : null;
     }
 
     private CombatCompletionParser() {}
