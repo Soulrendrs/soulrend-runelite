@@ -1914,10 +1914,12 @@ public class SoulrendPlugin extends Plugin {
 		if (on || off) markSeasonalWorld();
 		if (on) pushSoon();
 		if (gs == GameState.LOADING) {
+			automaticEvidence.clearActivityObservations();
 			gameValueCounters.onLoading();
 		} else if (off || hop || gs == GameState.CONNECTION_LOST) {
 			gameValueCounters.onSessionEnd();
 			automaticEvidence.clearSkillObservations();
+			automaticEvidence.clearActivityObservations();
 			npcKillEvidenceSignals.clear();
 			sessionGains.reset();
 			movedFrom = null;
@@ -2767,6 +2769,7 @@ public class SoulrendPlugin extends Plugin {
 		if (msg == null || msg.isEmpty()) return;
 		var ct = event.getType();
 		var plain = stripChatTags(msg);
+		if (ct == GAMEMESSAGE) automaticEvidence.activityMessage(plain);
 		if (ct == GAMEMESSAGE || ct == FRIENDSCHATNOTIFICATION)
 			automaticEvidence.combatLine(plain, ct == FRIENDSCHATNOTIFICATION, client.getTickCount());
 

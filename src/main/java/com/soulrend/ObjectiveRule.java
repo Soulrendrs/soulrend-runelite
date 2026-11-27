@@ -21,7 +21,14 @@ class ObjectiveRule {
     JsonElement strategy, scope, target, items, item_ids;
     boolean note_aliases; // server-owned capability, absent on older deployments
     Integer combat_protocol, max_duration_cs, min_raid_level;
-    String activity, difficulty;
+    String activity, difficulty, activity_epoch;
+
+    boolean matchesActivity(ActivityObjectiveSignals.Signal signal) {
+        return "activity".equals(kind) && signal != null && activity != null
+            && ActivityObjectiveSignals.IDS.containsKey(activity) && activity.equals(signal.activity)
+            && signal.count > 0 && quantity != null && quantity > 0
+            && activity_epoch != null && activity_epoch.matches("[A-Za-z0-9_-]{1,80}");
+    }
     Boolean own_deathless;
 
     boolean combatRule() {

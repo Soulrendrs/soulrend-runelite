@@ -50,7 +50,7 @@ final class CombatEvidenceContract {
         try {
             var id = UUID.fromString(proof.runeliteCaptureId);
             if (id.version() != 4 || !id.toString().equals(proof.runeliteCaptureId)) return false;
-            var fact = JsonParser.parseString(proof.combatFact).getAsJsonObject();
+            var fact = new JsonParser().parse(proof.combatFact).getAsJsonObject();
             if (!fact.keySet().equals(Set.of("version", "capture_id", "activity", "difficulty",
                 "counter", "duration_cs", "own_deaths", "raid_level"))) return false;
             if (!integer(fact.get("version"), 1) || !integer(fact.get("counter"), Integer.MAX_VALUE)

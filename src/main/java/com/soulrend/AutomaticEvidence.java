@@ -284,6 +284,44 @@ final class AutomaticEvidence {
         return snapshot;
     }
 
+    private final ActivityRuleEpochs activityEpochs = new ActivityRuleEpochs();
+
+    void clearActivityObservations() {
+        activityEpochs.reset();
+    }
+
+    /** Own game-generated messages only. Hard-off until real gameplay signoff. */
+    void activityMessage(String plain) {
+        if (!ActivityEvidenceContract.UPLOAD_READY) return;
+        var snapshot = ready();
+        if (snapshot == null) {
+            activityEpochs.reset();
+            return;
+        }
+        var signal = ActivityObjectiveSignals.parse(plain);
+        if (signal == null) return;
+        var candidates = new ArrayList<ActivityRuleEpochs.Entry>();
+        for (var match : snapshot.matches) {
+            if (match.rule.matchesActivity(signal))
+                candidates.add(new ActivityRuleEpochs.Entry(match.event, match.rule.tile, match.rule.activity_epoch));
+        }
+        var eligible = activityEpochs.observe(snapshot.session, snapshot.character, signal, candidates);
+        var captures = new ArrayList<PendingSubmission>();
+        UUID id = UUID.randomUUID();
+        for (var match : snapshot.matches) {
+            if (!match.rule.matchesActivity(signal) || !eligible.contains(
+                new ActivityRuleEpochs.Entry(match.event, match.rule.tile, match.rule.activity_epoch))) continue;
+            var proof = prepare(snapshot, match, id.toString(),
+                ActivityObjectiveSignals.IDS.get(signal.activity), 1, "counter:" + signal.count, false);
+            if (proof != null) {
+                proof.activityEvidence = ActivityEvidenceContract.prepare(id, signal);
+                proof.evidenceName = match.rule.objective_name;
+                if (proof.activityEvidence != null) captures.add(proof);
+            }
+        }
+        capture(snapshot, captures);
+    }
+
     void drop(Collection<ItemStack> items, String source) {
         var snapshot = ready();
         if (snapshot == null || items == null || items.isEmpty()) return;
@@ -493,7 +531,7 @@ final class AutomaticEvidence {
                                       int evidenceId, int quantity, String source, boolean repeat) {
         long now = System.currentTimeMillis();
         boolean cumulative = "drop".equals(match.rule.kind) || "gain".equals(match.rule.kind)
-            || "npc_kill".equals(match.rule.kind) || match.rule.isItemBatch() || match.rule.combatRule();
+            || "npc_kill".equals(match.rule.kind) || match.rule.isItemBatch() || match.rule.combatRule() || "activity".equals(match.rule.kind);
         if (cumulative) {
             // Repeated drops/kills are distinct legitimate observations:
             // cooldown-based suppression would silently lose cumulative gains.
