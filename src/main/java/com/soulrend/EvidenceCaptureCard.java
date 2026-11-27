@@ -14,6 +14,7 @@ final class EvidenceCaptureCard {
             case "drop": kind = "Item drop"; break;
             case "gain": kind = "Skilling gain"; break;
             case "ca": kind = "Combat achievement"; break;
+            case "combat_clear": kind = "Combat clear"; break;
             case "item_pool": case "loot_value": kind = "Loot batch"; break;
             default: kind = "Objective evidence";
         }

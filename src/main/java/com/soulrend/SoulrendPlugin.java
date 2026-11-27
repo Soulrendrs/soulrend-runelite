@@ -1699,6 +1699,7 @@ public class SoulrendPlugin extends Plugin {
 
 	@Subscribe
 	void onGameTick(GameTick event) {
+		automaticEvidence.finishCombatTick(client.getTickCount());
 		lastWornItemIds = wornItemIds();
 		// Fallback only when RuneLite did not supply the canonical server NPC-loot event.
 		for (int npcId : npcKillEvidenceSignals.expire(client.getTickCount())) automaticEvidence.npcKill(npcId);
@@ -1901,6 +1902,7 @@ public class SoulrendPlugin extends Plugin {
 		// session forgets the baselines — the next account's balances are not this one's.
 		var gs = event.getGameState();
 		boolean on = gs == GameState.LOGGED_IN, off = gs == GameState.LOGIN_SCREEN, hop = gs == GameState.HOPPING;
+		if (!on) automaticEvidence.clearCombatObservations();
 		if (off) {
 			bingoCompletions.clear();
 			clogBanner.removeBanners(BingoStartReminder.TITLE);
@@ -2768,6 +2770,8 @@ public class SoulrendPlugin extends Plugin {
 		var ct = event.getType();
 		var plain = stripChatTags(msg);
 		if (ct == GAMEMESSAGE) automaticEvidence.activityMessage(plain);
+		if (ct == GAMEMESSAGE || ct == FRIENDSCHATNOTIFICATION)
+			automaticEvidence.combatLine(plain, ct == FRIENDSCHATNOTIFICATION, client.getTickCount());
 
 		// On a game-mode world the site turns the game's announcements into relic/area/task posts.
 		if (ct == GAMEMESSAGE && config.shareSeasonal() && WorldInfo.separateSave(client.getWorldType())) modeLines.offer(msg, now());

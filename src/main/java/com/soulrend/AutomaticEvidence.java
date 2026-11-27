@@ -92,6 +92,8 @@ final class AutomaticEvidence {
         }
     }
     private final Map<String, Integer> skillTicks = new HashMap<>(); // client thread
+    private final CombatCompletionWindow combatWindow = new CombatCompletionWindow(); // client thread
+    private BoardRules combatSnapshot;
 
     AutomaticEvidence(SoulrendPlugin plugin) {
         this.plugin = plugin;
@@ -477,12 +479,60 @@ final class AutomaticEvidence {
         capture(snapshot, captures);
     }
 
+    void clearCombatObservations() {
+        combatWindow.clear();
+        combatSnapshot = null;
+    }
+
+    private static boolean hasCombatRules(BoardRules snapshot) {
+        return snapshot != null && snapshot.matches.stream().anyMatch(m -> m.rule.combatRule());
+    }
+
+    /** Only the two explicit trusted game-message channels call this method. */
+    void combatLine(String line, boolean raidNotification, int tick) {
+        var snapshot = ready();
+        if (!hasCombatRules(snapshot)) {
+            clearCombatObservations();
+            return;
+        }
+        if (combatSnapshot != snapshot) {
+            clearCombatObservations();
+            combatSnapshot = snapshot;
+        }
+        // Raid notification messages may only carry raid summaries, never the identity/count.
+        combatWindow.offer(line, raidNotification, tick);
+    }
+
+    void finishCombatTick(int tick) {
+        var snapshot = ready();
+        if (!hasCombatRules(snapshot) || combatSnapshot != snapshot) {
+            clearCombatObservations();
+            return;
+        }
+        var completion = combatWindow.finish(tick);
+        if (completion == null) return;
+        // Deathless and invocation requirements stay manual until their trusted
+        // run-lifetime and final-summary adapters pass live verification.
+        var captures = new ArrayList<PendingSubmission>();
+        var id = UUID.randomUUID();
+        var payload = CombatEvidenceContract.encode(id, completion);
+        for (var match : snapshot.matches) {
+            if (!match.rule.matchesCombat(completion)) continue;
+            var proof = prepare(snapshot, match, id.toString(), 0, 1, "combat", false);
+            if (proof != null) {
+                proof.combatFact = payload;
+                proof.evidenceName = completion.activity + " clear";
+                captures.add(proof);
+            }
+        }
+        capture(snapshot, captures);
+    }
+
     private PendingSubmission prepare(BoardRules snapshot, Match match, String captureId,
                                       int evidenceId, int quantity, String source, boolean repeat) {
         long now = System.currentTimeMillis();
         boolean cumulative = "drop".equals(match.rule.kind) || "gain".equals(match.rule.kind)
-            || "npc_kill".equals(match.rule.kind) || match.rule.isItemBatch()
-            || "activity".equals(match.rule.kind);
+            || "npc_kill".equals(match.rule.kind) || match.rule.isItemBatch() || match.rule.combatRule() || "activity".equals(match.rule.kind);
         if (cumulative) {
             // Repeated drops/kills are distinct legitimate observations:
             // cooldown-based suppression would silently lose cumulative gains.

@@ -493,7 +493,7 @@ public class BingoApiClient {
     }
 
     EvidenceRules evidenceRules(int eventId, String token, String character) {
-        var url = evidenceUrl(eventId, character, true, ActivityEvidenceContract.UPLOAD_READY);
+        var url = evidenceUrl(eventId, character, true, ActivityEvidenceContract.UPLOAD_READY, true);
         return getOrNull(plainRequest(url).header("Authorization", "Bearer " + token).get(), EvidenceRules.class);
     }
 
@@ -502,10 +502,15 @@ public class BingoApiClient {
     }
 
     private String evidenceUrl(int eventId, String character, boolean batchCapable, boolean activityCapable) {
+        return evidenceUrl(eventId, character, batchCapable, activityCapable, false);
+    }
+
+    private String evidenceUrl(int eventId, String character, boolean batchCapable, boolean activityCapable, boolean combatCapable) {
         var url = HttpUrl.parse(authUrl("/api/runelite/v1/events/" + eventId + "/evidence")).newBuilder()
             .addQueryParameter("character", character);
         if (batchCapable) url.addQueryParameter("item_batch", "2");
         if (activityCapable) url.addQueryParameter("activity", "1");
+        if (combatCapable) url.addQueryParameter("combat_clear", "1");
         return url.build().toString();
     }
 
@@ -541,7 +546,11 @@ public class BingoApiClient {
             .addFormDataPart("tile", String.valueOf(proof.tileId))
             .addFormDataPart("capture_id", proof.runeliteCaptureId)
             .addFormDataPart("captured_at", java.time.Instant.ofEpochMilli(proof.timestamp).toString());
-        if (proof.activityEvidence != null) {
+        if (proof.combatFact != null) {
+            if (!CombatEvidenceContract.validPending(proof))
+                throw new IllegalArgumentException("Invalid combat evidence");
+            body.addFormDataPart("combat_fact", proof.combatFact);
+        } else if (proof.activityEvidence != null) {
             if (!ActivityEvidenceContract.validPending(proof))
                 throw new IllegalArgumentException("Invalid activity evidence");
             body.addFormDataPart("activity_evidence", proof.activityEvidence.toString())
@@ -566,10 +575,12 @@ public class BingoApiClient {
     EvidenceUpload uploadEvidence(PendingSubmissionStore.PendingSubmission proof, String token, byte[] image) throws IOException {
         boolean batch = "item_pool".equals(proof.evidenceKind) || "loot_value".equals(proof.evidenceKind);
         boolean activity = "activity".equals(proof.evidenceKind);
+        boolean combat = "combat_clear".equals(proof.evidenceKind);
         if (batch != (proof.itemBatch != null) || activity != (proof.activityEvidence != null)
+            || combat != (proof.combatFact != null) || combat && !CombatEvidenceContract.validPending(proof)
             || (activity && (!ActivityEvidenceContract.UPLOAD_READY || !ActivityEvidenceContract.validPending(proof))))
             return new EvidenceUpload(400, null, null, null, null, null, 0);
-        return execute(httpClient, plainRequest(evidenceUrl(proof.eventId, proof.capturedRsn, batch, activity))
+        return execute(httpClient, plainRequest(evidenceUrl(proof.eventId, proof.capturedRsn, batch, activity, combat))
             .header("Authorization", "Bearer " + token).post(evidenceBody(proof, image)),
             (reply, data) -> {
                 String proofStatus = null;
