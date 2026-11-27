@@ -100,8 +100,11 @@ final class AutomaticEvidence {
     }
 
     void clear() {
-        rules = null;
-        queuedThisSync.set(0);
+        synchronized (activityEpochs) {
+            rules = null;
+            activityEpochs.reset();
+            queuedThisSync.set(0);
+        }
     }
 
     private boolean enabled() {
@@ -263,10 +266,26 @@ final class AutomaticEvidence {
         }
         if (sameSession(session, character)) {
             prefetchPortraits(matches);
-            rules = new BoardRules(session, character,
-                fast ? snapshot.expires : System.currentTimeMillis() + RULE_TTL_MS,
-                List.copyOf(matches), held, List.copyOf(events), Set.copyOf(reachable));
-            queuedThisSync.set(0);
+            synchronized (activityEpochs) {
+                if (!sameSession(session, character)) {
+                    clear();
+                    return;
+                }
+                var previous = rules;
+                long now = System.currentTimeMillis();
+                if (previous == null || now >= previous.expires) activityEpochs.reset();
+                var allowed = new HashSet<ActivityRuleEpochs.Entry>();
+                for (var match : matches) {
+                    if ("activity".equals(match.rule.kind) &&
+                        ActivityEvidenceContract.validEpoch(match.rule.activity_epoch))
+                        allowed.add(new ActivityRuleEpochs.Entry(match.event, match.rule.tile, match.rule.activity_epoch));
+                }
+                activityEpochs.retain(session, character, allowed);
+                rules = new BoardRules(session, character,
+                    fast ? snapshot.expires : now + RULE_TTL_MS,
+                    List.copyOf(matches), held, List.copyOf(events), Set.copyOf(reachable));
+                queuedThisSync.set(0);
+            }
         }
     }
 
@@ -293,6 +312,12 @@ final class AutomaticEvidence {
     /** Own game-generated messages only. Hard-off until real gameplay signoff. */
     void activityMessage(String plain) {
         if (!ActivityEvidenceContract.UPLOAD_READY) return;
+        synchronized (activityEpochs) {
+            captureActivityMessage(plain);
+        }
+    }
+
+    private void captureActivityMessage(String plain) {
         var snapshot = ready();
         if (snapshot == null) {
             activityEpochs.reset();
