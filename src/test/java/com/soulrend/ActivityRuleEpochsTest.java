@@ -34,7 +34,7 @@ public class ActivityRuleEpochsTest {
         rule.activity = "hunter_rumour";
         rule.quantity = 5;
         assertFalse(rule.matchesActivity(signal(42)));
-        rule.activity_epoch = "unlock-1";
+        rule.activity_epoch = "a".repeat(64);
         assertTrue(rule.matchesActivity(signal(42)));
         rule.activity = "lms";
         assertFalse(rule.matchesActivity(signal(42)));
