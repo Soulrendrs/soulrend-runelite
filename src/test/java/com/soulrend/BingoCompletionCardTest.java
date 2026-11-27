@@ -30,6 +30,21 @@ public class BingoCompletionCardTest {
         assertFalse(card(true, false, false, 1L, 0L).hasProgress());
     }
 
+    @Test public void typedProgressDoesNotInventUnits() {
+        for (String unit : new String[]{"GP", "sets", "unique items", "XP", "KC", "kills", "items", "<html>invalid"}) {
+            var card = new BingoBannerQueue.Card("1:2", "Objective", "Team", "", false,
+                () -> {}, 0, null, null, false, true, 5_000_000_000L, 10_000_000_000L,
+                0, null, "solo", unit);
+            assertEquals("5,000,000,000 / 10,000,000,000" + BingoApiClient.unitSuffix(unit),
+                BingoCompletionCard.progressLabel(card));
+            var image = new BufferedImage(BingoCompletionCard.WIDTH, BingoCompletionCard.HEIGHT,
+                BufferedImage.TYPE_INT_ARGB);
+            var g = image.createGraphics();
+            try { BingoCompletionCard.paint(g, card, 0, false); }
+            finally { g.dispose(); }
+        }
+    }
+
     @Test public void milestonesHaveTheirOwnHeadingsAndDurations() {
         var finish = new BingoBannerQueue.Card("1:team-finished", "Event", "Team",
             "All objectives confirmed", true, () -> {}, 0, null, null);

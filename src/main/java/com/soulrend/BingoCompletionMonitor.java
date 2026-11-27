@@ -285,16 +285,15 @@ final class BingoCompletionMonitor {
         var card = new BingoBannerQueue.Card(event.id + ":" + tile.id, tile.name, event.team,
             detail, true, () -> plugin.bannerSound.playBingoCue(BannerSoundService.BingoCue.COMPLETION),
             tile.item_id, tile.icon_path, tile.skill, false, tile.self, tile.value, tile.target,
-            0, tile.contributor, null);
+            0, tile.contributor, tile.scope, tile.unit);
         plugin.clogBanner.bingoCards.offer(card);
         plugin.sendChatMessage(ChatPalette.Tone.DONE, "Bingooooo! " + tile.name + " · " + contributor);
     }
 
     private void showProgress(EventSummary event, ProgressTile tile) {
         if (!permits(tile.self) || !tile.self && "solo".equals(tile.scope)) return;
-        var progress = String.format(Locale.ROOT, "%,d / %,d %s", tile.value, tile.target,
-            java.util.Set.of("kills", "items", "sets", "unique items", "GP").contains(tile.unit == null ? "" : tile.unit)
-                ? tile.unit : "items");
+        var progress = String.format(Locale.ROOT, "%,d / %,d%s", tile.value, tile.target,
+            BingoApiClient.unitSuffix(tile.unit));
         var contributor = tile.contributor == null ? "Progress recorded" : "Latest: " + tile.contributor;
         if (tile.quantity > 0) contributor += "  +" + String.format(Locale.ROOT, "%,d", tile.quantity);
         if ("solo".equals(tile.scope)) contributor += "  ·  Best solo";
@@ -303,6 +302,6 @@ final class BingoCompletionMonitor {
         plugin.clogBanner.bingoCards.offer(new BingoBannerQueue.Card(event.id + ":" + tile.id,
             tile.name, event.team, progress + " · " + contributor, false,
             () -> plugin.bannerSound.playBingoCue(cue), tile.item_id, tile.icon_path, null,
-            false, tile.self, tile.value, tile.target, tile.quantity, tile.contributor, tile.scope));
+            false, tile.self, tile.value, tile.target, tile.quantity, tile.contributor, tile.scope, tile.unit));
     }
 }
