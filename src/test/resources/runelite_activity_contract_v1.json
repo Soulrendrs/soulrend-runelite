@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "activities": {
+    "sepulchre_floor_1": 1,
+    "sepulchre_floor_2": 2,
+    "sepulchre_floor_3": 3,
+    "sepulchre_floor_4": 4,
+    "sepulchre_floor_5": 5,
+    "grand_hallowed_coffin": 6,
+    "hunter_rumour": 7
+  },
+  "signals": [
+    {
+      "message": "You have completed Floor 3 of the Hallowed Sepulchre! Total completions: 1,234.",
+      "activity": "sepulchre_floor_3",
+      "count": 1234
+    },
+    {
+      "message": "You have opened the Grand Hallowed Coffin 1 time!",
+      "activity": "grand_hallowed_coffin",
+      "count": 1
+    },
+    {
+      "message": "You have completed 42 rumours for the Hunter Guild.",
+      "activity": "hunter_rumour",
+      "count": 42
+    },
+    {
+      "message": "You have completed 1 rumour for the Hunter Guild.",
+      "activity": "hunter_rumour",
+      "count": 1
+    },
+    {
+      "message": "You have completed Floor 6 of the Hallowed Sepulchre! Total completions: 1.",
+      "activity": null
+    },
+    {
+      "message": "You have completed 1,2 rumours for the Hunter Guild.",
+      "activity": null
+    },
+    {
+      "message": "You have completed 2147483648 rumours for the Hunter Guild.",
+      "activity": null
+    },
+    {
+      "message": "You have completed 0 rumours for the Hunter Guild.",
+      "activity": null
+    },
+    {
+      "message": "Bob: You have completed 42 rumours for the Hunter Guild.",
+      "activity": null
+    },
+    {
+      "message": "You have made 7 offerings.",
+      "activity": null
+    },
+    {
+      "message": "You found some loot:",
+      "activity": null
+    }
+  ]
+}
