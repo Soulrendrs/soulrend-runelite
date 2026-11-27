@@ -175,6 +175,28 @@ public class BingoSidebarLayoutTest {
     }
 
     @Test
+    public void usefulItemContributionsUseItemsNotSets() throws Exception {
+        SwingUtilities.invokeAndWait(() -> {
+            var tile = new com.google.gson.Gson().fromJson(
+                "{\"scope\":\"team\",\"status\":\"open\",\"value\":\"2\",\"target\":\"2\","
+                + "\"unit\":\"sets\",\"value_amount\":2,\"target_amount\":2,\"personal_useful_items\":1,"
+                + "\"collaboration\":{\"minimum_players\":3,\"qualifying_players\":2,\"mode\":\"useful_items\"}}",
+                BingoApiClient.BoardTile.class);
+            var card = SoulrendSidebarPanel.bingoCard(Color.GREEN);
+            SoulrendSidebarPanel.addBingoProgress(card, tile, "In progress", "Team", Color.GREEN);
+            assertEquals(5, card.getComponentCount());
+            assertTrue(((JLabel) card.getComponent(1)).getText().contains("2 / 2 sets"));
+            assertEquals("2 / 3 teammates · item each", ((JLabel) card.getComponent(3)).getText());
+            assertEquals("You · 1 items", ((JLabel) card.getComponent(4)).getText());
+            tile.status = "locked";
+            assertNull(SoulrendSidebarPanel.collaborationProgressText(tile));
+            assertFalse(SoulrendSidebarPanel.hasPersonalProgress(tile));
+            assertEquals(" completions", BingoApiClient.unitSuffix("completions"));
+            assertEquals(" clears", BingoApiClient.unitSuffix("clears"));
+        });
+    }
+
+    @Test
     public void scrollRestorationClampsWhenObjectivesDisappear() throws Exception {
         SwingUtilities.invokeAndWait(() -> {
             var viewport = new javax.swing.JViewport();
