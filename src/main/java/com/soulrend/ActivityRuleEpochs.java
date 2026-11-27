@@ -7,7 +7,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
-/** Client-thread-only, per eligible tile and activity baseline. No raw chat storage. */
+/** Per eligible tile and activity baseline; rule refresh and client observations share a lock. */
 final class ActivityRuleEpochs {
     static final class Entry {
         final int event, tile;
@@ -28,7 +28,7 @@ final class ActivityRuleEpochs {
     private String session, character;
     private final Map<String, Map<Entry, ActivityObjectiveSignals.ConsecutiveCounter>> counters = new HashMap<>();
 
-    Set<Entry> observe(String session, String character, ActivityObjectiveSignals.Signal signal, List<Entry> entries) {
+    synchronized Set<Entry> observe(String session, String character, ActivityObjectiveSignals.Signal signal, List<Entry> entries) {
         if (!Objects.equals(this.session, session) || !Objects.equals(this.character, character)) reset();
         this.session = session;
         this.character = character;
@@ -42,15 +42,24 @@ final class ActivityRuleEpochs {
         perActivity.keySet().retainAll(allowed);
         var accepted = new HashSet<Entry>();
         for (var entry : allowed) {
-            if (entry == null || entry.event <= 0 || entry.tile <= 0 || entry.epoch == null
-                || !entry.epoch.matches("[A-Za-z0-9_-]{1,80}")) continue;
+            if (entry == null || entry.event <= 0 || entry.tile <= 0 || !ActivityEvidenceContract.validEpoch(entry.epoch)) continue;
             if (perActivity.computeIfAbsent(entry, k -> new ActivityObjectiveSignals.ConsecutiveCounter()).observe(signal))
                 accepted.add(entry);
         }
         return accepted;
     }
 
-    void reset() {
+    /** A successful rule refresh must remove absent entries even if no signal arrived. */
+    synchronized void retain(String session, String character, Set<Entry> allowed) {
+        if (!Objects.equals(this.session, session) || !Objects.equals(this.character, character)) {
+            reset();
+            return;
+        }
+        for (var perActivity : counters.values()) perActivity.keySet().retainAll(allowed);
+        counters.values().removeIf(Map::isEmpty);
+    }
+
+    synchronized void reset() {
         counters.clear();
         session = character = null;
     }
