@@ -14,6 +14,7 @@ final class CombatRunTracker {
         final String activity;
         final String difficulty;
         final int durationCs;
+        final int counter;
         final Integer ownDeaths;
         final Integer raidLevel;
 
@@ -23,6 +24,7 @@ final class CombatRunTracker {
             this.activity = completion.activity;
             this.difficulty = completion.difficulty;
             this.durationCs = completion.durationCs;
+            this.counter = completion.counter;
             this.ownDeaths = ownDeaths;
             this.raidLevel = raidLevel;
         }
