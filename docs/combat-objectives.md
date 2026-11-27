@@ -57,3 +57,11 @@ secret/final visibility. Verify concurrent replay, changed accounts, rejection,
 late capture, team/solo, all relevant game modes, shared ownership, manual
 review, browser editor and real client smoke tests before activation.
 No changes to production configuration.
+
+## Branch implementation status
+CombatCompletionParser and CombatRunTracker are isolated Java helpers. The
+latter consumes a verified start/end lifetime, counts only local deaths and
+invalidates on uncertain continuity; the supplied final raid level remains
+optional. No live adapter, trusted event-type subscription, capability,
+screenshot or queue integration is registered. Fixture tests do not certify
+live detection. Keep all combat automation unavailable.
