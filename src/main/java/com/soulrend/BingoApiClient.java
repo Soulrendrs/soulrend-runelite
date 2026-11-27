@@ -493,9 +493,14 @@ public class BingoApiClient {
     }
 
     private String evidenceUrl(int eventId, String character, boolean batchCapable) {
+        return evidenceUrl(eventId, character, batchCapable, false);
+    }
+
+    private String evidenceUrl(int eventId, String character, boolean batchCapable, boolean activityCapable) {
         var url = HttpUrl.parse(authUrl("/api/runelite/v1/events/" + eventId + "/evidence")).newBuilder()
             .addQueryParameter("character", character);
         if (batchCapable) url.addQueryParameter("item_batch", "2");
+        if (activityCapable) url.addQueryParameter("activity", "1");
         return url.build().toString();
     }
 
@@ -531,7 +536,11 @@ public class BingoApiClient {
             .addFormDataPart("tile", String.valueOf(proof.tileId))
             .addFormDataPart("capture_id", proof.runeliteCaptureId)
             .addFormDataPart("captured_at", java.time.Instant.ofEpochMilli(proof.timestamp).toString());
-        if (proof.itemBatch != null) {
+        if (proof.activityEvidence != null) {
+            if (!ActivityEvidenceContract.validPending(proof))
+                throw new IllegalArgumentException("Invalid activity evidence");
+            body.addFormDataPart("activity_evidence", proof.activityEvidence.toString());
+        } else if (proof.itemBatch != null) {
             body.addFormDataPart("source", proof.evidenceSource)
                 .addFormDataPart("item_batch", proof.itemBatch.toString());
         } else {
@@ -550,9 +559,11 @@ public class BingoApiClient {
 
     EvidenceUpload uploadEvidence(PendingSubmissionStore.PendingSubmission proof, String token, byte[] image) throws IOException {
         boolean batch = "item_pool".equals(proof.evidenceKind) || "loot_value".equals(proof.evidenceKind);
-        if (batch != (proof.itemBatch != null))
+        boolean activity = "activity".equals(proof.evidenceKind);
+        if (batch != (proof.itemBatch != null) || activity != (proof.activityEvidence != null)
+            || (activity && (!ActivityEvidenceContract.UPLOAD_READY || !ActivityEvidenceContract.validPending(proof))))
             return new EvidenceUpload(400, null, null, null, null, null, 0);
-        return execute(httpClient, plainRequest(evidenceUrl(proof.eventId, proof.capturedRsn, batch))
+        return execute(httpClient, plainRequest(evidenceUrl(proof.eventId, proof.capturedRsn, batch, activity))
             .header("Authorization", "Bearer " + token).post(evidenceBody(proof, image)),
             (reply, data) -> {
                 String proofStatus = null;
