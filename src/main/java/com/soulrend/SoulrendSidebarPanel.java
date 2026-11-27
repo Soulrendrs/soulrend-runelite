@@ -1387,7 +1387,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
                                 var overview = bingoCard(BINGO_PURPLE);
                                 if (board.progress != null) {
                                     var progress = board.progress;
-                                    overview.add(boardText("My Objectives", BOLD, WHITE));
+                                    overview.add(boardText("Team objectives", BOLD, WHITE));
                                     if (progress.main_total != null && progress.main_completed != null
                                         && progress.main_total > 0) {
                                         overview.add(boardText(progress.main_completed + " / " + progress.main_total
@@ -1445,7 +1445,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
                     }
                 }
                 refreshObservedGains();
-                setContent(rows);
+                setContent(rows, !manual && !failed && selected == resolvedEvent);
             });
         });
     }
@@ -1530,6 +1530,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
     private void showObjectiveDetails(BingoApiClient.BoardTile tile, String status, String scope) {
         String text = status + " · " + scope;
         if (tile.target != null) text += "\n" + tile.value + " / " + tile.target + BingoApiClient.unitSuffix(tile.unit);
+        if (tile.personal_amount != null) text += "\n" + personalProgressText(tile);
         if (tile.description != null && !tile.description.isBlank()) text += "\n\n" + tile.description;
         if (visibleCombatAchievement(tile)) {
             text += tile.allow_repeat ? "\n\nThis objective allows repeat completions."
@@ -1579,10 +1580,20 @@ public class SoulrendSidebarPanel extends PluginPanel {
     static void addBingoProgress(JPanel card, BingoApiClient.BoardTile tile, String status, String scope, Color accent) {
         card.add(boardText(status, SMALL, accent));
         card.add(boardText(tile.target == null ? scope
-            : scope + " · " + tile.value + " / " + tile.target + BingoApiClient.unitSuffix(tile.unit), SMALL, BINGO_TEXT));
+            : ("solo".equals(tile.scope) ? "Solo best" : scope) + " · " + tile.value + " / " + tile.target + BingoApiClient.unitSuffix(tile.unit), SMALL, BINGO_TEXT));
         if (tile.target != null && tile.value_amount != null && tile.target_amount != null) {
             card.add(bingoMeter(tile.value_amount, tile.target_amount, accent));
         }
+        if (tile.personal_amount != null && tile.personal_amount >= 0) {
+            var personal = boardText(personalProgressText(tile), SMALL, BINGO_TEXT);
+            personal.setToolTipText("Your credited website-player progress in this event, across eligible characters. Individual item-pool totals need not add up to team progress.");
+            card.add(personal);
+        }
+    }
+
+    static String personalProgressText(BingoApiClient.BoardTile tile) {
+        return "You · " + String.format(Locale.ROOT, "%,d", tile.personal_amount)
+            + BingoApiClient.unitSuffix(tile.unit);
     }
 
     private static JProgressBar bingoMeter(long value, long target, Color accent) {
@@ -2202,13 +2213,32 @@ public class SoulrendSidebarPanel extends PluginPanel {
 
 	/** Swap the single content component and repaint. */
 	void setContent(Component component) {
+		setContent(component, false);
+	}
+
+	void setContent(Component component, boolean preserveScroll) {
 		invokeLater(() -> {
 			if (content.getComponentCount() == 1 && content.getComponent(0) == component) return;
+			JScrollPane scroll = preserveScroll
+				? (JScrollPane) SwingUtilities.getAncestorOfClass(JScrollPane.class, content) : null;
+			Point previous = scroll == null ? null : scroll.getViewport().getViewPosition();
 			content.removeAll();
 			if (component instanceof JComponent) ((JComponent) component).setAlignmentX(LEFT_ALIGNMENT);
 			content.add(component);
 			redraw(content);
+			if (scroll != null) invokeLater(() -> {
+				if (content.getComponentCount() != 1 || content.getComponent(0) != component) return;
+				restoreBingoScroll(scroll.getViewport(), previous);
+			});
 		});
+	}
+
+	static void restoreBingoScroll(JViewport viewport, Point previous) {
+		Dimension extent = viewport.getExtentSize();
+		Dimension view = viewport.getViewSize();
+		viewport.setViewPosition(new Point(
+			Math.max(0, Math.min(previous.x, view.width - extent.width)),
+			Math.max(0, Math.min(previous.y, view.height - extent.height))));
 	}
 
 	// ---- Soulrend-themed widget chrome ---------------------------------------------------------------

@@ -408,7 +408,7 @@ public class BingoApiClient {
         String name, status, value, target, scope, objective_type, metric, description, icon_path, unit;
         int item_id;
         boolean allow_repeat;
-        Long value_amount, target_amount;
+        Long value_amount, target_amount, personal_amount;
         boolean credited;
         String label() {
             if ("hidden".equals(status)) return "Hidden tile";

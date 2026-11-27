@@ -120,6 +120,45 @@ public class BingoSidebarLayoutTest {
         });
     }
 
+    @Test
+    public void personalProgressDoesNotReplaceTeamOrSoloBest() throws Exception {
+        SwingUtilities.invokeAndWait(() -> {
+            var gson = new com.google.gson.Gson();
+            var tile = gson.fromJson("{\"scope\":\"solo\",\"value\":\"7\",\"target\":\"10\","
+                + "\"value_amount\":7,\"target_amount\":10,\"personal_amount\":2,\"unit\":\"items\"}",
+                BingoApiClient.BoardTile.class);
+            var card = SoulrendSidebarPanel.bingoCard(Color.GREEN);
+            SoulrendSidebarPanel.addBingoProgress(card, tile, "In progress", "Solo", Color.GREEN);
+            assertEquals(4, card.getComponentCount());
+            assertTrue(((JLabel) card.getComponent(1)).getText().contains("Solo best"));
+            assertTrue(((JLabel) card.getComponent(3)).getText().contains("You · 2 items"));
+            card.setSize(200, card.getPreferredSize().height);
+            layout(card);
+            var personal = card.getComponent(3);
+            assertTrue(personal.getHeight() > 0);
+            assertTrue(personal.getY() + personal.getHeight() <= card.getHeight());
+            tile.personal_amount = null;
+            var older = SoulrendSidebarPanel.bingoCard(Color.GREEN);
+            SoulrendSidebarPanel.addBingoProgress(older, tile, "In progress", "Solo", Color.GREEN);
+            assertEquals(3, older.getComponentCount());
+        });
+    }
+
+    @Test
+    public void scrollRestorationClampsWhenObjectivesDisappear() throws Exception {
+        SwingUtilities.invokeAndWait(() -> {
+            var viewport = new javax.swing.JViewport();
+            viewport.setExtentSize(new java.awt.Dimension(200, 300));
+            viewport.setView(new javax.swing.JPanel());
+            viewport.setViewSize(new java.awt.Dimension(200, 1000));
+            SoulrendSidebarPanel.restoreBingoScroll(viewport, new java.awt.Point(0, 420));
+            assertEquals(420, viewport.getViewPosition().y);
+            viewport.setViewSize(new java.awt.Dimension(200, 400));
+            SoulrendSidebarPanel.restoreBingoScroll(viewport, new java.awt.Point(0, 420));
+            assertEquals(100, viewport.getViewPosition().y);
+        });
+    }
+
     private static void layout(Container container) {
         container.doLayout();
         for (var child : container.getComponents()) {
