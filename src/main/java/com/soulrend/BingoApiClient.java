@@ -404,11 +404,16 @@ public class BingoApiClient {
         int rank, points, completed;
         String team;
     }
+    static final class CollaborationProgress {
+        Integer minimum_players, qualifying_players;
+        Long minimum_each;
+    }
     static final class BoardTile {
         String name, status, value, target, scope, objective_type, metric, description, icon_path, unit;
         int item_id;
         boolean allow_repeat;
         Long value_amount, target_amount, personal_amount;
+        CollaborationProgress collaboration;
         boolean credited;
         String label() {
             if ("hidden".equals(status)) return "Hidden tile";

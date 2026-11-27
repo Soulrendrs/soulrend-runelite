@@ -1530,7 +1530,9 @@ public class SoulrendSidebarPanel extends PluginPanel {
     private void showObjectiveDetails(BingoApiClient.BoardTile tile, String status, String scope) {
         String text = status + " · " + scope;
         if (tile.target != null) text += "\n" + tile.value + " / " + tile.target + BingoApiClient.unitSuffix(tile.unit);
-        if (tile.personal_amount != null) text += "\n" + personalProgressText(tile);
+        String collaboration = collaborationProgressText(tile);
+        if (collaboration != null) text += "\n" + collaboration;
+        if (tile.personal_amount != null && tile.personal_amount >= 0) text += "\n" + personalProgressText(tile);
         if (tile.description != null && !tile.description.isBlank()) text += "\n\n" + tile.description;
         if (visibleCombatAchievement(tile)) {
             text += tile.allow_repeat ? "\n\nThis objective allows repeat completions."
@@ -1584,11 +1586,28 @@ public class SoulrendSidebarPanel extends PluginPanel {
         if (tile.target != null && tile.value_amount != null && tile.target_amount != null) {
             card.add(bingoMeter(tile.value_amount, tile.target_amount, accent));
         }
+        String collaboration = collaborationProgressText(tile);
+        if (collaboration != null) {
+            var teammates = boardText(collaboration, SMALL, BINGO_TEXT);
+            teammates.setToolTipText("Both the team target and minimum number of teammates must be confirmed by the website.");
+            card.add(teammates);
+        }
         if (tile.personal_amount != null && tile.personal_amount >= 0) {
             var personal = boardText(personalProgressText(tile), SMALL, BINGO_TEXT);
             personal.setToolTipText("Your credited website-player progress in this event, across eligible characters. Individual item-pool totals need not add up to team progress.");
             card.add(personal);
         }
+    }
+
+    static String collaborationProgressText(BingoApiClient.BoardTile tile) {
+        var rule = tile.collaboration;
+        if (!"team".equals(tile.scope) || "hidden".equals(tile.status) || "locked".equals(tile.status)
+                || rule == null || rule.minimum_players == null || rule.qualifying_players == null
+                || rule.minimum_each == null || rule.minimum_players < 2 || rule.minimum_players > 100
+                || rule.qualifying_players < 0 || rule.minimum_each < 1) return null;
+        return String.format(Locale.ROOT, "%d / %d teammates · %,d each",
+            rule.qualifying_players, rule.minimum_players, rule.minimum_each)
+            + BingoApiClient.unitSuffix(tile.unit);
     }
 
     static String personalProgressText(BingoApiClient.BoardTile tile) {

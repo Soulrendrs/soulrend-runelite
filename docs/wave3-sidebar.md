@@ -15,3 +15,11 @@ request restoration.
 No detector, consent, outbound request, scoring or screenshot changes.
 Pending: full CI and actual sidebar visual verification; popup and editor
 integration with Waves 2B/2C.
+
+
+The optional collaboration object is website-authoritative and exposes only
+minimum_players, minimum_each and qualifying_players, never teammate IDs.
+The sidebar and detail dialog show the distinct-player requirement separately
+from the team quantity bar; even a full quantity bar cannot award completion.
+Older servers omit the field, and unsupported or hidden/locked rows suppress it.
+No new game events or evidence are collected.
