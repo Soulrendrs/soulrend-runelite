@@ -42,6 +42,27 @@ public class ActivityRuleEpochsTest {
     }
 
     @Test
+    public void lifecycleInvalidationCannotReuseAnInFlightRefreshGeneration() {
+        var counters = new ActivityRuleEpochs();
+        var rule = new ActivityRuleEpochs.Entry(1, 1, "a".repeat(64));
+        long oldRefresh = counters.generation();
+        assertEquals(Set.of(), counters.observe("s", "rsn", signal(40), List.of(rule)));
+        assertTrue(counters.isCurrent(oldRefresh));
+        counters.invalidate();
+        assertFalse(counters.isCurrent(oldRefresh));
+        long newRefresh = counters.generation();
+        assertTrue(counters.isCurrent(newRefresh));
+        // Baseline-only reset does not manufacture a new authorization.
+        counters.reset();
+        assertTrue(counters.isCurrent(newRefresh));
+        assertFalse(counters.isCurrent(oldRefresh));
+        assertEquals(Set.of(), counters.observe("s", "rsn", signal(41), List.of(rule)));
+        assertEquals(Set.of(rule), counters.observe("s", "rsn", signal(42), List.of(rule)));
+        counters.invalidate();
+        assertFalse(counters.isCurrent(newRefresh));
+    }
+
+    @Test
     public void noUnknownOrUnversionedRules() {
         var rule = new ObjectiveRule();
         rule.kind = "activity";

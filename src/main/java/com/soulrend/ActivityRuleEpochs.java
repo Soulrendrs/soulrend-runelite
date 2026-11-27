@@ -26,6 +26,17 @@ final class ActivityRuleEpochs {
     }
 
     private String session, character;
+    private long generation;
+
+    synchronized long generation() { return generation; }
+
+    synchronized boolean isCurrent(long snapshotGeneration) { return generation == snapshotGeneration; }
+
+    /** Loading, hop, logout or consent reset invalidates in-flight rule refreshes. */
+    synchronized void invalidate() {
+        generation++;
+        reset();
+    }
     private final Map<String, Map<Entry, ActivityObjectiveSignals.ConsecutiveCounter>> counters = new HashMap<>();
 
     synchronized Set<Entry> observe(String session, String character, ActivityObjectiveSignals.Signal signal, List<Entry> entries) {
