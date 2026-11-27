@@ -187,10 +187,10 @@ public class BingoSidebarLayoutTest {
             assertEquals(5, card.getComponentCount());
             assertTrue(((JLabel) card.getComponent(1)).getText().contains("2 / 2 sets"));
             assertEquals("2 / 3 teammates · item each", ((JLabel) card.getComponent(3)).getText());
-            assertEquals("You · 1 items", ((JLabel) card.getComponent(4)).getText());
+            assertEquals("You · 1 item", ((JLabel) card.getComponent(4)).getText());
             tile.status = "locked";
             assertNull(SoulrendSidebarPanel.collaborationProgressText(tile));
-            assertFalse(SoulrendSidebarPanel.hasPersonalProgress(tile));
+            assertTrue(!SoulrendSidebarPanel.hasPersonalProgress(tile));
             assertEquals(" completions", BingoApiClient.unitSuffix("completions"));
             assertEquals(" clears", BingoApiClient.unitSuffix("clears"));
         });

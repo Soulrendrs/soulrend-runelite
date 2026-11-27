@@ -1623,7 +1623,8 @@ public class SoulrendSidebarPanel extends PluginPanel {
 
     static String personalProgressText(BingoApiClient.BoardTile tile) {
         if (tile.personal_useful_items != null && tile.personal_useful_items >= 0) {
-            return "You · " + String.format(Locale.ROOT, "%,d", tile.personal_useful_items) + " items";
+            return "You · " + String.format(Locale.ROOT, "%,d", tile.personal_useful_items)
+                + (tile.personal_useful_items == 1 ? " item" : " items");
         }
         return "You · " + String.format(Locale.ROOT, "%,d", tile.personal_amount)
             + BingoApiClient.unitSuffix(tile.unit);
