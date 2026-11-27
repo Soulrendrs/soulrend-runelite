@@ -407,12 +407,13 @@ public class BingoApiClient {
     static final class CollaborationProgress {
         Integer minimum_players, qualifying_players;
         Long minimum_each;
+        String mode;
     }
     static final class BoardTile {
         String name, status, value, target, scope, objective_type, metric, description, icon_path, unit;
         int item_id;
         boolean allow_repeat;
-        Long value_amount, target_amount, personal_amount;
+        Long value_amount, target_amount, personal_amount, personal_useful_items;
         CollaborationProgress collaboration;
         boolean credited;
         String label() {
@@ -422,7 +423,7 @@ public class BingoApiClient {
         }
     }
     static String unitSuffix(String unit) {
-        return unit != null && java.util.Set.of("sets", "unique items", "items", "GP", "kills", "XP", "KC").contains(unit)
+        return unit != null && java.util.Set.of("sets", "unique items", "items", "GP", "kills", "XP", "KC", "clears", "completions").contains(unit)
             ? " " + unit : "";
     }
     static boolean isBingoIconPath(String path) {
