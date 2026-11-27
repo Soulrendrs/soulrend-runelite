@@ -11,7 +11,7 @@ public class ActivityObjectiveSignalsTest {
     public void sharedVectors() throws Exception {
         try (var stream = getClass().getResourceAsStream("/runelite_activity_contract_v1.json")) {
             assertNotNull(stream);
-            var fixture = JsonParser.parseReader(new InputStreamReader(stream, StandardCharsets.UTF_8)).getAsJsonObject();
+            var fixture = new JsonParser().parse(new InputStreamReader(stream, StandardCharsets.UTF_8)).getAsJsonObject();
             var ids = fixture.getAsJsonObject("activities");
             assertEquals(ids.size(), ActivityObjectiveSignals.IDS.size());
             for (var row : ids.entrySet()) {
