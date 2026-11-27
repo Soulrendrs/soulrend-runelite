@@ -211,7 +211,9 @@ public class OutageResilienceTest
 	@Test
 	public void aPassStopsAtTheFirstFailureAndDropsPermanentRefusals()
 	{
-		NotifyOutbox outbox = new NotifyOutbox(new Gson(), () -> scheduler, () -> pool);
+		// Exercise a single synchronous pass without the zero-delay background timer
+		// racing the setup or the assertions.
+		NotifyOutbox outbox = new NotifyOutbox(new Gson(), () -> null, () -> pool);
 		List<String> tried = new ArrayList<>();
 		outbox.setSender((it, png) ->
 		{
