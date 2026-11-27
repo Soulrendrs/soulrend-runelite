@@ -186,8 +186,10 @@ public class BingoSidebarLayoutTest {
             SoulrendSidebarPanel.addBingoProgress(card, tile, "In progress", "Team", Color.GREEN);
             assertEquals(5, card.getComponentCount());
             assertTrue(((JLabel) card.getComponent(1)).getText().contains("2 / 2 sets"));
-            assertEquals("2 / 3 teammates · item each", ((JLabel) card.getComponent(3)).getText());
-            assertEquals("You · 1 item", ((JLabel) card.getComponent(4)).getText());
+            assertEquals("2 / 3 teammates · item each", SoulrendSidebarPanel.collaborationProgressText(tile));
+            assertTrue(((JLabel) card.getComponent(3)).getText().contains("2 / 3 teammates"));
+            assertEquals("You · 1 item", SoulrendSidebarPanel.personalProgressText(tile));
+            assertTrue(((JLabel) card.getComponent(4)).getText().contains("You · 1 item"));
             tile.status = "locked";
             assertNull(SoulrendSidebarPanel.collaborationProgressText(tile));
             assertTrue(!SoulrendSidebarPanel.hasPersonalProgress(tile));
