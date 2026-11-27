@@ -542,6 +542,8 @@ public class BingoApiClient {
             .addFormDataPart("capture_id", proof.runeliteCaptureId)
             .addFormDataPart("captured_at", java.time.Instant.ofEpochMilli(proof.timestamp).toString());
         if (proof.combatFact != null) {
+            if (!CombatEvidenceContract.validPending(proof))
+                throw new IllegalArgumentException("Invalid combat evidence");
             body.addFormDataPart("combat_fact", proof.combatFact);
         } else if (proof.activityEvidence != null) {
             if (!ActivityEvidenceContract.validPending(proof))
@@ -569,7 +571,7 @@ public class BingoApiClient {
         boolean activity = "activity".equals(proof.evidenceKind);
         boolean combat = "combat_clear".equals(proof.evidenceKind);
         if (batch != (proof.itemBatch != null) || activity != (proof.activityEvidence != null)
-            || combat != (proof.combatFact != null) || combat && (batch || activity || proof.combatFact.length() > 2048)
+            || combat != (proof.combatFact != null) || combat && !CombatEvidenceContract.validPending(proof)
             || (activity && (!ActivityEvidenceContract.UPLOAD_READY || !ActivityEvidenceContract.validPending(proof))))
             return new EvidenceUpload(400, null, null, null, null, null, 0);
         return execute(httpClient, plainRequest(evidenceUrl(proof.eventId, proof.capturedRsn, batch, activity, combat))

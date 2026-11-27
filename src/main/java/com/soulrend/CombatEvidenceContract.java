@@ -2,6 +2,8 @@ package com.soulrend;
 
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import com.google.gson.JsonElement;
 import java.util.Set;
 import java.util.UUID;
 
@@ -30,6 +32,36 @@ final class CombatEvidenceContract {
         fact.add("own_deaths", JsonNull.INSTANCE);
         fact.add("raid_level", JsonNull.INSTANCE);
         return fact.toString();
+    }
+
+    private static boolean integer(JsonElement value, int max) {
+        if (value == null || !value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber()
+            || !value.getAsString().matches("[1-9][0-9]{0,9}")) return false;
+        try { return value.getAsLong() <= max; }
+        catch (RuntimeException ex) { return false; }
+    }
+
+    /** Reject corrupted or mixed saved envelopes before transport. */
+    static boolean validPending(PendingSubmissionStore.PendingSubmission proof) {
+        if (proof == null || !"combat_clear".equals(proof.evidenceKind) || proof.amount != 1
+            || proof.evidenceId != 0 || !"combat".equals(proof.evidenceSource) || proof.evidenceRepeat
+            || proof.itemBatch != null || proof.activityEvidence != null || proof.combatFact == null
+            || proof.combatFact.length() > 2048 || proof.runeliteCaptureId == null) return false;
+        try {
+            var id = UUID.fromString(proof.runeliteCaptureId);
+            if (id.version() != 4 || !id.toString().equals(proof.runeliteCaptureId)) return false;
+            var fact = JsonParser.parseString(proof.combatFact).getAsJsonObject();
+            if (!fact.keySet().equals(Set.of("version", "capture_id", "activity", "difficulty",
+                "counter", "duration_cs", "own_deaths", "raid_level"))) return false;
+            if (!integer(fact.get("version"), 1) || !integer(fact.get("counter"), Integer.MAX_VALUE)
+                || !integer(fact.get("duration_cs"), 8640000)
+                || !fact.get("own_deaths").isJsonNull() || !fact.get("raid_level").isJsonNull()
+                || !fact.get("capture_id").getAsJsonPrimitive().isString()
+                || !fact.get("activity").getAsJsonPrimitive().isString()
+                || !fact.get("difficulty").getAsJsonPrimitive().isString()
+                || !id.toString().equals(fact.get("capture_id").getAsString())) return false;
+            return supported(fact.get("activity").getAsString(), fact.get("difficulty").getAsString());
+        } catch (RuntimeException ex) { return false; }
     }
 
     private CombatEvidenceContract() {}
