@@ -84,7 +84,7 @@ public class DeviceSignInTest
 		final List<String> codes = new ArrayList<>();
 		final List<DeviceSignIn.Result> results = new ArrayList<>();
 		final String url = BingoApiClient.site() + "/runelite/connect/?code=ABCD-EFGH";
-		int starts, polls;
+		int starts, pollCalls;
 		boolean browserFails;
 		String pollStatus = "pending";
 		Runnable duringPoll = () -> {};
@@ -102,7 +102,7 @@ public class DeviceSignInTest
 
 			@Override public DeviceAuthPoll authPoll(String code) {
 				assertEquals("private-device-secret", code);
-				polls++;
+				Fixture.this.pollCalls++;
 				duringPoll.run();
 				var response = new DeviceAuthPoll();
 				response.status = pollStatus;
@@ -137,7 +137,7 @@ public class DeviceSignInTest
 		assertTrue(f.flow.reopen());
 		assertEquals(List.of(f.url, f.url, f.url), f.opened);
 		assertEquals(1, f.starts);
-		assertEquals(0, f.polls);
+		assertEquals(0, f.pollCalls);
 		assertEquals(1, f.queued.size());
 		f.pollStatus = "complete";
 		f.step();
