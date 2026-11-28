@@ -66,6 +66,9 @@ public class ActivityEvidenceTransportTest {
         proof.itemBatch = new com.google.gson.JsonObject();
         assertFalse(ActivityEvidenceContract.validPending(proof));
         proof = pending();
+        proof.combatFact = "{}";
+        assertFalse(ActivityEvidenceContract.validPending(proof));
+        proof = pending();
         proof.activityEpoch = null;
         assertFalse(ActivityEvidenceContract.validPending(proof));
         proof.activityEpoch = "A".repeat(64);
