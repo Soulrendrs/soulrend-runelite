@@ -52,6 +52,18 @@ public class CombatEvidenceTransportTest {
         proof = pending();
         proof.itemBatch = new com.google.gson.JsonObject();
         assertFalse(CombatEvidenceContract.validPending(proof));
+        proof = pending();
+        proof.activityEpoch = "a".repeat(64);
+        assertFalse(CombatEvidenceContract.validPending(proof));
+        proof = pending();
+        proof.tileId = 0;
+        assertFalse(CombatEvidenceContract.validPending(proof));
+        proof = pending();
+        String originalId = proof.runeliteCaptureId;
+        String invalidVariant = "12345678-1234-4abc-0123-123456789abc";
+        proof.runeliteCaptureId = invalidVariant;
+        proof.combatFact = proof.combatFact.replace(originalId, invalidVariant);
+        assertFalse(CombatEvidenceContract.validPending(proof));
     }
 
     @Test public void sameTickAndExplicitTrustedChannelOnly() {

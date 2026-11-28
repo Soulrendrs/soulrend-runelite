@@ -10,7 +10,7 @@ final class ActivityEvidenceContract {
 
     /** Validate restored durable metadata before it could be used for transport. */
     static boolean validPending(PendingSubmissionStore.PendingSubmission proof) {
-        if (proof == null || !"activity".equals(proof.evidenceKind) || proof.itemBatch != null
+        if (proof == null || !"activity".equals(proof.evidenceKind) || proof.itemBatch != null || proof.combatFact != null
             || proof.activityEvidence == null || !validEpoch(proof.activityEpoch) || proof.amount != 1 || proof.evidenceRepeat
             || proof.runeliteCaptureId == null || proof.eventId <= 0 || proof.tileId <= 0) return false;
         try {
