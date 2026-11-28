@@ -135,6 +135,9 @@ public class SoulrendSidebarPanel extends PluginPanel {
 	/** RuneLite's shared client-lifetime scheduler — paces the sign-in flow's approval polls. */
 	final ScheduledExecutorService executor;
 	final JButton signInButton = new JButton("Connect to Soulrend");
+	final JButton signInCancel = new JButton("Cancel");
+	final JLabel signInExpiry = small("", MUTED);
+	final Timer signInTimer = new Timer(1000, e -> updateSignInCountdown());
 	final JLabel signInStatus = small("", MUTED);
 	final JPanel signInRow = new JPanel(new BorderLayout(0, 2));
 	final JLabel signInCode = new JLabel("", SwingConstants.CENTER);
@@ -259,7 +262,17 @@ public class SoulrendSidebarPanel extends PluginPanel {
 
 		// Sign-in affordance — visible whenever there is no token (see refreshSignInRow).
 		styleFlatButton(signInButton, BRAND_ORANGE);
-		signInButton.addActionListener(e -> chooseEvidenceConsent());
+		signInButton.addActionListener(e -> {
+			if (signInInFlight) {
+				var flow = signIn;
+				if (flow != null && !flow.reopen() && flow.remainingMillis() > 0)
+					setSignInStatus("Open " + SetupNudge.SITE_HOST + DeviceSignIn.LINK_PATH + " and enter the code.");
+			} else chooseEvidenceConsent();
+		});
+		styleFlatButton(signInCancel, MUTED);
+		signInCancel.addActionListener(e -> cancelSignIn());
+		signInCancel.setVisible(false);
+		signInExpiry.setVisible(false);
 		signInStatus.setVisible(false);
 		signInRow.setBackground(DARK_GRAY_COLOR);
 		signInRow.add(signInButton, NORTH);
@@ -271,7 +284,15 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		signInCode.putClientProperty("html.disable", Boolean.TRUE);
 		signInCode.setVisible(false);
 		signInRow.add(signInCode, CENTER);
-		signInRow.add(signInStatus, SOUTH);
+		var signInFooter = new JPanel(new BorderLayout(4, 2));
+		signInFooter.setBackground(DARK_GRAY_COLOR);
+		var signInActions = new JPanel(new BorderLayout(4, 0));
+		signInActions.setBackground(DARK_GRAY_COLOR);
+		signInActions.add(signInExpiry, WEST);
+		signInActions.add(signInCancel, EAST);
+		signInFooter.add(signInStatus, NORTH);
+		signInFooter.add(signInActions, SOUTH);
+		signInRow.add(signInFooter, SOUTH);
 		left(capH(signInRow)).setVisible(false);
 
 		onClick(accountLink, this::onAccountButton);
@@ -798,6 +819,10 @@ public class SoulrendSidebarPanel extends PluginPanel {
 
 	public void onActivate() {
 		onScreen = true;
+		if (signInInFlight) {
+			updateSignInCountdown();
+			signInTimer.start();
+		}
 		refreshNotificationCountIfDue();
 		refreshDeviceSessionIfDue();
 		feedRead();
@@ -814,6 +839,7 @@ public class SoulrendSidebarPanel extends PluginPanel {
         reading = false;
         nextRead = 0;
 		onScreen = false;
+		signInTimer.stop();
 		data.feedOnScreen(false);
 		autoRefresh.stop();
 		for (var v : views) v.stop();
@@ -841,10 +867,38 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		redraw(signInRow);
 	}
 
-	/** Stop a sign-in that is still polling — the plugin is shutting down. */
+	/** Stop polling on cancel or shutdown. Ignore callbacks already queued by the old flow. */
 	void cancelSignIn() {
 		var flow = signIn;
-		if (flow != null) flow.cancel();
+		if (flow == null) return;
+		flow.cancel();
+		Runnable reset = () -> {
+			if (signIn != flow) return;
+			resetSignInControls();
+			setSignInStatus("");
+			refreshSignInRow();
+		};
+		if (SwingUtilities.isEventDispatchThread()) reset.run();
+		else invokeLater(reset);
+	}
+
+	private void resetSignInControls() {
+		signIn = null;
+		signInInFlight = false;
+		signInTimer.stop();
+		signInButton.setEnabled(true);
+		signInCancel.setVisible(false);
+		signInExpiry.setVisible(false);
+		showSignInCode("");
+	}
+
+	private void updateSignInCountdown() {
+		var flow = signIn;
+		if (!signInInFlight || flow == null || !signInCode.isVisible()) return;
+		long seconds = (flow.remainingMillis() + 999) / 1000;
+		signInButton.setEnabled(seconds > 0);
+		signInExpiry.setText(String.format(Locale.ROOT, "Expires in %02d:%02d", seconds / 60, seconds % 60));
+		signInExpiry.setVisible(true);
 	}
 
 	/** Detect true remote revocation without treating temporary network failures as logout.
@@ -944,16 +998,25 @@ public class SoulrendSidebarPanel extends PluginPanel {
 		if (signInInFlight) return;
 		signInInFlight = true;
 		signInButton.setEnabled(false);
+		signInCancel.setVisible(true);
 		setSignInStatus("Starting…");
 
-		signIn = new DeviceSignIn(api, executor);
-		signIn.run(
-			line -> invokeLater(() -> setSignInStatus(line)),
-			code -> invokeLater(() -> showSignInCode(code)),
+		var flow = new DeviceSignIn(api, executor);
+		signIn = flow;
+		flow.run(
+			line -> invokeLater(() -> {
+				if (signIn == flow && !flow.cancelled) setSignInStatus(line);
+			}),
+			code -> invokeLater(() -> {
+				if (signIn != flow || flow.cancelled) return;
+				showSignInCode(code);
+				signInButton.setText("Reopen login page");
+				updateSignInCountdown();
+				if (onScreen) signInTimer.start();
+			}),
 			result -> invokeLater(() -> {
-				signInInFlight = false;
-				signInButton.setEnabled(true);
-				showSignInCode("");
+				if (signIn != flow || flow.cancelled) return;
+				resetSignInControls();
 				if (result.outcome == DeviceSignIn.Outcome.SIGNED_IN) {
 					// Storing the token fires the plugin's onConfigChanged → client reconfigure,
 					// identity stamp + greet, and a sidebar refresh.
