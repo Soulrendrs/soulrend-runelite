@@ -18,7 +18,7 @@ final class CombatEvidenceContract {
     }
 
     static String encode(UUID capture, CombatCompletionParser.Completion completion) {
-        if (capture == null || capture.version() != 4 || completion == null
+        if (capture == null || capture.version() != 4 || capture.variant() != 2 || completion == null
             || !supported(completion.activity, completion.difficulty)
             || completion.counter <= 0 || completion.durationCs <= 0 || completion.durationCs > 8640000)
             throw new IllegalArgumentException("Invalid combat occurrence");
@@ -45,11 +45,12 @@ final class CombatEvidenceContract {
     static boolean validPending(PendingSubmissionStore.PendingSubmission proof) {
         if (proof == null || !"combat_clear".equals(proof.evidenceKind) || proof.amount != 1
             || proof.evidenceId != 0 || !"combat".equals(proof.evidenceSource) || proof.evidenceRepeat
-            || proof.itemBatch != null || proof.activityEvidence != null || proof.combatFact == null
-            || proof.combatFact.length() > 2048 || proof.runeliteCaptureId == null) return false;
+            || proof.itemBatch != null || proof.activityEvidence != null || proof.activityEpoch != null || proof.combatFact == null
+            || proof.combatFact.length() > 2048 || proof.runeliteCaptureId == null
+            || proof.eventId <= 0 || proof.tileId <= 0) return false;
         try {
             var id = UUID.fromString(proof.runeliteCaptureId);
-            if (id.version() != 4 || !id.toString().equals(proof.runeliteCaptureId)) return false;
+            if (id.version() != 4 || id.variant() != 2 || !id.toString().equals(proof.runeliteCaptureId)) return false;
             var fact = new JsonParser().parse(proof.combatFact).getAsJsonObject();
             if (!fact.keySet().equals(Set.of("version", "capture_id", "activity", "difficulty",
                 "counter", "duration_cs", "own_deaths", "raid_level"))) return false;
