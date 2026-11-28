@@ -76,4 +76,130 @@ public class DeviceSignInTest
 		assertEquals(1, queued.size());
 		assertTrue(callbacks.isEmpty());
 	}
+
+	/** No network or real browser: advance the exact scheduled steps explicitly. */
+	private static final class Fixture {
+		final List<Runnable> queued = new ArrayList<>();
+		final List<String> opened = new ArrayList<>();
+		final List<String> codes = new ArrayList<>();
+		final List<DeviceSignIn.Result> results = new ArrayList<>();
+		final String url = BingoApiClient.site() + "/runelite/connect/?code=ABCD-EFGH";
+		int starts, pollCalls;
+		boolean browserFails;
+		String pollStatus = "pending";
+		Runnable duringPoll = () -> {};
+		final BingoApiClient api = new BingoApiClient(new com.google.gson.Gson(), new okhttp3.OkHttpClient()) {
+			@Override public DeviceAuthStart authStart() {
+				starts++;
+				var response = new DeviceAuthStart();
+				response.device_code = "private-device-secret";
+				response.user_code = "ABCD-EFGH";
+				response.verification_url_complete = url;
+				response.expires_in = 600;
+				response.interval = 5;
+				return response;
+			}
+
+			@Override public DeviceAuthPoll authPoll(String code) {
+				assertEquals("private-device-secret", code);
+				Fixture.this.pollCalls++;
+				duringPoll.run();
+				var response = new DeviceAuthPoll();
+				response.status = pollStatus;
+				response.token = "session";
+				return response;
+			}
+		};
+		final DeviceSignIn flow = new DeviceSignIn(api, url -> {
+			if (browserFails) throw new IllegalStateException("browser unavailable");
+			opened.add(url);
+		}, (step, delay) -> queued.add(step));
+
+		void start() {
+			flow.run(line -> {}, codes::add, results::add);
+			step();
+		}
+
+		void step() {
+			queued.remove(0).run();
+		}
+	}
+
+	@Test
+	public void reopensSameChallengeWithoutAnotherStartOrPoll() {
+		var f = new Fixture();
+		assertFalse(f.flow.reopen());
+		f.start();
+		assertEquals(List.of("ABCD-EFGH"), f.codes);
+		assertEquals(List.of(f.url), f.opened);
+		assertTrue(f.flow.remainingMillis() > 0);
+		assertTrue(f.flow.reopen());
+		assertTrue(f.flow.reopen());
+		assertEquals(List.of(f.url, f.url, f.url), f.opened);
+		assertEquals(1, f.starts);
+		assertEquals(0, f.pollCalls);
+		assertEquals(1, f.queued.size());
+		f.pollStatus = "complete";
+		f.step();
+		assertEquals(1, f.results.size());
+		assertEquals(DeviceSignIn.Outcome.SIGNED_IN, f.results.get(0).outcome);
+		assertEquals("session", f.results.get(0).token);
+		assertFalse(f.flow.reopen());
+		assertEquals(0L, f.flow.remainingMillis());
+	}
+
+	@Test
+	public void browserFailureDoesNotDiscardChallenge() {
+		var f = new Fixture();
+		f.browserFails = true;
+		f.start();
+		assertEquals(List.of("ABCD-EFGH"), f.codes);
+		assertTrue(f.results.isEmpty());
+		assertEquals(1, f.queued.size());
+		assertFalse(f.flow.reopen());
+		f.browserFails = false;
+		assertTrue(f.flow.reopen());
+		assertEquals(List.of(f.url), f.opened);
+		assertEquals(1, f.starts);
+	}
+
+	@Test
+	public void cancelDuringPollDoesNotDeliverLateToken() {
+		var f = new Fixture();
+		f.start();
+		f.pollStatus = "complete";
+		f.duringPoll = f.flow::cancel;
+		f.step();
+		assertTrue(f.results.isEmpty());
+		assertTrue(f.queued.isEmpty());
+		assertFalse(f.flow.reopen());
+		assertEquals(0L, f.flow.remainingMillis());
+	}
+
+	@Test
+	public void expiredOrForeignLinkCannotBeReopened() {
+		var f = new Fixture();
+		assertFalse(f.flow.prepareLink("https://evil.com/runelite/connect/", Long.MAX_VALUE));
+		assertTrue(f.flow.prepareLink(f.url, System.currentTimeMillis() - 1));
+		assertFalse(f.flow.reopen());
+		assertEquals(0L, f.flow.remainingMillis());
+		assertTrue(f.opened.isEmpty());
+		f.flow.cancel();
+		assertFalse(f.flow.prepareLink(f.url, Long.MAX_VALUE));
+	}
+
+	@Test
+	public void serverExpiryAndDenialClearTheLink() {
+		for (String status : List.of("expired", "denied")) {
+			var f = new Fixture();
+			f.start();
+			f.pollStatus = status;
+			f.step();
+			assertEquals(1, f.results.size());
+			assertEquals(DeviceSignIn.Outcome.valueOf(status.toUpperCase(java.util.Locale.ROOT)), f.results.get(0).outcome);
+			assertFalse(f.flow.reopen());
+			assertEquals(0L, f.flow.remainingMillis());
+			assertTrue(f.queued.isEmpty());
+		}
+	}
 }

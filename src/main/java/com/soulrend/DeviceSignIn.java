@@ -47,6 +47,41 @@ public final class DeviceSignIn {
 	final BiConsumer<Runnable, Long> scheduler;
 	// Polling runs on RuneLite's shared executor, which outlives the plugin, so stopping it is ours to do.
 	volatile boolean cancelled;
+	private volatile boolean finished;
+	private volatile PendingLink pendingLink;
+
+	@RequiredArgsConstructor
+	private static final class PendingLink {
+		final String url;
+		final long deadline;
+	}
+
+	/** Publish only a validated, live browser URL; the private device code never leaves the poll. */
+	synchronized boolean prepareLink(String url, long deadline) {
+		if (cancelled || finished || !isConfiguredHomeUrl(BingoApiClient.site(), url)) return false;
+		pendingLink = new PendingLink(url, deadline);
+		return true;
+	}
+
+	long remainingMillis() {
+		var link = pendingLink;
+		return cancelled || finished || link == null ? 0 : Math.max(0, link.deadline - System.currentTimeMillis());
+	}
+
+	/** Reopen the same approval page without requesting a new device code or poll. */
+	boolean reopen() {
+		var link = pendingLink;
+		if (cancelled || finished || link == null || System.currentTimeMillis() >= link.deadline
+			|| !isConfiguredHomeUrl(BingoApiClient.site(), link.url)) return false;
+		try {
+			browserOpener.accept(link.url);
+			return true;
+		} catch (RuntimeException e) {
+			// Keep the challenge alive so the member can retry or enter the displayed code manually.
+			log.debug("Could not open Soulrend sign-in page", e);
+			return false;
+		}
+	}
 
 	/** Production binding — real system browser + delayed steps on the shared client executor. */
 	DeviceSignIn(BingoApiClient apiClient, ScheduledExecutorService executor) {
@@ -64,6 +99,7 @@ public final class DeviceSignIn {
 
 	void start(Consumer<String> status, Consumer<String> displayCode, Consumer<Result> done) {
 		var start = apiClient.authStart();
+		if (cancelled || finished) return;
 		if (start == null || start.device_code == null || start.device_code.isEmpty()
 			|| start.user_code == null || start.user_code.isBlank()) {
 			fail(status, done, "Couldn't reach " + SetupNudge.SITE_HOST + " — check your connection and try again.", Outcome.UNAVAILABLE);
@@ -80,16 +116,13 @@ public final class DeviceSignIn {
 			fail(status, done, "Sign-in blocked — the site returned a suspicious login page.", Outcome.UNAVAILABLE);
 			return;
 		}
-		// The address is on screen whether or not the browser opened. We can't tell the difference
-		// (see browse), and the failure mode of assuming success is a player staring at a code with
-		// nowhere to type it — while the cost of saying both is one extra clause.
-		browserOpener.accept(url);
-		displayCode.accept(start.user_code);
-		status.accept("Enter this code at " + SetupNudge.SITE_HOST + LINK_PATH);
-
 		var intervalMs = Math.max(1, start.interval > 0 ? start.interval : DEFAULT_INTERVAL_S) * 1000L;
 		var deadline = System.currentTimeMillis()
 			+ (start.expires_in > 0 ? start.expires_in : DEFAULT_EXPIRES_S) * 1000L;
+		if (!prepareLink(url, deadline)) return;
+		displayCode.accept(start.user_code);
+		status.accept("Enter this code at " + SetupNudge.SITE_HOST + LINK_PATH);
+		reopen();
 		poll(status, done, start.device_code, intervalMs, deadline);
 	}
 
@@ -101,14 +134,18 @@ public final class DeviceSignIn {
 			return;
 		}
 		schedule(() -> {
+			if (System.currentTimeMillis() >= deadline) {
+				fail(status, done, "The code expired — try again.", Outcome.EXPIRED);
+				return;
+			}
 			var nextIntervalMs = intervalMs;
 			var poll = apiClient.authPoll(deviceCode);
+			if (cancelled || finished) return;
 			if (poll != null && poll.status != null) {
 				switch (poll.status) {
 					case "complete":
 						if (poll.token != null && !poll.token.isEmpty()) {
-							status.accept("Authorization approved. Completing connection…");
-							done.accept(new Result(Outcome.SIGNED_IN, poll.token));
+							finish(status, done, "Authorization approved. Completing connection…", new Result(Outcome.SIGNED_IN, poll.token));
 						} else fail(status, done, "Sign-in did not return a session. Try again.", Outcome.UNAVAILABLE);
 						return;
 					case "denied":
@@ -130,19 +167,32 @@ public final class DeviceSignIn {
 
 	/** Schedule a flow step; an escaped {@link RuntimeException} would otherwise vanish inside the
 	 * executor, so surface it as the terminal failure. */
-	static void fail(Consumer<String> status, Consumer<Result> done, String message, Outcome outcome) {
+	void fail(Consumer<String> status, Consumer<Result> done, String message, Outcome outcome) {
+		finish(status, done, message, new Result(outcome, null));
+	}
+
+	private synchronized boolean finishOnce() {
+		if (cancelled || finished) return false;
+		finished = true;
+		pendingLink = null;
+		return true;
+	}
+
+	private void finish(Consumer<String> status, Consumer<Result> done, String message, Result result) {
+		if (!finishOnce()) return;
 		status.accept(message);
-		done.accept(new Result(outcome, null));
+		done.accept(result);
 	}
 
 	/** Stop polling: any step not yet run is skipped and the callbacks never fire. */
-	void cancel() {
+	synchronized void cancel() {
 		cancelled = true;
+		pendingLink = null;
 	}
 
 	void schedule(Runnable step, long delayMs, Consumer<String> status, Consumer<Result> done) {
 		scheduler.accept(() -> {
-			if (cancelled) return;
+			if (cancelled || finished) return;
 			try {
 				step.run();
 			} catch (RuntimeException e) {
